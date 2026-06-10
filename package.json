@@ -20,28 +20,18 @@
     "ci": "npm run lint && npm run test"
   },
   "dependencies": {
-    "@listam/backend": "file:../listam-mobile/packages/backend",
-    "@listam/client": "file:../listam-mobile/packages/client",
-    "@listam/domain": "file:../listam-mobile/packages/domain",
-    "@listam/grocery": "file:../listam-mobile/packages/grocery",
-    "@listam/i18n": "file:../listam-mobile/packages/i18n",
-    "@listam/logging": "file:../listam-mobile/packages/logging",
-    "@listam/protocol": "file:../listam-mobile/packages/protocol",
-    "@listam/secrets": "file:../listam-mobile/packages/secrets"
+    "@listam/backend": "^0.8.0",
+    "@listam/client": "^0.8.0",
+    "@listam/domain": "^0.7.0",
+    "@listam/grocery": "^0.7.0",
+    "@listam/i18n": "^0.9.0",
+    "@listam/logging": "^0.7.0",
+    "@listam/protocol": "^0.7.0",
+    "@listam/secrets": "^0.7.0"
   },
   "devDependencies": {
     "eslint": "^9.39.1",
     "hyperdht": "^6.27.0",
     "typescript-eslint": "^8.46.4"
-  },
-  "overrides": {
-    "@listam/backend": "file:../listam-mobile/packages/backend",
-    "@listam/client": "file:../listam-mobile/packages/client",
-    "@listam/domain": "file:../listam-mobile/packages/domain",
-    "@listam/grocery": "file:../listam-mobile/packages/grocery",
-    "@listam/i18n": "file:../listam-mobile/packages/i18n",
-    "@listam/logging": "file:../listam-mobile/packages/logging",
-    "@listam/protocol": "file:../listam-mobile/packages/protocol",
-    "@listam/secrets": "file:../listam-mobile/packages/secrets"
   }
 }
