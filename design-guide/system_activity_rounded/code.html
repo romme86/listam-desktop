@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en" style=""><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Activity</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "surface-dim": "#dbdad9",
+                        "secondary": "#5d5f5f",
+                        "on-error": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "on-background": "#1b1c1c",
+                        "outline-variant": "#cfc4c5",
+                        "on-surface-variant": "#4c4546",
+                        "secondary-fixed-dim": "#c6c6c7",
+                        "on-tertiary-container": "#718e00",
+                        "primary-fixed": "#e2e2e2",
+                        "tertiary-fixed": "#c3f400",
+                        "surface-tint": "#5e5e5e",
+                        "on-primary": "#ffffff",
+                        "tertiary-fixed-dim": "#abd600",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "inverse-surface": "#303031",
+                        "primary-container": "#1b1b1b",
+                        "background": "#fbf9f9",
+                        "surface": "#fbf9f9",
+                        "surface-container-highest": "#e3e2e2",
+                        "on-primary-container": "#848484",
+                        "on-primary-fixed-variant": "#474747",
+                        "surface-variant": "#e3e2e2",
+                        "surface-container-high": "#e9e8e7",
+                        "surface-container-lowest": "#ffffff",
+                        "on-secondary-fixed": "#1a1c1c",
+                        "on-primary-fixed": "#1b1b1b",
+                        "tertiary-container": "#161e00",
+                        "inverse-primary": "#c6c6c6",
+                        "surface-container": "#efeded",
+                        "on-secondary-fixed-variant": "#454747",
+                        "error-container": "#ffdad6",
+                        "on-surface": "#1b1c1c",
+                        "surface-bright": "#fbf9f9",
+                        "on-tertiary-fixed-variant": "#3c4d00",
+                        "on-secondary": "#ffffff",
+                        "surface-container-low": "#f5f3f3",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-fixed": "#e2e2e2",
+                        "tertiary": "#000000",
+                        "outline": "#7e7576",
+                        "error": "#ba1a1a",
+                        "on-secondary-container": "#5f6161",
+                        "primary": "#000000",
+                        "secondary-container": "#dcdddd",
+                        "on-tertiary-fixed": "#161e00"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "section-gap": "4rem",
+                        "gutter-base": "2rem",
+                        "sidebar-width": "240px",
+                        "element-gap": "1rem"
+                    },
+                    "fontFamily": {
+                        "label-md": ["JetBrains Mono"],
+                        "label-sm": ["JetBrains Mono"],
+                        "headline-sm": ["Geist"],
+                        "body-lg": ["Geist"],
+                        "body-md": ["Geist"]
+                    },
+                    "fontSize": {
+                        "label-md": ["12px", { "lineHeight": "16px", "fontWeight": "500" }],
+                        "label-sm": ["10px", { "lineHeight": "14px", "fontWeight": "500" }],
+                        "headline-sm": ["14px", { "lineHeight": "20px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body { font-family: 'Geist', sans-serif; background-color: #fbf9f9; color: #1b1c1c; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .material-symbols-outlined.fill { font-variation-settings: 'FILL' 1; }
+    </style>
+</head>
+<body class="bg-background text-on-background min-h-screen flex selection:bg-tertiary-fixed selection:text-primary">
+<!-- SideNavBar -->
+<nav class="hidden md:flex flex-col h-full py-section-gap bg-surface-container-low dark:bg-surface-container-low fixed h-full w-[240px] left-0 top-0">
+<div class="flex flex-col w-full">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 gap-4" href="#">
+<span class="material-symbols-outlined text-lg">list_alt</span>
+<span class="font-label-md text-label-md">Lists</span>
+</a>
+<a class="flex items-center w-full bg-primary dark:bg-primary text-tertiary-fixed dark:text-tertiary-fixed font-bold px-gutter-base py-3 gap-4 opacity-90" href="#">
+<span class="material-symbols-outlined text-lg">analytics</span>
+<span class="font-label-md text-label-md">Activity</span>
+</a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 gap-4" href="#">
+<span class="material-symbols-outlined text-lg">devices</span>
+<span class="font-label-md text-label-md">Peers &amp; Devices</span>
+</a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 gap-4" href="#">
+<span class="material-symbols-outlined text-lg">lock</span>
+<span class="font-label-md text-label-md">Vault</span>
+</a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 gap-4" href="#">
+<span class="material-symbols-outlined text-lg">terminal</span>
+<span class="font-label-md text-label-md">Logs</span>
+</a>
+</div>
+<div class="mt-auto px-gutter-base">
+<div class="w-8 h-8 rounded-full bg-secondary-container overflow-hidden">
+</div>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="w-full md:pl-sidebar-width min-h-screen">
+<div class="max-w-[800px] mx-auto px-4 md:px-12 py-12 md:py-section-gap">
+<header class="mb-16">
+<h2 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest opacity-50">Activity Feed</h2>
+</header>
+<div class="flex flex-col gap-12">
+<!-- Activity Item 1 -->
+<div class="grid grid-cols-12 gap-4 items-start group rounded-lg">
+<div class="col-span-12 md:col-span-3">
+<span class="font-label-sm text-label-sm text-secondary block mt-1">JUST NOW</span>
+</div>
+<div class="col-span-12 md:col-span-9 flex gap-6">
+<div class="w-3 h-3 bg-tertiary-fixed rounded-lg mt-1.5 flex-shrink-0"></div>
+<div>
+<h3 class="font-body-md text-body-md text-primary font-bold">List Synced</h3>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1 max-w-[500px]">Node 'Gamma-9' successfully completed two-way state reconciliation for 'Q3 Deliverables'. 4 items updated.</p>
+</div>
+</div>
+</div>
+<!-- Activity Item 2 -->
+<div class="grid grid-cols-12 gap-4 items-start group rounded-lg">
+<div class="col-span-12 md:col-span-3">
+<span class="font-label-sm text-label-sm text-secondary block mt-1">12 MIN AGO</span>
+</div>
+<div class="col-span-12 md:col-span-9 flex gap-6">
+<div class="w-3 h-3 bg-primary rounded-lg mt-1.5 flex-shrink-0 opacity-20"></div>
+<div>
+<h3 class="font-body-md text-body-md text-primary font-bold">Peer Joined</h3>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1 max-w-[500px]">Device fingerprint `e7a9...f2b1` authenticated and added to trusted mesh network.</p>
+</div>
+</div>
+</div>
+<!-- Activity Item 3 -->
+<div class="grid grid-cols-12 gap-4 items-start group rounded-lg">
+<div class="col-span-12 md:col-span-3">
+<span class="font-label-sm text-label-sm text-secondary block mt-1">45 MIN AGO</span>
+</div>
+<div class="col-span-12 md:col-span-9 flex gap-6">
+<div class="w-3 h-3 bg-primary rounded-lg mt-1.5 flex-shrink-0 opacity-20"></div>
+<div>
+<h3 class="font-body-md text-body-md text-primary font-bold">Item Added</h3>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1 max-w-[500px]">New entry 'Review Architecture Specs' appended to 'Daily Focus' by local client.</p>
+</div>
+</div>
+</div>
+<!-- Activity Item 4 -->
+<div class="grid grid-cols-12 gap-4 items-start group rounded-lg">
+<div class="col-span-12 md:col-span-3">
+<span class="font-label-sm text-label-sm text-secondary block mt-1">2 HRS AGO</span>
+</div>
+<div class="col-span-12 md:col-span-9 flex gap-6">
+<div class="w-3 h-3 bg-tertiary-fixed rounded-lg mt-1.5 flex-shrink-0"></div>
+<div>
+<h3 class="font-body-md text-body-md text-primary font-bold">Device Paired</h3>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1 max-w-[500px]">Secure handshake completed with 'Mobile-Alpha'. Encryption keys exchanged.</p>
+</div>
+</div>
+</div>
+<!-- Activity Item 5 -->
+<div class="grid grid-cols-12 gap-4 items-start group rounded-lg">
+<div class="col-span-12 md:col-span-3">
+<span class="font-label-sm text-label-sm text-secondary block mt-1">YESTERDAY</span>
+</div>
+<div class="col-span-12 md:col-span-9 flex gap-6">
+<div class="w-3 h-3 bg-error rounded-lg mt-1.5 flex-shrink-0"></div>
+<div>
+<h3 class="font-body-md text-body-md text-primary font-bold">Sync Failed</h3>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1 max-w-[500px]">Connection timeout reaching 'Storage-Beta'. Retrying payload transmission in background.</p>
+</div>
+</div>
+</div>
+</div>
+<div class="mt-16 text-center md:text-left">
+<button class="font-label-md text-label-md bg-surface-container-highest text-primary px-6 py-3 hover:bg-primary hover:text-white transition-colors duration-200 rounded-lg">LOAD OLDER</button>
+</div>
+</div>
+</main>
+<!-- Mobile Navigation Drawer Trigger (Hidden on Desktop) -->
+<div class="md:hidden fixed bottom-6 right-6 z-50">
+<button class="w-12 h-12 bg-primary text-white rounded-full flex items-center justify-center shadow-lg" onclick="document.getElementById('mobile-nav').classList.toggle('hidden')">
+<span class="material-symbols-outlined">menu</span>
+</button>
+</div>
+<!-- Mobile Nav Overlay -->
+<div class="hidden fixed inset-0 bg-background z-40 flex flex-col pt-20 px-6" id="mobile-nav">
+<button class="absolute top-6 right-6 text-primary" onclick="document.getElementById('mobile-nav').classList.add('hidden')">
+<span class="material-symbols-outlined">close</span>
+</button>
+<h1 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest mb-12">Personal Ops</h1>
+<div class="flex flex-col gap-8">
+<a class="font-body-lg text-body-lg text-secondary" href="#">Lists</a>
+<a class="font-body-lg text-body-lg text-primary font-bold flex items-center gap-3" href="#">
+<div class="w-2 h-2 bg-tertiary-fixed"></div> Activity
+            </a>
+<a class="font-body-lg text-body-lg text-secondary" href="#">Peers &amp; Devices</a>
+<a class="font-body-lg text-body-lg text-secondary" href="#">Vault</a>
+<a class="font-body-lg text-body-lg text-secondary" href="#">Logs</a>
+</div>
+</div>
+</body></html>

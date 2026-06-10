@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Listam</title>
+    <link rel="stylesheet" href="./app.css" />
+    <script type="importmap">
+    {
+        "imports": {
+            "@listam/protocol": "./node_modules/@listam/protocol/index.mjs",
+            "@listam/domain": "./node_modules/@listam/domain/index.mjs",
+            "@listam/domain/list-reducer": "./node_modules/@listam/domain/list-reducer.mjs",
+            "@listam/domain/identity": "./node_modules/@listam/domain/identity.mjs",
+            "@listam/i18n": "./node_modules/@listam/i18n/index.mjs",
+            "@listam/grocery": "./node_modules/@listam/grocery/index.mjs",
+            "@listam/logging": "./node_modules/@listam/logging/index.mjs"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="app"></div>
+    <script type="module" src="./src/main.mjs"></script>
+</body>
+</html>

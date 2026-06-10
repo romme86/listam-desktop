@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+
+<html lang="en" style=""><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Vault - Personal Ops</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&amp;family=Geist:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "surface-dim": "#dbdad9",
+                        "secondary": "#5d5f5f",
+                        "on-error": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "on-background": "#1b1c1c",
+                        "outline-variant": "#cfc4c5",
+                        "on-surface-variant": "#4c4546",
+                        "secondary-fixed-dim": "#c6c6c7",
+                        "on-tertiary-container": "#718e00",
+                        "primary-fixed": "#e2e2e2",
+                        "tertiary-fixed": "#c3f400",
+                        "surface-tint": "#5e5e5e",
+                        "on-primary": "#ffffff",
+                        "tertiary-fixed-dim": "#abd600",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "inverse-surface": "#303031",
+                        "primary-container": "#1b1b1b",
+                        "background": "#fbf9f9",
+                        "surface": "#fbf9f9",
+                        "surface-container-highest": "#e3e2e2",
+                        "on-primary-container": "#848484",
+                        "on-primary-fixed-variant": "#474747",
+                        "surface-variant": "#e3e2e2",
+                        "surface-container-high": "#e9e8e7",
+                        "surface-container-lowest": "#ffffff",
+                        "on-secondary-fixed": "#1a1c1c",
+                        "on-primary-fixed": "#1b1b1b",
+                        "tertiary-container": "#161e00",
+                        "inverse-primary": "#c6c6c6",
+                        "surface-container": "#efeded",
+                        "on-secondary-fixed-variant": "#454747",
+                        "error-container": "#ffdad6",
+                        "on-surface": "#1b1c1c",
+                        "surface-bright": "#fbf9f9",
+                        "on-tertiary-fixed-variant": "#3c4d00",
+                        "on-secondary": "#ffffff",
+                        "surface-container-low": "#f5f3f3",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-fixed": "#e2e2e2",
+                        "tertiary": "#000000",
+                        "outline": "#7e7576",
+                        "error": "#ba1a1a",
+                        "on-secondary-container": "#5f6161",
+                        "primary": "#000000",
+                        "secondary-container": "#dcdddd",
+                        "on-tertiary-fixed": "#161e00"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "section-gap": "4rem",
+                        "gutter-base": "2rem",
+                        "sidebar-width": "240px",
+                        "element-gap": "1rem"
+                    },
+                    "fontFamily": {
+                        "label-md": ["JetBrains Mono"],
+                        "label-sm": ["JetBrains Mono"],
+                        "headline-sm": ["Geist"],
+                        "body-lg": ["Geist"],
+                        "body-md": ["Geist"]
+                    },
+                    "fontSize": {
+                        "label-md": ["12px", { "lineHeight": "16px", "fontWeight": "500" }],
+                        "label-sm": ["10px", { "lineHeight": "14px", "fontWeight": "500" }],
+                        "headline-sm": ["14px", { "lineHeight": "20px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body { background-color: #fbf9f9; } /* fallback */
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body-md text-body-md antialiased flex">
+<!-- SideNavBar (Shared Component) -->
+<nav class="fixed h-full w-[240px] left-0 top-0 bg-surface-container-low dark:bg-surface-container-low flex flex-col h-full py-section-gap z-50">
+<!-- Header -->
+<!-- Navigation Links -->
+<div class="flex flex-col w-full font-label-md text-label-md text-primary dark:text-primary">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 0;">list_alt</span>
+                Lists
+            </a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 0;">analytics</span>
+                Activity
+            </a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 0;">devices</span>
+                Peers &amp; Devices
+            </a>
+<!-- ACTIVE STATE -->
+<a class="flex items-center w-full bg-primary dark:bg-primary text-tertiary-fixed dark:text-tertiary-fixed font-bold px-gutter-base py-3 opacity-90" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 1;">lock</span>
+                Vault
+            </a>
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 0;">terminal</span>
+                Logs
+            </a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="ml-[240px] w-full min-h-screen px-section-gap py-section-gap">
+<!-- Header -->
+<header class="mb-section-gap">
+<h2 class="font-headline-sm text-headline-sm text-primary tracking-widest uppercase">Vault</h2>
+</header>
+<!-- Precision Minimalist Layout: Whitespace grouping, no borders -->
+<div class="flex flex-col gap-section-gap max-w-4xl">
+<!-- Block 1: Secure Storage Status -->
+<section class="flex flex-col gap-element-gap">
+<h3 class="font-label-md text-label-md text-secondary mb-4">SECURE STORAGE STATUS</h3>
+<!-- Data Row 1 -->
+<div class="grid grid-cols-[200px_1fr_120px] items-center py-2">
+<div class="font-body-md text-body-md text-primary">Encryption Keys</div>
+<div class="font-label-md text-label-md text-secondary tracking-wider">RSA-4096 / ED25519</div>
+<div class="flex items-center justify-end gap-2 font-label-md text-label-md text-primary bg-surface-container rounded-[8px] px-3 py-1 justify-self-end w-fit">
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
+                        Secure
+                    </div>
+</div>
+<!-- Data Row 2 -->
+<div class="grid grid-cols-[200px_1fr_120px] items-center py-2">
+<div class="font-body-md text-body-md text-primary">Writer Keys</div>
+<div class="font-label-md text-label-md text-secondary tracking-wider">LOCAL_STORE_V2</div>
+<div class="flex items-center justify-end gap-2 font-label-md text-label-md text-primary bg-surface-container rounded-[8px] px-3 py-1 justify-self-end w-fit">
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
+                        Active
+                    </div>
+</div>
+<!-- Data Row 3 -->
+<div class="grid grid-cols-[200px_1fr_120px] items-center py-2">
+<div class="font-body-md text-body-md text-primary">Owner-Control Tokens</div>
+<div class="font-label-md text-label-md text-secondary tracking-wider">JWT_LIFETIME_NONCE</div>
+<div class="flex items-center justify-end gap-2 font-label-md text-label-md text-primary bg-surface-container rounded-[8px] px-3 py-1 justify-self-end w-fit">
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
+                        Active
+                    </div>
+</div>
+</section>
+<!-- Block 2: Loyalty Card Data Status -->
+<section class="flex flex-col gap-element-gap">
+<h3 class="font-label-md text-label-md text-secondary mb-4">ASSOCIATED ENTITIES</h3>
+<!-- Data Row -->
+<div class="grid grid-cols-[200px_1fr_120px] items-center py-2">
+<div class="font-body-md text-body-md text-primary">Loyalty Card Data</div>
+<div class="font-label-md text-label-md text-secondary tracking-wider">SYNCED_TO_EDGE_NODE</div>
+<div class="flex items-center justify-end gap-2 font-label-md text-label-md text-primary bg-surface-container rounded-[8px] px-3 py-1 justify-self-end w-fit">
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
+                        Secure
+                    </div>
+</div>
+</section>
+<!-- Block 3: Key Migration Status -->
+<section class="flex flex-col gap-element-gap">
+<h3 class="font-label-md text-label-md text-secondary mb-4">SYSTEM OPERATIONS</h3>
+<!-- Data Row -->
+<div class="grid grid-cols-[200px_1fr_120px] items-center py-2">
+<div class="font-body-md text-body-md text-primary">Key Migration</div>
+<div class="font-label-md text-label-md text-secondary tracking-wider">TARGET: HSM_ENCLAVE_B</div>
+<div class="flex items-center justify-end gap-2 font-label-md text-label-md text-secondary bg-surface-container rounded-[8px] px-3 py-1 justify-self-end w-fit">
+<span class="w-2 h-2 rounded-full bg-secondary-fixed-dim"></span>
+                        Pending
+                    </div>
+</div>
+</section>
+<!-- Block 4: Primary Actions -->
+<section class="flex flex-col gap-element-gap pt-8">
+<div class="grid grid-cols-[200px_1fr_120px] items-center">
+<button class="flex items-center justify-center gap-2 px-6 py-2 bg-tertiary-fixed text-primary font-label-md text-label-md rounded-[8px] hover:opacity-90 transition-opacity w-fit">
+<span class="material-symbols-outlined text-[18px]">key</span>
+            EXPORT BACKUP PHRASE
+        </button>
+</div>
+</section></div>
+</main>
+</body></html>

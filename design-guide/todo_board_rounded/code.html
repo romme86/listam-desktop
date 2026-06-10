@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Personal Ops - Todo List</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-fixed-dim": "#c6c6c7",
+                        "on-tertiary-container": "#718e00",
+                        "on-error": "#ffffff",
+                        "surface-bright": "#fbf9f9",
+                        "on-secondary-fixed": "#1a1c1c",
+                        "tertiary-fixed": "#c3f400",
+                        "surface-container-highest": "#e3e2e2",
+                        "on-tertiary-fixed-variant": "#3c4d00",
+                        "on-surface-variant": "#4c4546",
+                        "error": "#ba1a1a",
+                        "on-primary-container": "#848484",
+                        "surface-container-lowest": "#ffffff",
+                        "on-primary": "#ffffff",
+                        "surface-tint": "#5e5e5e",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "primary-fixed": "#e2e2e2",
+                        "on-primary-fixed": "#1b1b1b",
+                        "on-primary-fixed-variant": "#474747",
+                        "inverse-surface": "#303031",
+                        "secondary-container": "#dcdddd",
+                        "on-secondary-container": "#5f6161",
+                        "tertiary-fixed-dim": "#abd600",
+                        "surface-variant": "#e3e2e2",
+                        "on-surface": "#1b1c1c",
+                        "on-background": "#1b1c1c",
+                        "tertiary-container": "#161e00",
+                        "outline": "#7e7576",
+                        "on-secondary": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "primary-container": "#1b1b1b",
+                        "inverse-primary": "#c6c6c6",
+                        "background": "#fbf9f9",
+                        "secondary-fixed": "#e2e2e2",
+                        "surface-container-low": "#f5f3f3",
+                        "on-tertiary-fixed": "#161e00",
+                        "primary": "#000000",
+                        "tertiary": "#000000",
+                        "surface-container-high": "#e9e8e7",
+                        "secondary": "#5d5f5f",
+                        "on-secondary-fixed-variant": "#454747",
+                        "surface-dim": "#dbdad9",
+                        "error-container": "#ffdad6",
+                        "surface": "#fbf9f9",
+                        "surface-container": "#efeded",
+                        "outline-variant": "#cfc4c5"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter-base": "2rem",
+                        "section-gap": "4rem",
+                        "element-gap": "1rem",
+                        "sidebar-width": "240px"
+                    },
+                    "fontFamily": {
+                        "label-sm": ["JetBrains Mono"],
+                        "body-md": ["Geist"],
+                        "headline-sm": ["Geist"],
+                        "body-lg": ["Geist"],
+                        "label-md": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "label-sm": ["10px", { "lineHeight": "14px", "fontWeight": "500" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-sm": ["14px", { "lineHeight": "20px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "fontWeight": "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body {
+            background-color: theme('colors.background');
+            color: theme('colors.on-background');
+            font-family: 'Geist', sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .kanban-board {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: theme('spacing.gutter-base');
+            height: 100%;
+            overflow-x: auto;
+            padding-bottom: theme('spacing.gutter-base');
+        }
+        .task-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            padding: theme('spacing.element-gap') 0;
+        }
+        /* Hide scrollbar for clean look */
+        ::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+<style>body { background-color: theme('colors.background'); color: theme('colors.on-background'); font-family: 'Geist', sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; overflow: hidden; } .kanban-board { display: grid; grid-template-columns: repeat(3, minmax(300px, 1fr)) 300px; gap: 2rem; height: 100%; overflow-x: auto; padding-bottom: 2rem; } .task-item { display: flex; flex-direction: column; padding: 1rem; } ::-webkit-scrollbar { display: none; }</style></head>
+<body>
+<!-- SideNavBar (Shared Component) -->
+<nav class="fixed h-full w-[240px] left-0 top-0 bg-surface-container-low dark:bg-surface-container-low flex flex-col py-section-gap z-10">
+<div class="px-gutter-base mb-section-gap">
+<h1 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest">Personal Ops</h1>
+<p class="font-label-sm text-label-sm text-secondary mt-1">v1.0.4</p>
+</div>
+<ul class="flex-1 space-y-2">
+<!-- Active Tab: Lists (Mapping to Todo List intent) -->
+<li class="">
+<a class="flex items-center w-full bg-primary dark:bg-primary text-tertiary-fixed dark:text-tertiary-fixed font-bold px-gutter-base py-3 transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 1;">list_alt</span>
+<span class="font-label-md text-label-md">Lists</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 opacity-90" href="#">
+<span class="material-symbols-outlined mr-4">analytics</span>
+<span class="font-label-md text-label-md">Activity</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 opacity-90" href="#">
+<span class="material-symbols-outlined mr-4">devices</span>
+<span class="font-label-md text-label-md">Peers &amp; Devices</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 opacity-90" href="#">
+<span class="material-symbols-outlined mr-4">lock</span>
+<span class="font-label-md text-label-md">Vault</span>
+</a>
+</li>
+<li class="">
+<a class="flex items-center w-full text-secondary dark:text-secondary px-gutter-base py-3 hover:bg-secondary-container dark:hover:bg-secondary-container transition-colors duration-200 opacity-90" href="#">
+<span class="material-symbols-outlined mr-4">terminal</span>
+<span class="font-label-md text-label-md">Logs</span>
+</a>
+</li>
+</ul>
+</nav>
+<!-- Main Content Canvas -->
+<main class="ml-[240px] flex-1 flex flex-col px-section-gap py-section-gap h-full overflow-hidden">
+<!-- Header / Actions -->
+<header class="flex justify-between mb-section-gap pb-4 items-center">
+<div>
+<h2 class="font-headline-sm text-headline-sm text-secondary uppercase tracking-widest mb-2">Workspace</h2>
+<h3 class="font-body-lg text-body-lg text-primary font-bold">Todo Board</h3>
+</div>
+<button class="bg-primary text-on-primary font-label-md text-label-md px-6 py-3 rounded-[8px] hover:opacity-90 transition-opacity flex items-center gap-2">
+<span class="material-symbols-outlined">add</span>
+                Add Item
+            </button>
+</header>
+<!-- Kanban Board -->
+<div class="kanban-board gap-8">
+<!-- Column 1: To Do -->
+<div class="flex flex-col h-full">
+<div class="mb-gutter-base pb-2 border-b-2 border-primary sticky top-0 bg-background z-10">
+<h4 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest">To Do</h4>
+</div>
+<div class="flex-1 overflow-y-auto space-y-4 pb-4">
+<!-- Task 1 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start justify-between">
+<span class="font-body-md text-body-md text-primary font-bold">Review Q3 Analytics Data</span>
+<span class="w-2 h-2 rounded-full bg-surface-variant flex-shrink-0 mt-2"></span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary">Data Team</span>
+</div>
+<!-- Task 2 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start justify-between">
+<span class="font-body-md text-body-md text-primary font-bold">Update CI/CD Pipeline Config</span>
+<span class="w-2 h-2 rounded-full bg-surface-variant flex-shrink-0 mt-2"></span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary">DevOps</span>
+</div>
+<!-- Task 3 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start justify-between">
+<span class="font-body-md text-body-md text-primary font-bold">Draft Security Audit Report</span>
+<span class="w-2 h-2 rounded-full bg-error flex-shrink-0 mt-2"></span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary">Compliance • High Priority</span>
+</div>
+</div>
+</div>
+<!-- Column 2: Doing -->
+<div class="flex flex-col h-full">
+<div class="mb-gutter-base pb-2 border-b-2 border-primary sticky top-0 bg-background z-10">
+<h4 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest flex items-center gap-2">
+                        Doing
+                        <span class="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
+</h4>
+</div>
+<div class="flex-1 overflow-y-auto space-y-4 pb-4">
+<!-- Task 1 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start justify-between">
+<span class="font-body-md text-body-md text-primary font-bold">Migrate Database to v14</span>
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed flex-shrink-0 mt-2 animate-pulse"></span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary">Infrastructure</span>
+<div class="w-full bg-surface-container-high h-1 mt-2">
+<div class="bg-primary h-full" style="width: 45%;"></div>
+</div>
+</div>
+<!-- Task 2 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start justify-between">
+<span class="font-body-md text-body-md text-primary font-bold">Implement WebAuthn Login</span>
+<span class="w-2 h-2 rounded-full bg-tertiary-fixed flex-shrink-0 mt-2 animate-pulse"></span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary">Frontend • PR Open</span>
+<div class="w-full bg-surface-container-high h-1 mt-2">
+<div class="bg-primary h-full" style="width: 80%;"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Column 3: Done -->
+<div class="flex flex-col h-full opacity-60 hover:opacity-100 transition-opacity">
+<div class="mb-gutter-base pb-2 border-b-2 border-surface-tint sticky top-0 bg-background z-10">
+<h4 class="font-headline-sm text-headline-sm text-secondary uppercase tracking-widest">Done</h4>
+</div>
+<div class="flex-1 overflow-y-auto space-y-4 pb-4">
+<!-- Task 1 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start gap-3">
+<span class="material-symbols-outlined text-secondary" style="font-size: 16px;">check</span>
+<span class="font-body-md text-body-md text-secondary line-through">Setup Staging Environment</span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary ml-7">Completed: Today, 09:41</span>
+</div>
+<!-- Task 2 -->
+<div class="task-item bg-surface-container-lowest border border-outline-variant p-5 rounded-[8px] shadow-sm hover:border-primary transition-colors">
+<div class="flex items-start gap-3">
+<span class="material-symbols-outlined text-secondary" style="font-size: 16px;">check</span>
+<span class="font-body-md text-body-md text-secondary line-through">Patch Log4j Vulnerability</span>
+</div>
+<span class="font-label-sm text-label-sm text-secondary ml-7">Completed: Yesterday</span>
+</div>
+</div>
+</div>
+<!-- Column 4: Calendar Events -->
+<div class="flex flex-col h-full bg-surface-container-low ml-4 p-6 rounded-lg">
+<div class="mb-gutter-base pb-2 flex justify-between items-center sticky top-0 bg-surface-container-low z-10">
+<h4 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest flex items-center gap-2">
+<span class="material-symbols-outlined text-[18px]">calendar_today</span>
+                        Schedule
+                    </h4>
+<span class="font-label-sm text-label-sm text-secondary">Sync: GCal</span>
+</div>
+<div class="flex-1 overflow-y-auto space-y-element-gap pb-4">
+<!-- Event 1 -->
+<div class="task-item border-l-2 border-primary pl-4 py-2">
+<span class="font-label-sm text-label-sm text-secondary">10:00 - 11:30 AM</span>
+<span class="font-body-md text-body-md text-primary font-bold">Architecture Review</span>
+<div class="flex items-center gap-2 mt-1">
+<span class="material-symbols-outlined text-[14px] text-secondary">videocam</span>
+<span class="font-label-sm text-label-sm text-secondary">Meet Link</span>
+</div>
+</div>
+<!-- Event 2 -->
+<div class="task-item border-l-2 border-surface-variant pl-4 py-2 opacity-70">
+<span class="font-label-sm text-label-sm text-secondary">01:00 - 02:00 PM</span>
+<span class="font-body-md text-body-md text-primary font-bold">1:1 with Sarah</span>
+</div>
+<!-- Event 3 -->
+<div class="task-item border-l-2 border-surface-variant pl-4 py-2 opacity-70">
+<span class="font-label-sm text-label-sm text-secondary">03:30 - 04:00 PM</span>
+<span class="font-body-md text-body-md text-primary font-bold">Daily Standup</span>
+</div>
+</div>
+</div>
+</div>
+</main>
+</body></html>

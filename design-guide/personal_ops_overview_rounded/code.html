@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Personal Ops</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-fixed-dim": "#c6c6c7",
+                        "on-tertiary-container": "#718e00",
+                        "on-error": "#ffffff",
+                        "surface-bright": "#fbf9f9",
+                        "on-secondary-fixed": "#1a1c1c",
+                        "tertiary-fixed": "#c3f400",
+                        "surface-container-highest": "#e3e2e2",
+                        "on-tertiary-fixed-variant": "#3c4d00",
+                        "on-surface-variant": "#4c4546",
+                        "error": "#ba1a1a",
+                        "on-primary-container": "#848484",
+                        "surface-container-lowest": "#ffffff",
+                        "on-primary": "#ffffff",
+                        "surface-tint": "#5e5e5e",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "primary-fixed": "#e2e2e2",
+                        "on-primary-fixed": "#1b1b1b",
+                        "on-primary-fixed-variant": "#474747",
+                        "inverse-surface": "#303031",
+                        "secondary-container": "#dcdddd",
+                        "on-secondary-container": "#5f6161",
+                        "tertiary-fixed-dim": "#abd600",
+                        "surface-variant": "#e3e2e2",
+                        "on-surface": "#1b1c1c",
+                        "on-background": "#1b1c1c",
+                        "tertiary-container": "#161e00",
+                        "outline": "#7e7576",
+                        "on-secondary": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "primary-container": "#1b1b1b",
+                        "inverse-primary": "#c6c6c6",
+                        "background": "#fbf9f9",
+                        "secondary-fixed": "#e2e2e2",
+                        "surface-container-low": "#f5f3f3",
+                        "on-tertiary-fixed": "#161e00",
+                        "primary": "#000000",
+                        "tertiary": "#000000",
+                        "surface-container-high": "#e9e8e7",
+                        "secondary": "#5d5f5f",
+                        "on-secondary-fixed-variant": "#454747",
+                        "surface-dim": "#dbdad9",
+                        "error-container": "#ffdad6",
+                        "surface": "#fbf9f9",
+                        "surface-container": "#efeded",
+                        "outline-variant": "#cfc4c5"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter-base": "2rem",
+                        "section-gap": "4rem",
+                        "element-gap": "1rem",
+                        "sidebar-width": "240px"
+                    },
+                    "fontFamily": {
+                        "label-sm": ["JetBrains Mono"],
+                        "body-md": ["Geist"],
+                        "headline-sm": ["Geist"],
+                        "body-lg": ["Geist"],
+                        "label-md": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "label-sm": ["10px", { "lineHeight": "14px", "fontWeight": "500" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-sm": ["14px", { "lineHeight": "20px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "fontWeight": "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body { font-family: 'Geist', sans-serif; background-color: #fbf9f9; color: #1b1c1c; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .toggle-chip.active { background-color: #000; color: #fff; }
+        .focus-accent:focus-within { border-left: 2px solid #000; padding-left: 14px; }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden bg-background text-on-background">
+<!-- SideNavBar Component -->
+<nav class="fixed h-full w-[240px] left-0 top-0 bg-surface-container-low flex flex-col py-section-gap z-10 md:flex hidden">
+<div class="px-gutter-base mb-element-gap">
+<h1 class="font-headline-sm text-headline-sm text-primary uppercase tracking-widest">Personal Ops</h1>
+<p class="font-label-sm text-label-sm text-secondary mt-1">v1.0.4</p>
+</div>
+<div class="flex-1 overflow-y-auto mt-element-gap">
+<!-- Active Navigation Item -->
+<a class="flex items-center w-full bg-primary text-tertiary-fixed font-bold px-gutter-base py-3 transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-3 text-[18px]">list_alt</span>
+<span class="font-label-md text-label-md">Lists</span>
+<button class="ml-auto hover:text-white text-tertiary-fixed">
+<span class="material-symbols-outlined text-[16px]">add</span>
+</button>
+</a>
+<!-- Nested Lists (Semantic structure, visually indented) -->
+<div class="pl-gutter-base pr-4 py-2 flex flex-col gap-2">
+<div class="flex items-center justify-between group cursor-pointer hover:bg-secondary-container px-2 py-1 transition-colors duration-200">
+<span class="font-label-sm text-label-sm text-secondary">Groceries</span>
+<span class="material-symbols-outlined text-[14px] text-outline-variant group-hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity">edit</span>
+</div>
+<div class="flex items-center justify-between group cursor-pointer hover:bg-secondary-container px-2 py-1 transition-colors duration-200">
+<span class="font-label-sm text-label-sm text-secondary">Work Tasks</span>
+<span class="material-symbols-outlined text-[14px] text-outline-variant group-hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity">edit</span>
+</div>
+<div class="flex items-center justify-between group cursor-pointer hover:bg-secondary-container px-2 py-1 transition-colors duration-200">
+<span class="font-label-sm text-label-sm text-secondary">Travel</span>
+<span class="material-symbols-outlined text-[14px] text-outline-variant group-hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity">edit</span>
+</div>
+</div>
+<!-- Inactive Navigation Items -->
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-3 text-[18px]">analytics</span>
+<span class="font-label-md text-label-md">Activity</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-3 text-[18px]">devices</span>
+<span class="font-label-md text-label-md">Peers &amp; Devices</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-3 text-[18px]">lock</span>
+<span class="font-label-md text-label-md">Vault</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-3 text-[18px]">terminal</span>
+<span class="font-label-md text-label-md">Logs</span>
+</a>
+</div>
+<div class="px-gutter-base mt-auto">
+<img alt="User profile" class="w-8 h-8 object-cover rounded-none grayscale" data-alt="A small, square, black and white portrait photograph of a user profile avatar. The portrait is high contrast and fits the precision minimalist aesthetic." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCTMdiP1PYoWFPQAKw6aaTeC02g3wRouNYv4w6C3zAIcjEZbLccB7Z3jYM0JkaXds5GU3U_R4FwrPi531aGS_hVFY7XDlYraoUhpNsDqtuR1aghI7p-Zlp2FAXhub-C6SIRaYh4Jbsxk-eJ_Bbp_POKMJJwRR3VXtZEz5y3t7fr5CAUnqUTrzjxJ4Aa91z93SXG7Dyf4pA-LkjGiffGTYYB74UMAS9YeaeIrffvKNGn-1SYgFGvOWPP_0aPkSks5aSP1SdJGLYaKGI"/>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="flex-1 ml-[240px] overflow-y-auto px-gutter-base py-section-gap max-w-5xl mx-auto w-full">
+<!-- Header -->
+<header class="mb-section-gap flex justify-between items-end">
+<div>
+<h2 class="font-body-lg text-body-lg text-primary tracking-tight">Overview</h2>
+<div class="font-label-sm text-label-sm text-secondary mt-2 flex items-center gap-2">
+<span class="w-2 h-2 bg-tertiary-fixed inline-block"></span>
+                    SYNCED JUST NOW
+                </div>
+</div>
+<!-- Quick Add Input -->
+<div class="w-1/3 bg-surface-container-low rounded-lg px-4 py-2 flex items-center focus-accent transition-all duration-200 group">
+<span class="material-symbols-outlined text-[16px] text-secondary mr-2 group-focus-within:text-primary">add</span>
+<input class="bg-transparent border-none focus:ring-0 w-full font-label-md text-label-md text-primary placeholder-secondary p-0" placeholder="Add rapid task..." type="text"/>
+</div>
+</header>
+<!-- TODAY Section -->
+<section class="mb-section-gap">
+<h3 class="font-label-sm text-label-sm text-secondary mb-element-gap tracking-widest uppercase">TODAY</h3>
+<div class="flex flex-col gap-element-gap">
+<!-- Task Row -->
+<div class="flex items-center gap-4 group">
+<button aria-label="Mark complete" class="w-4 h-4 bg-surface-container-low hover:bg-primary transition-colors duration-200"></button>
+<span class="font-body-md text-body-md text-primary flex-1">Finalize Q3 OKR reporting deck</span>
+<span class="font-label-sm text-label-sm text-secondary bg-surface-container-highest rounded-lg px-2 py-1">Work Tasks</span>
+<span class="font-label-sm text-label-sm text-primary">14:00</span>
+</div>
+<!-- Task Row (High Priority) -->
+<div class="flex items-center gap-4 group">
+<button aria-label="Mark complete" class="w-4 h-4 bg-tertiary-fixed hover:bg-primary transition-colors duration-200"></button>
+<span class="font-body-md text-body-md text-primary flex-1 font-semibold">Pick up prescription</span>
+<span class="font-label-sm text-label-sm text-secondary bg-surface-container-highest rounded-lg px-2 py-1">Personal</span>
+<span class="font-label-sm text-label-sm text-error">ASAP</span>
+</div>
+<!-- Task Row -->
+<div class="flex items-center gap-4 group">
+<button aria-label="Mark complete" class="w-4 h-4 bg-surface-container-low hover:bg-primary transition-colors duration-200"></button>
+<span class="font-body-md text-body-md text-primary flex-1">Review flight options for NY trip</span>
+<span class="font-label-sm text-label-sm text-secondary bg-surface-container-highest rounded-lg px-2 py-1">Travel</span>
+<span class="font-label-sm text-label-sm text-primary">--</span>
+</div>
+</div>
+</section>
+<!-- UPCOMING Section -->
+<section class="mb-section-gap">
+<h3 class="font-label-sm text-label-sm text-secondary mb-element-gap tracking-widest uppercase">UPCOMING HIGHLIGHTS</h3>
+<div class="flex flex-col gap-element-gap">
+<!-- Upcoming Row -->
+<div class="flex items-start gap-4">
+<div class="font-label-sm text-label-sm text-secondary w-16 pt-1">TOMORROW</div>
+<div class="flex-1 flex flex-col gap-2">
+<div class="font-body-md text-body-md text-primary">Client presentation strategy sync</div>
+<div class="font-body-md text-body-md text-primary">Dinner with Sarah @ 19:30</div>
+</div>
+</div>
+<!-- Upcoming Row -->
+<div class="flex items-start gap-4 mt-4">
+<div class="font-label-sm text-label-sm text-secondary w-16 pt-1">THU, 12</div>
+<div class="flex-1 flex flex-col gap-2">
+<div class="font-body-md text-body-md text-primary">Submit expense reports</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+</body></html>

@@ -1,0 +1,47 @@
+{
+  "name": "listam-desktop",
+  "version": "0.12.0",
+  "private": true,
+  "type": "module",
+  "main": "index.html",
+  "pear": {
+    "name": "listam",
+    "type": "desktop",
+    "gui": {
+      "width": 1280,
+      "height": 860,
+      "backgroundColor": "#fbf9f9"
+    }
+  },
+  "scripts": {
+    "dev": "pear run --dev .",
+    "test": "node --test --test-force-exit test/*.test.mjs",
+    "lint": "eslint .",
+    "ci": "npm run lint && npm run test"
+  },
+  "dependencies": {
+    "@listam/backend": "file:../listam-mobile/packages/backend",
+    "@listam/client": "file:../listam-mobile/packages/client",
+    "@listam/domain": "file:../listam-mobile/packages/domain",
+    "@listam/grocery": "file:../listam-mobile/packages/grocery",
+    "@listam/i18n": "file:../listam-mobile/packages/i18n",
+    "@listam/logging": "file:../listam-mobile/packages/logging",
+    "@listam/protocol": "file:../listam-mobile/packages/protocol",
+    "@listam/secrets": "file:../listam-mobile/packages/secrets"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.1",
+    "hyperdht": "^6.27.0",
+    "typescript-eslint": "^8.46.4"
+  },
+  "overrides": {
+    "@listam/backend": "file:../listam-mobile/packages/backend",
+    "@listam/client": "file:../listam-mobile/packages/client",
+    "@listam/domain": "file:../listam-mobile/packages/domain",
+    "@listam/grocery": "file:../listam-mobile/packages/grocery",
+    "@listam/i18n": "file:../listam-mobile/packages/i18n",
+    "@listam/logging": "file:../listam-mobile/packages/logging",
+    "@listam/protocol": "file:../listam-mobile/packages/protocol",
+    "@listam/secrets": "file:../listam-mobile/packages/secrets"
+  }
+}

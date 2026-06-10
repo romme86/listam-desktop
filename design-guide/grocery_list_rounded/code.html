@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Precision Grocery List</title>
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<!-- Material Symbols -->
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Tailwind Config -->
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "surface-dim": "#dbdad9",
+                        "secondary": "#5d5f5f",
+                        "on-error": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "on-background": "#1b1c1c",
+                        "outline-variant": "#cfc4c5",
+                        "on-surface-variant": "#4c4546",
+                        "secondary-fixed-dim": "#c6c6c7",
+                        "on-tertiary-container": "#718e00",
+                        "primary-fixed": "#e2e2e2",
+                        "tertiary-fixed": "#c3f400",
+                        "surface-tint": "#5e5e5e",
+                        "on-primary": "#ffffff",
+                        "tertiary-fixed-dim": "#abd600",
+                        "primary-fixed-dim": "#c6c6c6",
+                        "inverse-surface": "#303031",
+                        "primary-container": "#1b1b1b",
+                        "background": "#fbf9f9",
+                        "surface": "#fbf9f9",
+                        "surface-container-highest": "#e3e2e2",
+                        "on-primary-container": "#848484",
+                        "on-primary-fixed-variant": "#474747",
+                        "surface-variant": "#e3e2e2",
+                        "surface-container-high": "#e9e8e7",
+                        "surface-container-lowest": "#ffffff",
+                        "on-secondary-fixed": "#1a1c1c",
+                        "on-primary-fixed": "#1b1b1b",
+                        "tertiary-container": "#161e00",
+                        "inverse-primary": "#c6c6c6",
+                        "surface-container": "#efeded",
+                        "on-secondary-fixed-variant": "#454747",
+                        "error-container": "#ffdad6",
+                        "on-surface": "#1b1c1c",
+                        "surface-bright": "#fbf9f9",
+                        "on-tertiary-fixed-variant": "#3c4d00",
+                        "on-secondary": "#ffffff",
+                        "surface-container-low": "#f5f3f3",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-fixed": "#e2e2e2",
+                        "tertiary": "#000000",
+                        "outline": "#7e7576",
+                        "error": "#ba1a1a",
+                        "on-secondary-container": "#5f6161",
+                        "primary": "#000000",
+                        "secondary-container": "#dcdddd",
+                        "on-tertiary-fixed": "#161e00"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "section-gap": "4rem",
+                        "gutter-base": "2rem",
+                        "sidebar-width": "240px",
+                        "element-gap": "1rem"
+                    },
+                    "fontFamily": {
+                        "label-md": ["JetBrains Mono", "monospace"],
+                        "label-sm": ["JetBrains Mono", "monospace"],
+                        "headline-sm": ["Geist", "sans-serif"],
+                        "body-lg": ["Geist", "sans-serif"],
+                        "body-md": ["Geist", "sans-serif"]
+                    },
+                    "fontSize": {
+                        "label-md": ["12px", { "lineHeight": "16px", "fontWeight": "500" }],
+                        "label-sm": ["10px", { "lineHeight": "14px", "fontWeight": "500" }],
+                        "headline-sm": ["14px", { "lineHeight": "20px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        /* Hide scrollbar for clean look */
+        ::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-md antialiased flex w-full min-h-screen">
+<!-- SideNavBar -->
+<aside class="fixed h-full w-[240px] left-0 top-0 bg-surface-container-low flex flex-col py-section-gap z-20">
+<!-- Header -->
+<!-- Navigation -->
+<nav class="flex flex-col w-full">
+<!-- Active Tab -->
+<a class="flex items-center w-full bg-primary text-tertiary-fixed font-bold px-gutter-base py-3 opacity-90 transition-opacity" href="#">
+<span class="material-symbols-outlined mr-4" style="font-variation-settings: 'FILL' 1;">list_alt</span>
+<span class="font-label-md text-label-md uppercase tracking-wide">Lists</span>
+</a>
+<!-- Inactive Tabs -->
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4">analytics</span>
+<span class="font-label-md text-label-md">Activity</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4">devices</span>
+<span class="font-label-md text-label-md">Peers &amp; Devices</span>
+<!-- Acid Green Badge -->
+<span class="ml-auto bg-tertiary-fixed text-primary font-label-sm text-label-sm px-2 py-0.5 rounded-full flex items-center justify-center">3</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4">lock</span>
+<span class="font-label-md text-label-md">Vault</span>
+</a>
+<a class="flex items-center w-full text-secondary px-gutter-base py-3 hover:bg-secondary-container transition-colors duration-200" href="#">
+<span class="material-symbols-outlined mr-4">terminal</span>
+<span class="font-label-md text-label-md">Logs</span>
+</a>
+</nav>
+</aside>
+<!-- Main Content Canvas -->
+<main class="ml-[240px] flex-1 min-h-screen bg-surface px-gutter-base py-section-gap max-w-5xl">
+<!-- Top Action Bar -->
+<header class="flex justify-between items-start mb-24">
+<h1 class="font-headline-sm text-headline-sm text-secondary">Grocery List</h1>
+<div class="flex items-center gap-4">
+<button class="px-4 py-2 bg-secondary-container rounded-lg text-on-surface font-label-md text-label-md flex items-center gap-2 hover:bg-surface-variant transition-colors">
+<span class="material-symbols-outlined text-[16px]">share</span>
+                    Share
+                </button>
+<button class="px-6 py-2 bg-primary rounded-lg text-on-primary font-label-md text-label-md flex items-center gap-2 hover:opacity-90 transition-opacity">
+<span class="material-symbols-outlined text-[16px]">add</span>
+                    Add Item
+                </button>
+</div>
+</header>
+<!-- List Content Area (No-Line Rule, Whitespace Grouping, Zero-Checkbox) -->
+<div class="flex flex-col">
+<!-- Group: Fruits -->
+<section class="mb-section-gap">
+<h3 class="font-label-sm text-label-sm text-outline uppercase tracking-widest mb-6 px-4">Fruits</h3>
+<div class="flex flex-col gap-element-gap">
+<!-- Unselected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group">
+<span class="font-body-md text-body-md text-on-surface">Honeycrisp Apples</span>
+<span class="font-label-md text-label-md text-secondary mr-8">6 units</span>
+</div>
+<!-- Selected Item (Zero-Checkbox Rule) -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-primary text-on-primary rounded-lg cursor-pointer transition-colors">
+<span class="font-body-md text-body-md">Bananas (Organic)</span>
+<span class="font-label-md text-label-md text-outline-variant mr-8">1 bunch</span>
+</div>
+<!-- Unselected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group">
+<span class="font-body-md text-body-md text-on-surface">Hass Avocados</span>
+<span class="font-label-md text-label-md text-secondary mr-8">3 units</span>
+</div>
+</div>
+</section>
+<!-- Group: Dairy -->
+<section class="mb-section-gap">
+<h3 class="font-label-sm text-label-sm text-outline uppercase tracking-widest mb-6 px-4">Dairy &amp; Eggs</h3>
+<div class="flex flex-col gap-element-gap">
+<!-- Selected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-primary text-on-primary rounded-lg cursor-pointer transition-colors">
+<span class="font-body-md text-body-md">Whole Milk</span>
+<span class="font-label-md text-label-md text-outline-variant mr-8">1 gallon</span>
+</div>
+<!-- Unselected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group">
+<span class="font-body-md text-body-md text-on-surface">Farm Fresh Eggs</span>
+<span class="font-label-md text-label-md text-secondary mr-8">1 dozen</span>
+</div>
+<!-- Selected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-primary text-on-primary rounded-lg cursor-pointer transition-colors">
+<span class="font-body-md text-body-md">Aged Cheddar Block</span>
+<span class="font-label-md text-label-md text-outline-variant mr-8">500g</span>
+</div>
+</div>
+</section>
+<!-- Group: Frozen -->
+<section class="mb-section-gap">
+<h3 class="font-label-sm text-label-sm text-outline uppercase tracking-widest mb-6 px-4">Frozen</h3>
+<div class="flex flex-col gap-element-gap">
+<!-- Unselected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group">
+<span class="font-body-md text-body-md text-on-surface">Edamame Pods</span>
+<span class="font-label-md text-label-md text-secondary mr-8">1 bag</span>
+</div>
+<!-- Unselected Item -->
+<div class="grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group">
+<span class="font-body-md text-body-md text-on-surface">Vanilla Bean Ice Cream</span>
+<span class="font-label-md text-label-md text-secondary mr-8">1 pint</span>
+</div>
+</div>
+</section>
+</div>
+</main>
+<script>
+        // Simple micro-interaction for toggling items
+        document.addEventListener('DOMContentLoaded', () => {
+            const listItems = document.querySelectorAll('.grid.cursor-pointer');
+            
+            listItems.forEach(item => {
+                item.addEventListener('click', () => {
+                    const isSelected = item.classList.contains('bg-primary');
+                    
+                    if (isSelected) {
+                        // Revert to unselected state
+                        item.className = 'grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-surface-container-lowest rounded-lg hover:bg-surface-container-low transition-colors cursor-pointer group';
+                        item.children[0].className = 'font-body-md text-body-md text-on-surface';
+                        item.children[1].className = 'font-label-md text-label-md text-secondary mr-8';
+                    } else {
+                        // Apply selected state (Zero-Checkbox solid block)
+                        item.className = 'grid grid-cols-[1fr_auto_auto] items-center px-4 py-3 bg-primary text-on-primary rounded-lg cursor-pointer transition-colors';
+                        item.children[0].className = 'font-body-md text-body-md';
+                        item.children[1].className = 'font-label-md text-label-md text-outline-variant mr-8';
+                    }
+                });
+            });
+        });
+    </script>
+</body></html>
