@@ -40,12 +40,13 @@ function h(tag, props = {}, ...children) {
     return el
 }
 
-export function mountApp({ root, store, client, locale, env = {} }) {
+export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
     const ui = {
         view: 'lists',
         dialog: null,
         editingItemId: null,
         focusedItemId: null,
+        controlStatus: {},
     }
     const now = env.now ?? (() => Date.now())
 
@@ -386,6 +387,73 @@ export function mountApp({ root, store, client, locale, env = {} }) {
             h('section', { class: 'pane-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('members.title')),
                 h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
+            ),
+            renderOwnedDevices(),
+        )
+    }
+
+    // H1 owner-control: pair this desktop with a headless instance via an
+    // operator-minted code, then query it with signed, capability-scoped
+    // commands. Requires the Pear runtime (hyperdht); the browser preview
+    // shows the section in its unavailable state.
+    function renderOwnedDevices() {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const section = (...children) => h('section', { class: 'pane-section' },
+            h('h3', { class: 'category-heading label-sm' }, t('desktop.control.title')),
+            ...children,
+        )
+        if (!ownerControl) {
+            return section(h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.unavailable')))
+        }
+
+        const codeInput = h('input', { class: 'input', placeholder: t('desktop.control.codePlaceholder') })
+        const nameInput = h('input', { class: 'input', placeholder: t('desktop.control.namePlaceholder'), style: 'max-width: 220px;' })
+        const pairAction = async () => {
+            try {
+                const result = await ownerControl.pair(codeInput.value, nameInput.value)
+                if (result?.ok) {
+                    store.pushNotice(t('desktop.control.paired'), 'success')
+                    renderAll()
+                } else {
+                    store.pushNotice(`${t('desktop.control.pairFailed')} (${result?.reason ?? 'error'})`, 'error')
+                }
+            } catch (error) {
+                store.pushNotice(`${t('desktop.control.pairFailed')} (${error?.message ?? 'error'})`, 'error')
+            }
+        }
+
+        const servers = ownerControl.listServers()
+        return section(
+            servers.length === 0
+                ? h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.empty'))
+                : h('div', { class: 'kv-rows' }, ...servers.map((server) => h('div', { class: 'member-row' },
+                    h('span', {},
+                        h('div', { class: 'body-md' }, server.name),
+                        h('div', { class: 'label-sm', style: 'color: var(--outline);' }, `${t('desktop.control.capabilities')}: ${server.capabilities.join(', ') || '—'}`),
+                        ui.controlStatus[server.serverPublicKeyHex]
+                            ? h('div', { class: 'label-md', style: 'color: var(--secondary); margin-top: 0.25rem;' }, ui.controlStatus[server.serverPublicKeyHex])
+                            : null,
+                    ),
+                    h('span', { class: 'role-chip' }, server.serverPublicKeyHex.slice(0, 8)),
+                    h('button', {
+                        class: 'btn btn-secondary',
+                        onclick: async () => {
+                            try {
+                                const reply = await ownerControl.request(server.serverPublicKeyHex, 'status')
+                                ui.controlStatus[server.serverPublicKeyHex] = reply?.ok
+                                    ? JSON.stringify(reply.status)
+                                    : `${t('desktop.control.queryFailed')} (${reply?.reason ?? 'error'})`
+                            } catch (error) {
+                                ui.controlStatus[server.serverPublicKeyHex] = `${t('desktop.control.queryFailed')} (${error?.message ?? 'error'})`
+                            }
+                            renderAll()
+                        },
+                    }, t('desktop.control.query')),
+                ))),
+            h('div', { class: 'add-bar', style: 'margin-top: 1.5rem; margin-bottom: 0;' },
+                codeInput,
+                nameInput,
+                h('button', { class: 'btn btn-primary', onclick: pairAction }, t('desktop.control.pair')),
             ),
         )
     }

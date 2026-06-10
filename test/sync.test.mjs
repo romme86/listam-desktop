@@ -70,12 +70,13 @@ class Driver {
         const id = ++this.nextId
         const response = new Promise((resolve) => this.pending.set(id, resolve))
         this.proc.stdin.write(JSON.stringify({ id, op, ...fields }) + '\n')
-        return Promise.race([
-            response,
-            once(this.proc, 'exit').then(() => {
-                throw new Error(`backend driver exited mid-request '${op}' (code ${this.exitCode})\nstderr tail: ${this.stderr.slice(-2000)}`)
-            }),
-        ])
+        const exitRejection = once(this.proc, 'exit').then(() => {
+            throw new Error(`backend driver exited mid-request '${op}' (code ${this.exitCode})\nstderr tail: ${this.stderr.slice(-2000)}`)
+        })
+        // The exit branch fires eventually even when the response won the race;
+        // keep its rejection handled so teardown never reports it.
+        exitRejection.catch(() => {})
+        return Promise.race([response, exitRejection])
     }
 
     async waitFor(predicate, { timeoutMs = JOIN_TIMEOUT_MS, intervalMs = 1000 } = {}) {

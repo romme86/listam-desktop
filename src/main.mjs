@@ -37,7 +37,9 @@ async function boot() {
         if (backend.secretsMode !== 'secure-store') {
             store.pushNotice(locale.i18n.t('backend.secureStorage.legacy'), 'info')
         }
-        mountApp({ root, store, client: backend.client, locale })
+        const { createOwnerControlManager } = await import('./owner-control.mjs')
+        const ownerControl = await createOwnerControlManager({ Pear: globalThis.Pear }).catch(() => null)
+        mountApp({ root, store, client: backend.client, locale, ownerControl })
         // The backend emits its initial sync/invite during startup, before the
         // UI listener attaches; ask again now that we are listening.
         await backend.client.send(RPC_REQUEST_SYNC)
