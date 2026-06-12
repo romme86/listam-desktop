@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "name": "listam-appling",
+  "description": "Native Pear appling shell for Listam desktop",
+  "devDependencies": {
+    "cmake-pear": "^3.0.2"
+  }
+}
