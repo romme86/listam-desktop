@@ -28,6 +28,9 @@ const FIXTURE_TEXTS = [
 
 export function createMockBackend() {
     const listeners = new Set()
+    const bridgeListeners = new Set()
+    let bridgeStatus = { running: false, port: 0, controlKey: null, connections: 0, error: null }
+    let bridgeTimer = null
     let nextId = 0
     let items = FIXTURE_TEXTS.map(([text, isDone]) => normalizeListItem({
         id: `mock-${++nextId}`,
@@ -82,6 +85,37 @@ export function createMockBackend() {
         },
         isConnected() {
             return true
+        },
+        // Same surface as the worker bridge client: lets the design preview
+        // show the leaf-board section's running states. A fake board
+        // "connects" shortly after the bridge starts.
+        async bridge(action, options = {}) {
+            const emitBridge = () => {
+                for (const listener of bridgeListeners) listener(bridgeStatus)
+            }
+            clearTimeout(bridgeTimer)
+            if (action === 'start') {
+                bridgeStatus = {
+                    running: true,
+                    port: options.port ?? 9993,
+                    controlKey: 'fadefeed'.repeat(8),
+                    connections: 0,
+                    error: null,
+                }
+                bridgeTimer = setTimeout(() => {
+                    if (!bridgeStatus.running) return
+                    bridgeStatus = { ...bridgeStatus, connections: 1 }
+                    emitBridge()
+                }, 1500)
+            } else if (action === 'stop') {
+                bridgeStatus = { running: false, port: 0, controlKey: null, connections: 0, error: null }
+            }
+            emitBridge()
+            return bridgeStatus
+        },
+        onBridgeStatus(listener) {
+            bridgeListeners.add(listener)
+            return () => bridgeListeners.delete(listener)
         },
     }
 

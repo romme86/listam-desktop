@@ -4,7 +4,9 @@ import tseslint from 'typescript-eslint'
 // raw console — diagnostics route through @listam/logging redaction.
 export default [
     {
-        ignores: ['node_modules/**'],
+        // pear-smoke contains symlinks back into src/ and node_modules/ so the
+        // Bare smoke app can resolve them; linting it would double-lint src.
+        ignores: ['node_modules/**', 'test/pear-smoke/**'],
     },
     {
         files: ['src/**/*.mjs'],

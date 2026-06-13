@@ -5,6 +5,7 @@
 // backend reduce with — so duplicate names never collapse by text.
 import { applyOperationToList } from '@listam/domain/list-reducer'
 import { redactForLog, redactString } from '@listam/logging'
+import { DEFAULT_LEAF_BRIDGE_PORT } from './leaf-bridge-config.mjs'
 
 const MAX_DIAGNOSTIC_EVENTS = 50
 const MAX_NOTICES = 4
@@ -14,6 +15,10 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     isGridView: false,
     categoriesEnabled: true,
     categoryHeaders: true,
+    theme: 'system',
+    showKeyHints: true,
+    leafBridgeEnabled: false,
+    leafBridgePort: DEFAULT_LEAF_BRIDGE_PORT,
 })
 
 export function createDesktopStore(initial = {}) {
@@ -29,6 +34,9 @@ export function createDesktopStore(initial = {}) {
         recovery: null,
         notices: [],
         diagnostics: [],
+        // Live leaf-bridge state pushed by the backend worker; null until the
+        // worker reports it. { running, port, controlKey, connections, error }
+        leafBridge: null,
         preferences: { ...DEFAULT_PREFERENCES, ...(initial.preferences ?? {}) },
     }
     const listeners = new Set()

@@ -7,23 +7,62 @@ i18n catalogs — rebuilt for large screens around the shared packages.
 
 ## Architecture
 
-- **Backend:** the same `@listam/backend` the mobile worklet runs, booted
-  in-process under Pear via `@listam/backend/platform/pear` with the
-  `desktop` storage namespace (own storage root + storage lease).
-- **IPC contract:** `createBackendChannel()` from `@listam/client` — an
-  in-process duplex speaking the same RPC command surface and decoded events
-  as the mobile worklet transport.
+- **Backend:** the same `@listam/backend` the mobile worklet runs, booted in
+  a **Pear worker** (`src/backend-worker.mjs`, Bare side) via
+  `@listam/backend/platform/pear` with the `desktop` storage namespace. The
+  DOM renderer cannot load the bare-* module graph (Pear's app loader rejects
+  it), so everything bare lives in the worker — mirroring mobile's worklet.
+- **IPC contract:** newline-delimited JSON frames over the Pear worker pipe
+  (`src/backend-boot.mjs` renderer side). Events are decoded worker-side with
+  `@listam/client`, so the renderer consumes the same decoded client events
+  as the mobile transport without bare-dependent imports. Secret persistence
+  (`RPC_PERSIST_SECRET`) is answered inside the worker.
+- **Dependencies note:** the backend's runtime deps (autobase, hyperswarm,
+  corestore, …) are listed explicitly in `package.json` even though they are
+  transitive — npm does not flatten deps of `file:`-linked packages into this
+  app's `node_modules`, and the Pear drive resolves only within the app tree.
 - **State:** `src/store.mjs`, fed only by decoded client events; item
   mutations reduce through `@listam/domain`'s id-keyed reduction.
-- **UI:** vanilla DOM (`src/ui.mjs`) styled by `app.css`, which transcribes
-  the kinetic-minimalist tokens from `design-guide/`. Keyboard-first:
-  `N`/`/` add, `G` view toggle, arrows + `Space`/`Delete` on rows, `?` help.
+- **UI:** vanilla DOM (`src/ui.mjs`) styled by `app.css`, which carries the
+  Kinetic Minimalist v2 tokens (light + dark themes, motion layer — see
+  `design-guide/proposals/2026-06-kinetic-minimalist-v2.md`). Keyboard-first:
+  `N`/`/` add, `G` view toggle, `T` theme, `H` shortcut bar, arrows +
+  `Space`/`Delete` on rows, `?` help. Theme and UI preferences persist
+  locally via `src/prefs.mjs`.
 - **i18n:** the shared Phase 9 catalogs (`en`, `es`, pseudo `en-XA`,
   long-string `en-XL`), selectable from the sidebar.
 - **Secrets:** `src/secret-store.mjs` answers the backend's
   `RPC_PERSIST_SECRET` acks from an owner-only JSON file under the app
   storage dir (the documented file tier; OS-keychain integration is
   follow-up work).
+
+## Icon
+
+The canonical listam icon lives at `assets/icon.png` (copied from
+`listam-mobile/assets/images/icon.png`); it is also the browser-preview
+favicon. `assets/listam.icns` is generated from it by the installer build
+(`installer/make-icns.swift` masks the artwork into the macOS squircle
+grid) and is used by the packaged `Listam.app`, so Finder, Launchpad and the
+DMG show the listam icon. The Dock tile of the *running* app still shows the
+Pear runtime's icon — the GUI process is Pear's Electron; owning the Dock
+tile needs a native [pear-appling](https://github.com/holepunchto/pear-appling)
+shell (see `installer/README.md`). For dev-time cosmetics the runtime's
+`icon.icns` (inside `Pear Runtime.app/Contents/Resources/`) can be replaced
+with `assets/listam.icns`, but that affects every Pear app on the machine and
+reverts on runtime updates.
+
+## Package (macOS installer)
+
+```sh
+installer/build-macos.sh            # pear stage 'production' + Listam.app shell + DMG
+installer/build-macos.sh --release  # also mark the release pointer
+```
+
+Produces `installer/dist/Listam-<version>-<channel>.dmg`: a drag-install
+appling shell that boots the app from
+`pear://h1jwexik1m9c75rqng8hico4oxqgmm8xskws684skmjepksq5r3o` via the Pear
+runtime. Installs fetch the drive over the swarm, so keep a seeder running
+(`pear seed production .`). Details and caveats: `installer/README.md`.
 
 ## Run
 

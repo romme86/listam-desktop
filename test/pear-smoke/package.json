@@ -1,0 +1,11 @@
+{
+    "name": "listam-leaf-smoke",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "main": "smoke.mjs",
+    "pear": {
+        "name": "listam-leaf-smoke",
+        "type": "terminal"
+    }
+}

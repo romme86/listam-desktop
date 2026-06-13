@@ -1,31 +1,54 @@
-// Category glyphs for the desktop list/grid. The canonical category keys come
-// from @listam/grocery; the glyphs are desktop-local presentation only (the
-// mobile icon map is a generated, app-local asset and is not shared yet).
-const CATEGORY_GLYPHS = {
-    'Fruits': '\u{1F34E}',
-    'Vegetables': '\u{1F955}',
-    'Bread & Bakery': '\u{1F35E}',
-    'Deli': '\u{1F953}',
-    'Meat': '\u{1F356}',
-    'Fish & Seafood': '\u{1F41F}',
-    'Dairy': '\u{1F95B}',
-    'Canned Goods': '\u{1F96B}',
-    'Pasta/Rice/Cereal': '\u{1F35D}',
-    'Condiments & Spices': '\u{1F9C2}',
-    'Baking': '\u{1F9C1}',
-    'Snacks': '\u{1F968}',
-    'Beverages': '\u{1F9C3}',
-    'Frozen Foods': '\u{1F9CA}',
-    'Ready Meals': '\u{1F371}',
-    'International Foods': '\u{1F30D}',
-    'Health & Organic': '\u{1F33F}',
-    'Personal Care': '\u{1F9FC}',
-    'Household & Cleaning': '\u{1F9F9}',
-    'Baby Items': '\u{1F37C}',
-    'Pet Care': '\u{1F436}',
-    'Others': '\u{1F6D2}',
+// Tabler outline icons (vendored path data in tabler-icons.mjs, MIT) replace
+// the emoji glyph set: stroke icons inherit currentColor, so category marks
+// and nav icons recolor with the theme like every other ink. The canonical
+// category keys come from @listam/grocery; the icon mapping is desktop-local
+// presentation only.
+import { TABLER_PATHS } from './tabler-icons.mjs'
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+export function tablerIcon(name, { size = 16, className = '' } = {}) {
+    const svg = document.createElementNS(SVG_NS, 'svg')
+    svg.setAttribute('viewBox', '0 0 24 24')
+    svg.setAttribute('width', String(size))
+    svg.setAttribute('height', String(size))
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '2')
+    svg.setAttribute('stroke-linecap', 'round')
+    svg.setAttribute('stroke-linejoin', 'round')
+    svg.setAttribute('aria-hidden', 'true')
+    svg.classList.add('ti-svg')
+    if (className) for (const cls of className.split(' ')) svg.classList.add(cls)
+    svg.innerHTML = TABLER_PATHS[name] ?? TABLER_PATHS.basket
+    return svg
 }
 
-export function categoryGlyph(canonicalKey) {
-    return CATEGORY_GLYPHS[canonicalKey] ?? CATEGORY_GLYPHS.Others
+const CATEGORY_ICONS = {
+    'Fruits': 'apple',
+    'Vegetables': 'carrot',
+    'Bread & Bakery': 'baguette',
+    'Deli': 'sausage',
+    'Meat': 'meat',
+    'Fish & Seafood': 'fish',
+    'Dairy': 'milk',
+    'Canned Goods': 'package',
+    'Pasta/Rice/Cereal': 'grain',
+    'Condiments & Spices': 'salt',
+    'Baking': 'cake',
+    'Snacks': 'cookie',
+    'Beverages': 'bottle',
+    'Frozen Foods': 'snowflake',
+    'Ready Meals': 'soup',
+    'International Foods': 'world',
+    'Health & Organic': 'leaf',
+    'Personal Care': 'bath',
+    'Household & Cleaning': 'spray',
+    'Baby Items': 'baby-bottle',
+    'Pet Care': 'dog',
+    'Others': 'basket',
+}
+
+export function categoryIcon(canonicalKey, options) {
+    return tablerIcon(CATEGORY_ICONS[canonicalKey] ?? CATEGORY_ICONS.Others, options)
 }

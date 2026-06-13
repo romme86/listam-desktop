@@ -10,7 +10,19 @@
     "gui": {
       "width": 1280,
       "height": 860,
-      "backgroundColor": "#fbf9f9"
+      "backgroundColor": "#101212"
+    },
+    "stage": {
+      "ignore": [
+        "/.git",
+        "/.github",
+        "/.gitignore",
+        "/.DS_Store",
+        "/test",
+        "/design-guide",
+        "/installer",
+        "/listam-desktop-secrets.json"
+      ]
     }
   },
   "scripts": {
@@ -26,8 +38,22 @@
     "@listam/grocery": "file:../listam-packages/packages/grocery",
     "@listam/i18n": "file:../listam-packages/packages/i18n",
     "@listam/logging": "file:../listam-packages/packages/logging",
+    "@listam/owner-control": "file:../listam-packages/packages/owner-control",
     "@listam/protocol": "file:../listam-packages/packages/protocol",
-    "@listam/secrets": "file:../listam-packages/packages/secrets"
+    "@listam/secrets": "file:../listam-packages/packages/secrets",
+    "autobase": "^7.20.0",
+    "b4a": "^1.7.1",
+    "bare-fs": "^4.4.4",
+    "bare-path": "^3.0.1",
+    "bare-rpc": "^0.2.12",
+    "bare-tcp": "^2.5.1",
+    "bare-url": "^2.4.3",
+    "blind-pairing": "^2.3.1",
+    "corestore": "^7.5.0",
+    "hypercore-crypto": "^3.6.1",
+    "hyperswarm": "^4.12.1",
+    "sodium-universal": "^5.0.1",
+    "z32": "^1.1.0"
   },
   "devDependencies": {
     "eslint": "^9.39.1",
