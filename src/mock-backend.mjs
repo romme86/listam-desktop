@@ -10,8 +10,11 @@ import {
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
     RPC_REQUEST_SYNC,
+    RPC_GET_BOARD_CONFIG,
+    RPC_SET_BOARD_CONFIG,
 } from '@listam/protocol'
 import { applyOperationToList, normalizeListItem } from '@listam/domain/list-reducer'
+import { KANBAN_LIST_TYPE, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/kanban'
 
 const FIXTURE_TEXTS = [
     ['Honeycrisp apples', false],
@@ -40,6 +43,40 @@ export function createMockBackend() {
         updatedAt: 1,
     }))
 
+    // Kanban board fixtures so ?mock=1 exercises the board, time-in-progress,
+    // on-time badges and the congruency dashboard without a Pear runtime.
+    const A = 'a1'.repeat(32)
+    const B = 'b2'.repeat(32)
+    const HOUR = 3600000
+    let boardConfig = normalizeBoardConfig(null) // rigor ON by default
+    const kanbanFixtures = [
+        { text: 'Plan Tokyo itinerary', status: 'in_progress', priority: 'high', assignee: A, createdBy: A, estimatedHours: 6, estimatedComplexity: 45, inProgressMs: 4.2 * HOUR, inProgressSince: null, checklist: [{ id: 'k1', text: 'Confirm dates', done: true }, { id: 'k2', text: 'Compare flights', done: false }], blocks: [
+            { id: 'blk-1', type: 'markdown', text: 'Two weeks across **Tokyo**, *Kyoto* and Osaka. Anchor the trip around the [JR Pass](https://japanrailpass.net) and `book early`.' },
+            { id: 'blk-2', type: 'callout', text: 'Reserve the ryokan before March — they fill fast.', tone: 'info' },
+            { id: 'blk-3', type: 'checklist', items: [{ text: 'Pick travel dates', done: true }, { text: 'Compare flights', done: false }, { text: 'Reserve ryokan', done: false }] },
+            { id: 'blk-4', type: 'numberedList', items: [{ text: 'Tokyo (5 nights)' }, { text: 'Kyoto (4 nights)' }, { text: 'Osaka (3 nights)' }] },
+            { id: 'blk-5', type: 'links', links: [{ label: 'JR Pass', url: 'https://japanrailpass.net' }, { label: 'Hyperdia', url: 'https://www.hyperdia.com' }] },
+            { id: 'blk-6', type: 'table', rows: [['City', 'Nights', 'Budget'], ['Tokyo', '5', 'CHF 1200'], ['Kyoto', '4', 'CHF 900']] },
+            { id: 'blk-7', type: 'image', url: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="160" height="70"><rect width="160" height="70" fill="%23378ADD"/><text x="12" y="42" fill="white" font-family="sans-serif" font-size="16">Tokyo</text></svg>', alt: 'Tokyo' },
+            { id: 'blk-8', type: 'code', text: 'itinerary --export pdf --days 12', lang: 'sh' },
+        ] },
+        { text: 'Book flights', status: 'todo', priority: 'medium', assignee: A, createdBy: A, estimatedHours: 3, estimatedComplexity: 30 },
+        { text: 'Reserve ryokan', status: 'todo', priority: 'low', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 20 },
+        { text: 'Travel insurance', status: 'in_progress', priority: 'medium', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 35, inProgressMs: 1 * HOUR, inProgressSince: null },
+        { text: 'Renew passport', status: 'done', isDone: true, priority: 'high', assignee: A, createdBy: A, completedBy: A, estimatedHours: 4, estimatedComplexity: 50, inProgressMs: 3.9 * HOUR, actualInProgressHours: 3.9, timeliness: 'on_time' },
+        { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime' },
+        { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime' },
+    ].map((tk) => normalizeListItem({
+        listId: 'default',
+        listType: KANBAN_LIST_TYPE,
+        timeOfCompletion: tk.isDone ? 1 : 0,
+        updatedAt: 1,
+        ...tk,
+        id: `mock-${++nextId}`,
+        isDone: tk.isDone || false,
+    })).filter(Boolean)
+    items = [...items, ...kanbanFixtures]
+
     function emit(event) {
         for (const listener of listeners) listener(event)
     }
@@ -48,21 +85,42 @@ export function createMockBackend() {
         emit({ type: 'sync-list', items, raw: JSON.stringify(items) })
     }
 
+    function emitBoardConfig() {
+        emit({ type: 'message', raw: '', payload: { type: 'board-config', config: boardConfig, canAdminister: true } })
+    }
+
     const client = {
         async send(command, payload) {
             if (command === RPC_ADD) {
-                const item = normalizeListItem({
+                const extra = (payload && typeof payload === 'object') ? payload : {}
+                const raw = {
+                    listId: 'default',
+                    timeOfCompletion: 0,
+                    ...extra,
                     id: `mock-${++nextId}`,
                     text: typeof payload === 'string' ? payload : payload?.text,
-                    isDone: false,
-                    timeOfCompletion: 0,
+                    isDone: extra.status === 'done',
                     updatedAt: nextId,
-                })
+                }
+                if (raw.listType === KANBAN_LIST_TYPE) {
+                    raw.status = raw.status || 'todo'
+                    raw.createdBy = A
+                    if (typeof raw.inProgressMs !== 'number') raw.inProgressMs = 0
+                    raw.inProgressSince = raw.status === 'in_progress' ? Date.now() : null
+                }
+                const item = normalizeListItem(raw)
                 if (!item) return null
                 items = applyOperationToList(items, { type: 'add', value: item })
                 emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_UPDATE) {
-                const item = payload?.item
+                let item = payload?.item
+                if (item && item.listType === KANBAN_LIST_TYPE) {
+                    const existing = items.find((entry) => entry && entry.id === item.id)
+                    item = applyStatusTransition(existing, item, item.updatedAt || Date.now(), {
+                        writerKey: A,
+                        doneStatuses: doneStatusesOf(boardConfig),
+                    })
+                }
                 items = applyOperationToList(items, { type: 'update', value: item })
                 emit({ type: 'update-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_DELETE) {
@@ -73,6 +131,11 @@ export function createMockBackend() {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
             } else if (command === RPC_REQUEST_SYNC) {
                 syncList()
+            } else if (command === RPC_GET_BOARD_CONFIG) {
+                emitBoardConfig()
+            } else if (command === RPC_SET_BOARD_CONFIG) {
+                boardConfig = normalizeBoardConfig({ ...boardConfig, ...(payload?.config || {}) })
+                emitBoardConfig()
             } else if (command === RPC_JOIN_KEY) {
                 emit({ type: 'message', payload: { type: 'join-phase', phase: 'pairing' }, raw: '' })
                 setTimeout(() => emit({ type: 'message', payload: { type: 'join-error', message: 'Mock backend cannot join peers' }, raw: '' }), 800)
@@ -137,6 +200,7 @@ export function createMockBackend() {
                 },
             },
         })
+        emitBoardConfig()
     }
 
     return { client, start }

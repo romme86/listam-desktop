@@ -13,6 +13,8 @@ import {
     RPC_REMOVE_MEMBER,
     RPC_GET_MEMBERS,
     RPC_RECOVER_STORAGE,
+    RPC_GET_BOARD_CONFIG,
+    RPC_SET_BOARD_CONFIG,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import { selectSummary, selectDoneItems } from './store.mjs'
@@ -20,6 +22,23 @@ import { categoryIcon, tablerIcon } from './icons.mjs'
 import { LOCALE_CHOICES, localeChoiceLabel } from './i18n.mjs'
 import { nextTheme, THEME_CHOICES } from './prefs.mjs'
 import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
+import {
+    KANBAN_LIST_TYPE,
+    selectBoardConfig,
+    groupByStatus,
+    ticketBadges,
+    selectWriterStats,
+    validateRigorDraft,
+    buildStatusChange,
+    formatDuration,
+    deltaPercent,
+    BLOCK_TYPES,
+    createBlock,
+    blockToText,
+    blockFromText,
+    normalizeBlocks,
+    renderInlineMarkdown,
+} from './ticket.mjs'
 
 const NOTICE_TTL_MS = 4000
 const NOTICE_LEAVE_MS = 180
@@ -46,6 +65,13 @@ function h(tag, props = {}, ...children) {
     return el
 }
 
+// Grocery surfaces (the lists pane, its count, clear-done) operate on ordinary
+// list items only — kanban tickets live on their own board, so they are never
+// shown, counted, or cleared alongside groceries.
+function isGroceryItem(item) {
+    return !!item && item.listType !== KANBAN_LIST_TYPE
+}
+
 export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
     const ui = {
         view: 'lists',
@@ -54,8 +80,25 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         focusedItemId: null,
         controlStatus: {},
         addBarOpen: false,
+        // Kanban detail: selectedTicketId drives the right-hand split panel
+        // (board stays on the left); ticketDocId promotes the same ticket to
+        // the full-screen document view. blockEditingId/blockDraft/blockMenu/
+        // blockDrag are UI-local block-editor state kept off the store so block
+        // edits never round-trip through a store update mid-keystroke.
+        selectedTicketId: null,
+        ticketDocId: null,
+        blockEditingId: null,
+        blockDraft: '',
+        blockMenu: null,
+        blockDrag: null,
+        boardDrag: null,
+        boardConfigRequested: false,
     }
     const now = env.now ?? (() => Date.now())
+    // Block ids only need to be unique within a session; the renderer rebuilds
+    // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
+    let blockIdSeq = 0
+    const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
 
     // --- motion bookkeeping --------------------------------------------------
     // The renderer rebuilds the DOM on every store change, so animations are
@@ -121,7 +164,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const trimmed = text.trim()
             if (!trimmed) return false
             const duplicate = store.getState().items.find(
-                (item) => !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
+                (item) => isGroceryItem(item) && !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
             )
             if (duplicate) {
                 store.pushNotice(locale.i18n.t('main.notification.duplicateAdd', { text: trimmed }), 'info')
@@ -153,10 +196,165 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             animateRowExit(item, () => send(RPC_DELETE, { item }))
         },
         clearDone() {
-            selectDoneItems(store.getState().items).forEach((item, index) => {
+            selectDoneItems(store.getState().items.filter(isGroceryItem)).forEach((item, index) => {
                 markLocalId(item.id)
                 animateRowExit(item, () => send(RPC_DELETE, { item }), index * 40)
             })
+        },
+        // --- kanban -------------------------------------------------------
+        newTicket() {
+            openDialog({ kind: 'add-ticket', draft: { description: '', tasks: [''], hours: '', complexity: 50 } })
+        },
+        // The backend freezes time-in-progress + the on-time verdict from this
+        // status change; the frontend only sends the new status with a bumped
+        // updatedAt (so the LWW reducer never drops it).
+        moveTicket(item, status) {
+            const payload = buildStatusChange(item, status, now())
+            if (!payload) return
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: payload })
+        },
+        toggleTicketTask(item, taskId) {
+            const checklist = (Array.isArray(item.checklist) ? item.checklist : [])
+                .map((task) => (task.id === taskId ? { ...task, done: !task.done } : task))
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
+        },
+        // Card click -> right-hand split panel (board stays on the left).
+        openTicket(id) {
+            ui.selectedTicketId = id
+            ui.ticketDocId = null
+            ui.blockEditingId = null
+            ui.blockMenu = null
+            ui.view = 'board'
+            renderAll()
+        },
+        promoteTicket(id) {
+            ui.selectedTicketId = id
+            ui.ticketDocId = id
+            ui.blockMenu = null
+            renderAll()
+        },
+        collapseTicket() {
+            ui.ticketDocId = null
+            ui.blockMenu = null
+            renderAll()
+        },
+        closeTicket() {
+            ui.selectedTicketId = null
+            ui.ticketDocId = null
+            ui.blockEditingId = null
+            ui.blockDraft = ''
+            ui.blockMenu = null
+            renderAll()
+        },
+        // Generic single-field ticket edit. Always bumps updatedAt so the LWW
+        // reducer never drops it; the backend recomputes time/timeliness when
+        // the status changes (status moves go through moveTicket instead).
+        updateTicket(item, patch) {
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
+        },
+        // --- block-based body --------------------------------------------
+        commitBlocks(item, blocks) {
+            const current = normalizeBlocks(item.blocks)
+            if (JSON.stringify(current) === JSON.stringify(blocks)) {
+                renderAll()
+                return
+            }
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, blocks, updatedAt: now() } })
+        },
+        startBlockEdit(item, block) {
+            // Switching blocks: flush the block being edited first so its draft
+            // is never lost.
+            if (ui.blockEditingId && ui.blockEditingId !== block.id) {
+                actions.commitBlocks(item, blocksWithPendingEdit(item))
+            }
+            ui.blockEditingId = block.id
+            ui.blockDraft = blockToText(block)
+            ui.blockMenu = null
+            renderAll()
+        },
+        commitBlockEdit(item) {
+            if (!ui.blockEditingId) return
+            const blocks = blocksWithPendingEdit(item)
+            ui.blockEditingId = null
+            ui.blockDraft = ''
+            ui.blockMenu = null
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        cancelBlockEdit() {
+            ui.blockEditingId = null
+            ui.blockDraft = ''
+            ui.blockMenu = null
+            renderAll()
+        },
+        insertBlock(item, type, afterId = null) {
+            const block = createBlock(type, nextBlockId())
+            const blocks = normalizeBlocks(item.blocks)
+            let next
+            if (afterId == null) {
+                next = [...blocks, block]
+            } else {
+                const idx = blocks.findIndex((b) => b.id === afterId)
+                next = idx < 0 ? [...blocks, block] : [...blocks.slice(0, idx + 1), block, ...blocks.slice(idx + 1)]
+            }
+            ui.blockMenu = null
+            ui.blockEditingId = block.id
+            ui.blockDraft = blockToText(block)
+            actions.commitBlocks(item, next)
+            renderAll()
+        },
+        replaceBlock(item, blockId, type) {
+            const block = createBlock(type, blockId)
+            const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId ? block : b))
+            ui.blockMenu = null
+            ui.blockEditingId = blockId
+            ui.blockDraft = blockToText(block)
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        deleteBlock(item, blockId) {
+            const blocks = normalizeBlocks(item.blocks).filter((b) => b.id !== blockId)
+            if (ui.blockEditingId === blockId) {
+                ui.blockEditingId = null
+                ui.blockDraft = ''
+            }
+            ui.blockMenu = null
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        moveBlock(item, dragId, targetId) {
+            if (dragId === targetId) return
+            const blocks = normalizeBlocks(item.blocks)
+            const moved = blocks.find((b) => b.id === dragId)
+            if (!moved) return
+            const rest = blocks.filter((b) => b.id !== dragId)
+            const ti = rest.findIndex((b) => b.id === targetId)
+            if (ti < 0) rest.push(moved)
+            else rest.splice(ti, 0, moved)
+            actions.commitBlocks(item, rest)
+        },
+        toggleChecklistBlockItem(item, blockId, index) {
+            const blocks = normalizeBlocks(item.blocks).map((b) => {
+                if (b.id !== blockId) return b
+                const items = (Array.isArray(b.items) ? b.items : []).map((it, i) => (i === index ? { ...it, done: !it.done } : it))
+                return { ...b, items }
+            })
+            actions.commitBlocks(item, blocks)
+        },
+        openBlockMenu(spec) {
+            ui.blockMenu = spec
+            renderAll()
+        },
+        closeBlockMenu() {
+            ui.blockMenu = null
+            renderAll()
+        },
+        setRigor(on) {
+            send(RPC_SET_BOARD_CONFIG, { config: { rigorOn: !!on } })
         },
         cycleTheme() {
             store.setPreferences({ theme: nextTheme(store.getState().preferences.theme) })
@@ -242,11 +440,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const RAIL_DEFS = [
         { key: 'overview', icon: 'layout-dashboard', soon: true, label: (t) => t('desktop.nav.overview') },
         { key: 'lists', icon: 'shopping-cart', label: (t) => t('desktop.rail.groceries') },
+        { key: 'board', icon: 'layout-grid', label: (t) => t('desktop.rail.board') },
         { key: 'todo', icon: 'checklist', soon: true, label: (t) => t('desktop.rail.todo') },
         { key: 'travel', icon: 'plane', soon: true, label: (t) => t('desktop.rail.travel') },
     ]
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
+        { key: 'congruency', icon: 'activity', label: (t) => t('desktop.nav.congruency') },
         { key: 'diagnostics', icon: 'activity', label: (t) => t('desktop.nav.activity') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
     ]
@@ -304,7 +504,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         const peersChanged = prevPeerCount !== null && prevPeerCount !== state.peerCount
         prevPeerCount = state.peerCount
-        const remaining = selectSummary(state.items).remaining
+        const remaining = selectSummary(state.items.filter(isGroceryItem)).remaining
 
         for (const def of [...RAIL_DEFS, ...SYSTEM_DEFS]) {
             const btn = navButtons[def.key]
@@ -317,6 +517,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 btn.append(h('span', { class: 'badge zero soon-chip' }, t('desktop.nav.soon')))
             } else if (def.key === 'lists') {
                 btn.append(h('span', { class: `badge${remaining === 0 ? ' zero' : ''}` }, String(remaining)))
+            } else if (def.key === 'board') {
+                const inProgress = state.items.filter((i) => i.listType === KANBAN_LIST_TYPE && i.status === 'in_progress').length
+                btn.append(h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress)))
             } else if (def.key === 'peers') {
                 btn.append(h('span', {
                     class: `badge${state.peerCount === 0 ? ' zero' : ''}${peersChanged ? ' pop' : ''}`,
@@ -335,15 +538,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     let prevPane = null
     function renderMain(state) {
-        // Pane swaps (view change, list/grid flip) get an entrance; ordinary
-        // state updates re-render in place without re-animating.
-        const paneKey = `${ui.view}:${state.preferences.isGridView}`
+        // Pane swaps (view change, list/grid flip, entering the full-screen
+        // ticket doc) get an entrance; ordinary state updates re-render in place
+        // without re-animating.
+        const paneKey = `${ui.ticketDocId ? `doc:${ui.ticketDocId}` : ui.view}:${state.preferences.isGridView}`
         if (prevPane !== paneKey) {
             prevPane = paneKey
             main.classList.remove('pane-enter')
             void main.offsetWidth
             main.classList.add('pane-enter')
         }
+        if (ui.ticketDocId) return renderTicketFull(state)
+        if (ui.view === 'board') return renderBoardPane(state)
+        if (ui.view === 'congruency') return renderCongruencyPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
         if (ui.view === 'diagnostics') return renderDiagnosticsPane(state)
         return renderListsPane(state)
@@ -379,7 +586,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     function renderListsPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const { items, preferences } = state
+        const { preferences } = state
+        const items = state.items.filter(isGroceryItem)
         const summary = selectSummary(items)
 
         // The add-bar renders only when summoned (N or the + button). Escape
@@ -467,7 +675,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     : null,
             ),
             state.isJoining ? renderJoinOverlay(state) : null,
-            items.length === 0 ? renderEmptyState() : renderItems(state),
+            items.length === 0 ? renderEmptyState() : renderItems(state, items),
         )
     }
 
@@ -491,8 +699,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderItems(state) {
-        const { items, preferences } = state
+    function renderItems(state, items) {
+        const { preferences } = state
         const sections = preferences.categoriesEnabled
             ? groupByCategory(items, locale.i18n.groceryLocale)
             : [{ canonicalKey: 'Others', category: '', items: items.map((entry, originalIndex) => ({ entry, originalIndex })) }]
@@ -589,6 +797,583 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             event.preventDefault()
             actions.deleteItem(item)
         }
+    }
+
+    // The board config is owner-signed shared state held by the backend; fetch
+    // it once when a kanban surface first renders.
+    function requestBoardConfigOnce() {
+        if (ui.boardConfigRequested) return
+        ui.boardConfigRequested = true
+        send(RPC_GET_BOARD_CONFIG)
+    }
+
+    function ticketInitials(value) {
+        const s = String(value || '').replace(/[^a-z0-9]/gi, '')
+        return (s.slice(0, 2) || '?').toUpperCase()
+    }
+
+    // The ticket selected for the split panel / full doc, or null. Filters by
+    // listType so a stale id can never surface a grocery row in the detail view.
+    function selectedTicket(state) {
+        if (!ui.selectedTicketId) return null
+        const item = state.items.find((entry) => entry && entry.id === ui.selectedTicketId)
+        return item && item.listType === KANBAN_LIST_TYPE ? item : null
+    }
+
+    // The item's blocks with the in-flight textarea draft folded into the block
+    // currently being edited — the value commitBlocks should persist.
+    function blocksWithPendingEdit(item) {
+        const blocks = normalizeBlocks(item.blocks)
+        if (!ui.blockEditingId) return blocks
+        return blocks.map((b) => (b.id === ui.blockEditingId ? { ...b, ...blockFromText(b.type, ui.blockDraft) } : b))
+    }
+
+    function renderBoardPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        requestBoardConfigOnce()
+        const config = selectBoardConfig(state)
+        const columns = groupByStatus(state.items, config)
+        const nowMs = now()
+        const board = h('div', { class: 'kanban-board' }, ...columns.map((col) => renderBoardColumn(col, nowMs)))
+        const selected = selectedTicket(state)
+        replaceChildren(main,
+            h('header', { class: 'page-header' },
+                h('h1', { class: 'page-title title-lg' }, t('board.title')),
+                h('div', { class: 'header-actions' },
+                    h('button', {
+                        class: 'btn btn-secondary btn-icon',
+                        'aria-label': t('board.newTicket'),
+                        title: t('board.newTicket'),
+                        onclick: () => actions.newTicket(),
+                    }, tablerIcon('plus', { size: 16 })),
+                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
+                ),
+            ),
+            selected
+                ? h('div', { class: 'board-split' }, board, renderTicketSplitPanel(selected, state))
+                : board,
+        )
+    }
+
+    function renderBoardColumn(col, nowMs) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const s = col.state
+        const count = s.wipLimit > 0 ? `${col.tickets.length}/${s.wipLimit}` : String(col.tickets.length)
+        return h('div', {
+            class: 'kanban-column',
+            dataset: { status: s.id },
+            ondragover: (event) => { event.preventDefault(); event.currentTarget.classList.add('drag-over') },
+            ondragleave: (event) => { event.currentTarget.classList.remove('drag-over') },
+            ondrop: (event) => {
+                event.preventDefault()
+                event.currentTarget.classList.remove('drag-over')
+                const drag = ui.boardDrag
+                ui.boardDrag = null
+                if (!drag || drag.fromStatus === s.id) return
+                const item = store.getState().items.find((entry) => entry && entry.id === drag.id)
+                if (item) actions.moveTicket(item, s.id)
+            },
+        },
+            h('div', { class: 'kanban-col-head' },
+                h('span', { class: 'kanban-dot', style: `background:${s.color || 'var(--ink-faint)'}` }),
+                h('span', { class: 'kanban-col-name label-sm' }, s.name),
+                h('span', { class: 'kanban-col-count label-sm' }, count),
+            ),
+            h('div', { class: 'kanban-col-body' },
+                ...col.tickets.map((ticket) => renderTicketCard(ticket, nowMs)),
+                h('button', { class: 'kanban-add', onclick: () => actions.newTicket() },
+                    tablerIcon('plus', { size: 14 }), t('board.add')),
+            ),
+        )
+    }
+
+    function renderTicketCard(item, nowMs) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const b = ticketBadges(item, nowMs)
+        const chips = []
+        if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
+        const meta = []
+        if (b.assignee) meta.push(h('span', { class: 'ticket-avatar' }, ticketInitials(b.assignee)))
+        if (b.checklistTotal > 0) {
+            meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
+        }
+        if (b.isDone && b.timeliness) {
+            const delta = deltaPercent(b.inProgressHours, b.estimatedHours)
+            const suffix = delta != null ? ` ${delta > 0 ? '+' : ''}${delta}%` : ''
+            meta.push(h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + suffix))
+        } else if (b.running) {
+            meta.push(h('span', { class: 'ticket-timer' },
+                h('span', { class: 'timer-dot' }),
+                `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
+        }
+        return h('article', {
+            class: `ticket-card${ui.selectedTicketId === item.id ? ' selected' : ''}`,
+            draggable: 'true',
+            dataset: { itemId: item.id, status: item.status || 'todo' },
+            onclick: () => actions.openTicket(item.id),
+            ondragstart: (event) => {
+                ui.boardDrag = { id: item.id, fromStatus: item.status || 'todo' }
+                event.dataTransfer.effectAllowed = 'move'
+                try { event.dataTransfer.setData('text/plain', item.id) } catch { /* some platforms reject */ }
+                event.currentTarget.classList.add('dragging')
+            },
+            ondragend: (event) => { event.currentTarget.classList.remove('dragging'); ui.boardDrag = null },
+        },
+            h('div', { class: 'ticket-title' }, item.text),
+            chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
+            meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
+        )
+    }
+
+    // === Ticket detail =====================================================
+    // Three shared pure builders (renderTicketSummary / renderTicketBody /
+    // renderPropertyRail) compose into BOTH presentations: the right-hand split
+    // panel (board stays on the left) and the full-screen document view.
+
+    // A borderless field that survives the wholesale re-render: an in-progress
+    // value + focus are restored from the previous same-id element (the add-bar
+    // pattern), and the deferred blur-commit bails when a re-render kept focus,
+    // so a background store update never eats a half-typed title.
+    function editableText({ id, value, placeholder = '', multiline = false, className = '', onCommit }) {
+        const prev = root.querySelector(`#${id}`)
+        const el = h(multiline ? 'textarea' : 'input', {
+            id,
+            class: className,
+            placeholder,
+            rows: multiline ? '2' : null,
+            onkeydown: (event) => {
+                if (event.key === 'Escape') { event.stopPropagation(); el.value = value; el.blur(); return }
+                if (event.key === 'Enter' && (!multiline || event.metaKey || event.ctrlKey)) { event.preventDefault(); el.blur() }
+            },
+            onblur: () => queueMicrotask(() => {
+                const live = root.querySelector(`#${id}`)
+                if (live && live !== el && main.ownerDocument.activeElement === live) return
+                if (el.value !== value) onCommit(el.value)
+            }),
+        })
+        el.value = value
+        if (prev) {
+            el.value = prev.value
+            if (main.ownerDocument.activeElement === prev) {
+                queueMicrotask(() => { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p) } catch { /* number/date inputs reject */ } })
+            }
+        }
+        return el
+    }
+
+    function renderTicketSummary(item, state, { full = false } = {}) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const b = ticketBadges(item, now())
+        const config = selectBoardConfig(state)
+        const stateName = config.states.find((s) => s.id === item.status)?.name || item.status || t('ticket.detail.none')
+        const chips = [h('span', { class: 'role-chip' }, stateName)]
+        if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
+        if (b.isDone && b.timeliness) {
+            const d = deltaPercent(b.inProgressHours, b.estimatedHours)
+            chips.push(h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + (d != null ? ` ${d > 0 ? '+' : ''}${d}%` : '')))
+        } else if (b.running) {
+            chips.push(h('span', { class: 'ticket-timer' }, h('span', { class: 'timer-dot' }), `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
+        }
+        const meta = []
+        if (b.estimatedHours) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.estimate')} ${b.estimatedHours}h`))
+        if (item.estimatedComplexity) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.complexity')} ${item.estimatedComplexity}%`))
+        if (b.inProgressMs > 0) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.timeSpent')} ${formatDuration(b.inProgressMs)}`))
+        // The rigor task checklist is a top-level field (distinct from body
+        // blocks); surface it so the done-gate stays toggleable from the detail.
+        const checklist = Array.isArray(item.checklist) ? item.checklist : []
+        return h('div', { class: `ticket-summary${full ? ' full' : ''}` },
+            h('div', { class: 'ticket-summary-chips' }, ...chips),
+            editableText({
+                id: 'tf-title',
+                value: item.text || '',
+                placeholder: t('ticket.detail.titlePlaceholder'),
+                className: 'ticket-title-field',
+                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== item.text) actions.updateTicket(item, { text: nv }) },
+            }),
+            editableText({
+                id: 'tf-desc',
+                value: item.description || '',
+                placeholder: t('ticket.detail.descriptionPlaceholder'),
+                multiline: true,
+                className: 'ticket-desc-field',
+                onCommit: (v) => { if (v !== (item.description || '')) actions.updateTicket(item, { description: v }) },
+            }),
+            meta.length ? h('div', { class: 'ticket-summary-meta label-sm' }, ...meta) : null,
+            checklist.length ? h('div', { class: 'ticket-summary-tasks' },
+                h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
+                h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('label', { class: `detail-task${task.done ? ' done' : ''}` },
+                    h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
+                    h('span', {}, task.text),
+                ))),
+            ) : null,
+        )
+    }
+
+    function propRow(icon, label, control) {
+        return h('div', { class: 'prop-row' },
+            h('span', { class: 'prop-key label-sm' }, icon, h('span', {}, label)),
+            h('span', { class: 'prop-val' }, control),
+        )
+    }
+
+    function toDateInputValue(ms) {
+        try {
+            const d = new Date(ms)
+            const pad = (n) => String(n).padStart(2, '0')
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+        } catch { return '' }
+    }
+    function fromDateInputValue(v) {
+        if (!v) return 0
+        const ms = Date.parse(`${v}T00:00:00`)
+        return Number.isFinite(ms) ? ms : 0
+    }
+    function clampComplexity(v) {
+        if (v === '' || v == null) return 0
+        const n = Math.round(Number(v))
+        if (!Number.isFinite(n)) return 0
+        return Math.min(100, Math.max(1, n))
+    }
+
+    function renderPropertyRail(item, state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const config = selectBoardConfig(state)
+        const b = ticketBadges(item, now())
+        const writers = state.roster?.writers ?? []
+
+        const shared = h('div', { class: 'prop-shared' },
+            h('h3', { class: 'category-heading label-sm' }, tablerIcon('share', { size: 13 }), h('span', {}, t('ticket.detail.sharedWith'))),
+            writers.length === 0
+                ? h('p', { class: 'label-sm prop-empty' }, t('ticket.detail.you'))
+                : h('div', { class: 'prop-avatars' }, ...writers.map((w) => h('span', { class: 'ticket-avatar', title: w.writerKey }, ticketInitials(w.writerKey)))),
+        )
+
+        const statusSel = h('select', { class: 'prop-select', onchange: (event) => actions.moveTicket(item, event.target.value) },
+            ...config.states.map((s) => h('option', { value: s.id }, s.name)))
+        statusSel.value = item.status || (config.states[0] && config.states[0].id) || ''
+
+        const prioritySel = h('select', { class: 'prop-select', onchange: (event) => actions.updateTicket(item, { priority: event.target.value }) },
+            h('option', { value: '' }, t('ticket.priority.none')),
+            ...['low', 'medium', 'high', 'urgent'].map((p) => h('option', { value: p }, t(`ticket.priority.${p}`))))
+        prioritySel.value = item.priority || ''
+
+        const assigneeSel = h('select', { class: 'prop-select', onchange: (event) => actions.updateTicket(item, { assignee: event.target.value }) },
+            h('option', { value: '' }, t('ticket.detail.none')),
+            ...writers.map((w) => h('option', { value: w.writerKey }, w.writerKey.slice(0, 8))))
+        assigneeSel.value = item.assignee || ''
+
+        const dueInput = h('input', { type: 'date', class: 'prop-input', onchange: (event) => actions.updateTicket(item, { dueAt: fromDateInputValue(event.target.value) }) })
+        dueInput.value = item.dueAt ? toDateInputValue(item.dueAt) : ''
+        const estInput = h('input', { type: 'number', min: '0', step: '0.25', class: 'prop-input', onchange: (event) => actions.updateTicket(item, { estimatedHours: Number(event.target.value) || 0 }) })
+        estInput.value = item.estimatedHours != null ? String(item.estimatedHours) : ''
+        const cxInput = h('input', { type: 'number', min: '1', max: '100', class: 'prop-input', onchange: (event) => actions.updateTicket(item, { estimatedComplexity: clampComplexity(event.target.value) }) })
+        cxInput.value = item.estimatedComplexity != null ? String(item.estimatedComplexity) : ''
+
+        const rows = [
+            propRow(tablerIcon('layout-columns', { size: 14 }), t('ticket.detail.status'), statusSel),
+            propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.priority'), prioritySel),
+            propRow(tablerIcon('user', { size: 14 }), t('ticket.detail.assignee'), assigneeSel),
+            propRow(tablerIcon('calendar', { size: 14 }), t('ticket.detail.due'), dueInput),
+            propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.estimate'), estInput),
+            propRow(tablerIcon('activity', { size: 14 }), t('ticket.detail.complexity'), cxInput),
+            propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.timeSpent'), h('span', { class: 'prop-readonly' }, formatDuration(b.inProgressMs))),
+        ]
+        if (b.isDone && b.timeliness) {
+            const d = deltaPercent(b.inProgressHours, b.estimatedHours)
+            rows.push(propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.timeliness'),
+                h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + (d != null ? ` ${d > 0 ? '+' : ''}${d}%` : ''))))
+        }
+        if (item.createdBy) {
+            rows.push(propRow(tablerIcon('user', { size: 14 }), t('ticket.detail.createdBy'),
+                h('span', { class: 'ticket-avatar', title: item.createdBy }, ticketInitials(item.createdBy))))
+        }
+
+        return h('div', { class: 'prop-rail-inner' },
+            shared,
+            h('div', { class: 'prop-section' },
+                h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.properties')),
+                h('div', { class: 'prop-rows' }, ...rows),
+            ),
+        )
+    }
+
+    // --- block body ---------------------------------------------------------
+    const SAFE_URL = /^(https?:\/\/|mailto:)/i
+    const SAFE_IMG = /^(https?:\/\/|data:image\/)/i
+
+    function blockMutedView(text, onclick) {
+        return h('div', { class: 'block-md muted', onclick }, text)
+    }
+
+    function renderBlockView(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const edit = () => actions.startBlockEdit(item, block)
+        switch (block.type) {
+            case 'callout': {
+                const body = h('div', { class: 'block-md' })
+                body.innerHTML = renderInlineMarkdown(block.text || '')
+                if (!(block.text || '').trim()) return blockMutedView(t('ticket.block.placeholder.callout'), edit)
+                return h('div', { class: 'block-callout', onclick: edit }, tablerIcon('quote', { size: 16 }), body)
+            }
+            case 'code':
+                return h('pre', { class: 'block-code', onclick: edit }, h('code', {}, block.text || ''))
+            case 'checklist': {
+                const items = Array.isArray(block.items) ? block.items : []
+                if (!items.length) return blockMutedView(t('ticket.block.placeholder.checklist'), edit)
+                return h('ul', { class: 'block-checklist' }, ...items.map((it, i) => h('li', { class: it.done ? 'done' : '', onclick: edit },
+                    h('input', { type: 'checkbox', checked: it.done ? '' : null, onclick: (e) => e.stopPropagation(), onchange: () => actions.toggleChecklistBlockItem(item, block.id, i) }),
+                    h('span', {}, it.text || ''),
+                )))
+            }
+            case 'numberedList': {
+                const items = Array.isArray(block.items) ? block.items : []
+                if (!items.length) return blockMutedView(t('ticket.block.placeholder.numberedList'), edit)
+                return h('ol', { class: 'block-numbered', onclick: edit }, ...items.map((it) => h('li', {}, it.text || '')))
+            }
+            case 'links': {
+                const links = Array.isArray(block.links) ? block.links : []
+                if (!links.length) return blockMutedView(t('ticket.block.placeholder.links'), edit)
+                return h('ul', { class: 'block-links' }, ...links.map((l) => {
+                    const label = l.label || l.url || ''
+                    return h('li', {}, SAFE_URL.test(l.url || '')
+                        ? h('a', { href: l.url, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, tablerIcon('link', { size: 13 }), label)
+                        : h('span', { onclick: edit }, label))
+                }))
+            }
+            case 'image':
+                if (!block.url || !SAFE_IMG.test(block.url)) return blockMutedView(t('ticket.block.imageEmpty'), edit)
+                return h('img', { class: 'block-image', src: block.url, alt: block.alt || '', loading: 'lazy', onclick: edit })
+            case 'table': {
+                const rows = Array.isArray(block.rows) ? block.rows : []
+                if (!rows.length) return blockMutedView(t('ticket.block.placeholder.table'), edit)
+                const [head, ...body] = rows
+                return h('table', { class: 'block-table', onclick: edit },
+                    h('thead', {}, h('tr', {}, ...(head || []).map((c) => h('th', {}, c)))),
+                    h('tbody', {}, ...body.map((r) => h('tr', {}, ...(r || []).map((c) => h('td', {}, c))))),
+                )
+            }
+            default: {
+                const text = block.text || ''
+                if (!text.trim()) return blockMutedView(t('ticket.block.placeholder.markdown'), edit)
+                const div = h('div', { class: 'block-md', onclick: edit })
+                div.innerHTML = renderInlineMarkdown(text)
+                return div
+            }
+        }
+    }
+
+    function renderSlashMenu(item, spec) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        return h('div', { class: 'block-slash-menu', role: 'menu' },
+            ...BLOCK_TYPES.map((bt) => h('button', {
+                class: 'slash-item',
+                type: 'button',
+                role: 'menuitem',
+                onmousedown: (event) => event.preventDefault(),
+                onclick: () => {
+                    if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, bt.type)
+                    else actions.insertBlock(item, bt.type, spec.mode === 'after' ? spec.blockId : null)
+                },
+            }, tablerIcon(bt.icon, { size: 15 }), h('span', { class: 'label-md' }, t(bt.labelKey)))),
+        )
+    }
+
+    function renderBlockEditor(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const placeholder = t(`ticket.block.placeholder.${block.type}`)
+        // Markdown blocks get an inline "/" command menu, toggled purely via
+        // classList so a keystroke never forces a re-render that would steal the
+        // textarea focus.
+        const menu = block.type === 'markdown' ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
+        if (menu) menu.classList.add('block-slash-inline', ui.blockDraft === '/' ? 'open' : 'hidden')
+        const ta = h('textarea', {
+            class: 'block-editor',
+            rows: (block.type === 'markdown' || block.type === 'code' || block.type === 'callout' || block.type === 'table') ? '4' : '3',
+            placeholder,
+            oninput: (event) => {
+                ui.blockDraft = event.target.value
+                if (menu) menu.classList.toggle('hidden', event.target.value !== '/')
+                if (menu) menu.classList.toggle('open', event.target.value === '/')
+            },
+            onkeydown: (event) => {
+                if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item) }
+            },
+            onblur: () => queueMicrotask(() => {
+                const live = root.querySelector('.block-editor')
+                if (live && live !== ta && main.ownerDocument.activeElement === live) return
+                if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
+            }),
+        })
+        ta.value = ui.blockDraft
+        queueMicrotask(() => {
+            if (main.ownerDocument.activeElement === ta) return
+            ta.focus()
+            const p = ta.value.length
+            try { ta.setSelectionRange(p, p) } catch { /* ignore */ }
+        })
+        return h('div', { class: 'block-editor-wrap' }, ta, menu)
+    }
+
+    function renderBlock(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const editing = ui.blockEditingId === block.id
+        const afterMenu = (!editing && ui.blockMenu && ui.blockMenu.mode === 'after' && ui.blockMenu.blockId === block.id)
+            ? h('div', { class: 'block-menu-anchor' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, ui.blockMenu))
+            : null
+        const row = h('div', {
+            class: `block block-${block.type}${editing ? ' editing' : ''}`,
+            dataset: { blockId: block.id },
+            ondragover: (event) => { if (ui.blockDrag) { event.preventDefault(); row.classList.add('block-drop') } },
+            ondragleave: () => row.classList.remove('block-drop'),
+            ondrop: (event) => {
+                event.preventDefault()
+                row.classList.remove('block-drop')
+                const drag = ui.blockDrag
+                ui.blockDrag = null
+                if (drag) actions.moveBlock(item, drag.id, block.id)
+            },
+        },
+            h('div', { class: 'block-gutter' },
+                h('button', {
+                    class: 'block-handle',
+                    type: 'button',
+                    draggable: 'true',
+                    'aria-label': t('ticket.block.move'),
+                    ondragstart: (event) => {
+                        ui.blockDrag = { id: block.id }
+                        event.dataTransfer.effectAllowed = 'move'
+                        try { event.dataTransfer.setData('text/plain', block.id) } catch { /* some platforms reject */ }
+                        row.classList.add('block-dragging')
+                    },
+                    ondragend: () => { ui.blockDrag = null; row.classList.remove('block-dragging') },
+                }, tablerIcon('grip-vertical', { size: 15 })),
+                h('button', {
+                    class: 'block-plus',
+                    type: 'button',
+                    'aria-label': t('ticket.block.insert'),
+                    onclick: () => actions.openBlockMenu({ mode: 'after', blockId: block.id }),
+                }, tablerIcon('plus', { size: 15 })),
+            ),
+            h('div', { class: 'block-content' }, editing ? renderBlockEditor(item, block) : renderBlockView(item, block)),
+            h('button', {
+                class: 'block-delete',
+                type: 'button',
+                'aria-label': t('ticket.block.delete'),
+                onclick: () => actions.deleteBlock(item, block.id),
+            }, tablerIcon('trash', { size: 14 })),
+            afterMenu,
+        )
+        return row
+    }
+
+    function renderTicketBody(item) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const blocks = normalizeBlocks(item.blocks)
+        const addMenuOpen = !!(ui.blockMenu && ui.blockMenu.mode === 'end')
+        return h('section', { class: 'ticket-body' },
+            h('div', { class: 'ticket-body-head' },
+                h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.body')),
+                blocks.length ? h('span', { class: 'block-hint label-sm' }, t('ticket.block.editHint')) : null,
+            ),
+            blocks.length === 0
+                ? h('button', { class: 'block-empty', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 16 }), t('ticket.block.empty'))
+                : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
+            h('div', { class: 'block-add-row' },
+                h('button', { class: 'block-add', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 14 }), t('ticket.block.add')),
+                addMenuOpen ? h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, { mode: 'end' })) : null,
+            ),
+        )
+    }
+
+    function renderTicketSplitPanel(item, state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        return h('aside', { class: 'detail-split' },
+            h('div', { class: 'detail-toolbar' },
+                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
+                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
+            ),
+            h('div', { class: 'detail-split-scroll' },
+                renderTicketSummary(item, state, { full: false }),
+                h('div', { class: 'prop-rail compact' }, renderPropertyRail(item, state)),
+                renderTicketBody(item),
+            ),
+        )
+    }
+
+    function renderTicketFull(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        requestBoardConfigOnce()
+        const item = state.items.find((entry) => entry && entry.id === ui.ticketDocId)
+        if (!item || item.listType !== KANBAN_LIST_TYPE) {
+            ui.ticketDocId = null
+            return ui.view === 'board' ? renderBoardPane(state) : renderListsPane(state)
+        }
+        replaceChildren(main,
+            h('header', { class: 'page-header ticket-doc-header' },
+                h('button', { class: 'btn btn-secondary', type: 'button', onclick: () => actions.collapseTicket() }, tablerIcon('arrows-minimize', { size: 15 }), t('ticket.detail.exitFull')),
+                h('div', { class: 'header-actions' },
+                    h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
+                ),
+            ),
+            h('div', { class: 'ticket-doc' },
+                h('div', { class: 'ticket-doc-summary' }, renderTicketSummary(item, state, { full: true })),
+                h('aside', { class: 'ticket-doc-rail prop-rail' }, renderPropertyRail(item, state)),
+                h('div', { class: 'ticket-doc-body' }, renderTicketBody(item)),
+            ),
+        )
+    }
+
+    function renderCongruencyPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        requestBoardConfigOnce()
+        const stats = selectWriterStats(state.items)
+        const legend = (cls, label) => h('span', { class: 'lg' }, h('span', { class: `sw ${cls}` }), label)
+        replaceChildren(main,
+            h('header', { class: 'page-header' },
+                h('h1', { class: 'page-title title-lg' }, t('congruency.title')),
+            ),
+            h('section', { class: 'pane-section' },
+                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('congruency.subtitle')),
+                stats.length === 0
+                    ? h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('congruency.empty'))
+                    : h('div', { class: 'congruency-cards' }, ...stats.map(renderCongruencyCard)),
+                stats.length
+                    ? h('div', { class: 'congruency-legend label-sm' },
+                        legend('on-time', t('congruency.legend.onTime')),
+                        legend('over', t('congruency.legend.overtime')),
+                        legend('under', t('congruency.legend.undertime')))
+                    : null,
+            ),
+        )
+    }
+
+    function renderCongruencyCard(stat) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const total = Math.max(1, stat.count)
+        const name = stat.user === 'unassigned' ? '—' : stat.user.slice(0, 8)
+        return h('div', { class: 'congruency-card' },
+            h('div', { class: 'congruency-user' },
+                h('span', { class: 'ticket-avatar' }, ticketInitials(stat.user)),
+                h('div', {},
+                    h('div', { class: 'body-md' }, name),
+                    h('div', { class: 'label-sm', style: 'color: var(--secondary);' }, t('congruency.completed', { count: stat.count })),
+                ),
+            ),
+            h('div', { class: 'congruency-mid' },
+                h('div', { class: 'congruency-bar' },
+                    h('span', { class: 'seg on-time', style: `width:${(100 * stat.onTime / total)}%` }),
+                    h('span', { class: 'seg over', style: `width:${(100 * stat.over / total)}%` }),
+                    h('span', { class: 'seg under', style: `width:${(100 * stat.under / total)}%` }),
+                ),
+                h('div', { class: 'congruency-math label-sm' },
+                    `${t('congruency.stat.avgComplexity')} ${stat.avgComplexity}% · ${t('congruency.stat.offEstimate')} ${stat.offEstimateRate}% · ${t('congruency.stat.gap')} ${stat.gap}`),
+            ),
+            h('div', { class: 'congruency-score-box' },
+                h('div', { class: 'congruency-score' }, `${stat.score}%`),
+                h('span', { class: `tendency ${stat.tendency}` }, t(`congruency.tendency.${stat.tendency}`)),
+            ),
+        )
     }
 
     function renderPeersPane(state) {
@@ -914,11 +1699,31 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     onclick: () => locale.setChoice(choice),
                 }, localeChoiceLabel(locale.i18n, choice))),
             )
+            const boardCfg = selectBoardConfig(state)
+            const canEditRigor = !!(state.boardConfigCanAdminister || state.roster?.canAdminister)
+            const rigorRow = canEditRigor
+                ? h('div', { class: 'choice-row' },
+                    h('button', {
+                        class: `btn ${boardCfg.rigorOn ? 'btn-primary' : 'btn-secondary'}`,
+                        'aria-pressed': boardCfg.rigorOn ? 'true' : 'false',
+                        onclick: () => actions.setRigor(true),
+                    }, t('settings.rigor.on')),
+                    h('button', {
+                        class: `btn ${!boardCfg.rigorOn ? 'btn-primary' : 'btn-secondary'}`,
+                        'aria-pressed': !boardCfg.rigorOn ? 'true' : 'false',
+                        onclick: () => actions.setRigor(false),
+                    }, t('settings.rigor.off')),
+                )
+                : h('p', { class: 'body-md', style: 'color: var(--secondary);' },
+                    `${boardCfg.rigorOn ? t('settings.rigor.on') : t('settings.rigor.off')} — ${t('settings.rigor.readonlyHelp')}`)
             content = dialogFrame(t('desktop.settings.title'), [
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.theme.label')),
                 themeRow,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.hints.show')),
                 hintsRow,
+                h('h3', { class: 'category-heading label-sm' }, t('settings.rigor.label')),
+                rigorRow,
+                canEditRigor ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.rigor.ownerHelp')) : null,
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
             ], [
@@ -966,11 +1771,75 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ], [
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
+        } else if (kind === 'add-ticket') {
+            const config = selectBoardConfig(state)
+            const rigorOn = config.rigorOn
+            const draft = ui.dialog.draft
+            const descInput = h('input', { class: 'input', value: draft.description, placeholder: t('ticket.field.descriptionPlaceholder'), oninput: (event) => { draft.description = event.target.value } })
+            const hoursInput = h('input', { class: 'input', type: 'number', min: '0.25', step: '0.25', style: 'max-width: 130px;', value: draft.hours, placeholder: '6', oninput: (event) => { draft.hours = event.target.value } })
+            const cxReadout = h('span', { class: 'complexity-readout label-md' }, `${draft.complexity}%`)
+            const cxInput = h('input', { type: 'range', min: '1', max: '100', value: String(draft.complexity), class: 'complexity-slider', oninput: (event) => { draft.complexity = Number(event.target.value); cxReadout.textContent = `${draft.complexity}%` } })
+            const taskRows = draft.tasks.map((val, index) => h('div', { class: 'rigor-task-row' },
+                h('input', { class: 'input', value: val, placeholder: t('ticket.field.taskPlaceholder'), oninput: (event) => { draft.tasks[index] = event.target.value } }),
+                h('button', { class: 'btn btn-secondary btn-icon', 'aria-label': t('common.remove'), onclick: () => { draft.tasks.splice(index, 1); if (!draft.tasks.length) draft.tasks.push(''); renderAll() } }, tablerIcon('x', { size: 14 })),
+            ))
+            const submit = () => {
+                const desc = draft.description.trim()
+                const tasks = draft.tasks.map((s) => s.trim()).filter(Boolean)
+                const hours = Number(draft.hours)
+                const complexity = Number(draft.complexity)
+                const checklist = tasks.map((text, index) => ({ id: `task-${index}-${text.length}-${complexity}`, text, done: false }))
+                const missing = []
+                if (!desc) missing.push('description')
+                if (rigorOn) {
+                    for (const m of validateRigorDraft({ text: desc, description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity }, config).missing) {
+                        if (!missing.includes(m)) missing.push(m)
+                    }
+                }
+                if (missing.length) {
+                    store.pushNotice(t('ticket.create.missing'), 'error')
+                    if (missing.includes('description')) shake(descInput)
+                    if (missing.includes('hours')) shake(hoursInput)
+                    return
+                }
+                markLocalText(desc)
+                send(RPC_ADD, { text: desc, listType: KANBAN_LIST_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                closeDialog()
+            }
+            content = dialogFrame(t('ticket.create.title'), [
+                rigorOn ? h('div', { class: 'rigor-badge' }, tablerIcon('checklist', { size: 13 }), t('ticket.create.rigorBadge')) : null,
+                rigorOn ? h('p', { class: 'dialog-body', style: 'color: var(--secondary);' }, t('ticket.create.rigorHint')) : null,
+                fieldLabel(t('ticket.field.description'), rigorOn),
+                descInput,
+                fieldLabel(t('ticket.field.tasks'), rigorOn),
+                h('div', { class: 'rigor-tasks' }, ...taskRows),
+                h('button', { class: 'btn btn-secondary add-task', onclick: () => { draft.tasks.push(''); renderAll() } }, tablerIcon('plus', { size: 14 }), t('ticket.field.addTask')),
+                h('div', { class: 'rigor-2col' },
+                    h('div', {}, fieldLabel(t('ticket.field.hours'), rigorOn), hoursInput),
+                    h('div', {}, fieldLabel(t('ticket.field.complexity'), rigorOn), h('div', { class: 'complexity-row' }, cxInput, cxReadout)),
+                ),
+                rigorOn ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('ticket.rigor.ownerNote')) : null,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-primary', onclick: submit }, t('ticket.create.submit')),
+            ])
+            queueMicrotask(() => descInput.focus())
         }
 
         replaceChildren(dialogHost,
             h('div', { class: 'dialog-backdrop', onclick: (event) => { if (event.target === event.currentTarget) closeDialog() } }, content),
         )
+    }
+
+    function fieldLabel(text, required) {
+        return h('label', { class: 'field-label label-sm' }, text, required ? h('span', { class: 'req' }, ' *') : null)
+    }
+
+    function shake(el) {
+        if (!el) return
+        el.classList.remove('shake')
+        void el.offsetWidth
+        el.classList.add('shake')
     }
 
     function dialogFrame(title, body, dialogActions) {
@@ -1010,7 +1879,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     root.ownerDocument.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
-            if (ui.dialog) closeDialog()
+            if (ui.dialog) { closeDialog(); return }
+            if (ui.blockMenu) { actions.closeBlockMenu(); return }
+            if (ui.ticketDocId || ui.selectedTicketId) { actions.closeTicket(); return }
             return
         }
         if (isTypingTarget(event.target) || ui.dialog) return

@@ -31,6 +31,11 @@ export function createDesktopStore(initial = {}) {
         isJoining: false,
         backendReady: false,
         roster: null,
+        // Owner-signed kanban board configuration pushed by the backend
+        // (rigor mode, states, properties, rules, automations). null until the
+        // first board-config message; selectors fall back to defaults.
+        boardConfig: null,
+        boardConfigCanAdminister: false,
         recovery: null,
         notices: [],
         diagnostics: [],
@@ -159,6 +164,16 @@ export function createDesktopStore(initial = {}) {
                     roster: payload.roster ?? null,
                     diagnostics: recordDiagnostic('membership-roster', undefined, now),
                 })
+                return type
+            case 'board-config':
+                setState({
+                    boardConfig: payload.config ?? null,
+                    boardConfigCanAdminister: !!payload.canAdminister,
+                    diagnostics: recordDiagnostic('board-config', undefined, now),
+                })
+                return type
+            case 'config-denied':
+                setState({ diagnostics: recordDiagnostic('config-denied', payload.reason, now) })
                 return type
             case 'recovery-required':
                 setState({
