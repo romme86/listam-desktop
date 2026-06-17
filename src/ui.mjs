@@ -17,13 +17,15 @@ import {
     RPC_SET_BOARD_CONFIG,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
+import { isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
 import { LOCALE_CHOICES, localeChoiceLabel } from './i18n.mjs'
 import { nextTheme, THEME_CHOICES } from './prefs.mjs'
 import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
 import {
-    KANBAN_LIST_TYPE,
+    isBoardType,
+    BOARD_WRITE_TYPE,
     selectBoardConfig,
     groupByStatus,
     ticketBadges,
@@ -38,6 +40,7 @@ import {
     blockFromText,
     normalizeBlocks,
     renderInlineMarkdown,
+    renderMarkdownBlock,
 } from './ticket.mjs'
 
 const NOTICE_TTL_MS = 4000
@@ -66,10 +69,20 @@ function h(tag, props = {}, ...children) {
 }
 
 // Grocery surfaces (the lists pane, its count, clear-done) operate on ordinary
-// list items only — kanban tickets live on their own board, so they are never
-// shown, counted, or cleared alongside groceries.
+// grocery list items only. Board tickets live on their own board, and to-do
+// items are plain text with no grocery intelligence — both are excluded so they
+// are never shown, counted, categorized, or cleared alongside groceries. The
+// desktop has no dedicated to-do surface yet (the rail's "todo" entry is still
+// "soon"), so to-do lists synced from mobile are simply not surfaced here rather
+// than corrupting the grocery view with category grouping.
 function isGroceryItem(item) {
-    return !!item && item.listType !== KANBAN_LIST_TYPE
+    return !!item && !isBoardType(item.listType) && !isTodoType(item.listType)
+}
+
+// The to-do surface: plain text items (isTodoType), the mirror of isGroceryItem
+// for the grocery surface and isBoardType for the board.
+function isTodoItem(item) {
+    return !!item && isTodoType(item.listType)
 }
 
 export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
@@ -80,7 +93,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         focusedItemId: null,
         controlStatus: {},
         addBarOpen: false,
-        // Kanban detail: selectedTicketId drives the right-hand split panel
+        // Board detail: selectedTicketId drives the right-hand split panel
         // (board stays on the left); ticketDocId promotes the same ticket to
         // the full-screen document view. blockEditingId/blockDraft/blockMenu/
         // blockDrag are UI-local block-editor state kept off the store so block
@@ -163,15 +176,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         addItem(text) {
             const trimmed = text.trim()
             if (!trimmed) return false
+            // The add bar serves whichever simple-list surface is showing. A
+            // to-do add carries listType so the backend files it on the to-do
+            // list; dedupe is scoped to that same surface.
+            const isTodo = ui.view === 'todo'
+            const onSurface = isTodo ? isTodoItem : isGroceryItem
             const duplicate = store.getState().items.find(
-                (item) => isGroceryItem(item) && !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
+                (item) => onSurface(item) && !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
             )
             if (duplicate) {
                 store.pushNotice(locale.i18n.t('main.notification.duplicateAdd', { text: trimmed }), 'info')
                 return false
             }
             markLocalText(trimmed)
-            send(RPC_ADD, { text: trimmed })
+            send(RPC_ADD, isTodo ? { text: trimmed, listType: TODO_LIST_TYPE } : { text: trimmed })
             return true
         },
         toggleItem(item) {
@@ -196,12 +214,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             animateRowExit(item, () => send(RPC_DELETE, { item }))
         },
         clearDone() {
-            selectDoneItems(store.getState().items.filter(isGroceryItem)).forEach((item, index) => {
+            const onSurface = ui.view === 'todo' ? isTodoItem : isGroceryItem
+            selectDoneItems(store.getState().items.filter(onSurface)).forEach((item, index) => {
                 markLocalId(item.id)
                 animateRowExit(item, () => send(RPC_DELETE, { item }), index * 40)
             })
         },
-        // --- kanban -------------------------------------------------------
+        // --- board --------------------------------------------------------
         newTicket() {
             openDialog({ kind: 'add-ticket', draft: { description: '', tasks: [''], hours: '', complexity: 50 } })
         },
@@ -360,7 +379,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             store.setPreferences({ theme: nextTheme(store.getState().preferences.theme) })
         },
         summonAddBar() {
-            ui.view = 'lists'
+            // Stay on whichever simple-list surface is showing (grocery or
+            // to-do); from any other view default to the grocery list.
+            if (ui.view !== 'lists' && ui.view !== 'todo') ui.view = 'lists'
             ui.addBarOpen = true
             renderAll()
             queueMicrotask(() => root.querySelector('#add-item-input')?.focus())
@@ -441,7 +462,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         { key: 'overview', icon: 'layout-dashboard', soon: true, label: (t) => t('desktop.nav.overview') },
         { key: 'lists', icon: 'shopping-cart', label: (t) => t('desktop.rail.groceries') },
         { key: 'board', icon: 'layout-grid', label: (t) => t('desktop.rail.board') },
-        { key: 'todo', icon: 'checklist', soon: true, label: (t) => t('desktop.rail.todo') },
+        { key: 'todo', icon: 'checklist', label: (t) => t('desktop.rail.todo') },
         { key: 'travel', icon: 'plane', soon: true, label: (t) => t('desktop.rail.travel') },
     ]
     const SYSTEM_DEFS = [
@@ -518,8 +539,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             } else if (def.key === 'lists') {
                 btn.append(h('span', { class: `badge${remaining === 0 ? ' zero' : ''}` }, String(remaining)))
             } else if (def.key === 'board') {
-                const inProgress = state.items.filter((i) => i.listType === KANBAN_LIST_TYPE && i.status === 'in_progress').length
+                const inProgress = state.items.filter((i) => isBoardType(i.listType) && i.status === 'in_progress').length
                 btn.append(h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress)))
+            } else if (def.key === 'todo') {
+                const todoLeft = selectSummary(state.items.filter(isTodoItem)).remaining
+                btn.append(h('span', { class: `badge${todoLeft === 0 ? ' zero' : ''}` }, String(todoLeft)))
             } else if (def.key === 'peers') {
                 btn.append(h('span', {
                     class: `badge${state.peerCount === 0 ? ' zero' : ''}${peersChanged ? ' pop' : ''}`,
@@ -550,6 +574,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         if (ui.ticketDocId) return renderTicketFull(state)
         if (ui.view === 'board') return renderBoardPane(state)
+        if (ui.view === 'todo') return renderTodoPane(state)
         if (ui.view === 'congruency') return renderCongruencyPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
         if (ui.view === 'diagnostics') return renderDiagnosticsPane(state)
@@ -584,18 +609,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderListsPane(state) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const { preferences } = state
-        const items = state.items.filter(isGroceryItem)
-        const summary = selectSummary(items)
-
-        // The add-bar renders only when summoned (N or the + button). Escape
-        // dismisses; blur dismisses when empty. Re-renders rebuild the input,
-        // so typed text and focus carry across — mid-typing events (notices,
-        // peer updates) never eat the draft.
+    // The add-bar is shared by the grocery and to-do surfaces. It renders only
+    // when summoned (N or the + button). Escape dismisses; blur dismisses when
+    // empty. Re-renders rebuild the input, so typed text and focus carry across
+    // — mid-typing events (notices, peer updates) never eat the draft. Enter
+    // routes through actions.addItem, which files the item on whichever surface
+    // (grocery vs to-do) is currently in view.
+    function renderAddBar(t) {
+        if (!ui.addBarOpen) return null
         const previousAdd = main.querySelector('#add-item-input')
-        const addInput = !ui.addBarOpen ? null : h('input', {
+        const addInput = h('input', {
             class: 'input',
             id: 'add-item-input',
             placeholder: t('main.addItem.placeholder'),
@@ -630,12 +653,23 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 })
             },
         })
-        if (addInput && previousAdd) {
+        if (previousAdd) {
             addInput.value = previousAdd.value
             if (main.ownerDocument.activeElement === previousAdd) {
                 queueMicrotask(() => addInput.focus())
             }
         }
+        return h('div', { class: 'add-bar' },
+            addInput,
+            h('span', { class: 'add-hint label-md' }, t('desktop.addItem.hint')),
+        )
+    }
+
+    function renderListsPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const { preferences } = state
+        const items = state.items.filter(isGroceryItem)
+        const summary = selectSummary(items)
 
         const statusKey = !state.backendReady
             ? 'header.status.starting'
@@ -660,10 +694,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
-            !ui.addBarOpen ? null : h('div', { class: 'add-bar' },
-                addInput,
-                h('span', { class: 'add-hint label-md' }, t('desktop.addItem.hint')),
-            ),
+            renderAddBar(t),
             h('div', { class: 'summary-bar label-md' },
                 h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
                 h('span', {}, t(statusKey, { count: state.peerCount })),
@@ -676,6 +707,50 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ),
             state.isJoining ? renderJoinOverlay(state) : null,
             items.length === 0 ? renderEmptyState() : renderItems(state, items),
+        )
+    }
+
+    // The to-do surface: a flat plain-text list. No category grouping, no grid,
+    // no grocery item icons — just checkbox rows. Mirrors the grocery pane but
+    // deliberately omits the grid toggle and the category machinery.
+    function renderTodoPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const items = state.items.filter(isTodoItem)
+        const summary = selectSummary(items)
+        const statusKey = !state.backendReady
+            ? 'header.status.starting'
+            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+
+        replaceChildren(main,
+            h('header', { class: 'page-header' },
+                h('h1', { class: 'page-title title-lg' }, t('desktop.rail.todo')),
+                h('div', { class: 'header-actions' },
+                    h('button', {
+                        class: 'btn btn-secondary btn-icon',
+                        'aria-label': t('desktop.header.addItem'),
+                        title: `${t('desktop.header.addItem')} (N)`,
+                        onclick: actions.summonAddBar,
+                    }, tablerIcon('plus', { size: 16 })),
+                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
+                ),
+            ),
+            renderAddBar(t),
+            h('div', { class: 'summary-bar label-md' },
+                h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                h('span', {}, t(statusKey, { count: state.peerCount })),
+                h('span', {}, summary.remaining === 0 && summary.total > 0
+                    ? t('main.summary.allDone')
+                    : t('main.summary.itemsLeft', { count: summary.remaining })),
+                summary.done > 0
+                    ? h('button', { class: 'btn btn-secondary', onclick: actions.clearDone }, t('main.summary.clearDone'))
+                    : null,
+            ),
+            state.isJoining ? renderJoinOverlay(state) : null,
+            items.length === 0
+                ? renderEmptyState()
+                : h('div', { class: 'item-rows' },
+                    ...items.map((item) => renderItemRow(item, tablerIcon(item.isDone ? 'square-check' : 'square', { size: 18 }))),
+                ),
         )
     }
 
@@ -713,12 +788,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     : null,
                 preferences.isGridView
                     ? h('div', { class: 'grid-cards' }, ...section.items.map(({ entry }) => renderGridCard(section, entry)))
-                    : h('div', { class: 'item-rows' }, ...section.items.map(({ entry }) => renderItemRow(section, entry))),
+                    : h('div', { class: 'item-rows' }, ...section.items.map(({ entry }) => renderItemRow(entry, categoryIcon(section.canonicalKey, { size: 16 })))),
             )),
         )
     }
 
-    function renderItemRow(section, item) {
+    // `glyph` is the leading icon node: a category icon on the grocery surface,
+    // a checkbox on the to-do surface. The row's toggle/edit/delete behaviour is
+    // identical for both.
+    function renderItemRow(item, glyph) {
         const t = locale.i18n.t.bind(locale.i18n)
         if (ui.editingItemId === item.id) {
             const editInput = h('input', {
@@ -760,7 +838,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             onkeydown: (event) => handleItemKeys(event, item),
             onfocus: () => { ui.focusedItemId = item.id },
         },
-            h('span', { class: 'glyph' }, categoryIcon(section.canonicalKey, { size: 16 })),
+            h('span', { class: 'glyph' }, glyph),
             h('span', { class: 'item-text' }, item.text),
             h('button', {
                 class: 'row-delete',
@@ -800,7 +878,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // The board config is owner-signed shared state held by the backend; fetch
-    // it once when a kanban surface first renders.
+    // it once when a board surface first renders.
     function requestBoardConfigOnce() {
         if (ui.boardConfigRequested) return
         ui.boardConfigRequested = true
@@ -817,7 +895,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function selectedTicket(state) {
         if (!ui.selectedTicketId) return null
         const item = state.items.find((entry) => entry && entry.id === ui.selectedTicketId)
-        return item && item.listType === KANBAN_LIST_TYPE ? item : null
+        return item && isBoardType(item.listType) ? item : null
     }
 
     // The item's blocks with the in-flight textarea draft folded into the block
@@ -834,7 +912,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const config = selectBoardConfig(state)
         const columns = groupByStatus(state.items, config)
         const nowMs = now()
-        const board = h('div', { class: 'kanban-board' }, ...columns.map((col) => renderBoardColumn(col, nowMs)))
+        const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs)))
         const selected = selectedTicket(state)
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -860,7 +938,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const s = col.state
         const count = s.wipLimit > 0 ? `${col.tickets.length}/${s.wipLimit}` : String(col.tickets.length)
         return h('div', {
-            class: 'kanban-column',
+            class: 'board-column',
             dataset: { status: s.id },
             ondragover: (event) => { event.preventDefault(); event.currentTarget.classList.add('drag-over') },
             ondragleave: (event) => { event.currentTarget.classList.remove('drag-over') },
@@ -874,14 +952,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 if (item) actions.moveTicket(item, s.id)
             },
         },
-            h('div', { class: 'kanban-col-head' },
-                h('span', { class: 'kanban-dot', style: `background:${s.color || 'var(--ink-faint)'}` }),
-                h('span', { class: 'kanban-col-name label-sm' }, s.name),
-                h('span', { class: 'kanban-col-count label-sm' }, count),
+            h('div', { class: 'board-col-head' },
+                h('span', { class: 'board-dot', style: `background:${s.color || 'var(--ink-faint)'}` }),
+                h('span', { class: 'board-col-name label-sm' }, s.name),
+                h('span', { class: 'board-col-count label-sm' }, count),
             ),
-            h('div', { class: 'kanban-col-body' },
+            h('div', { class: 'board-col-body' },
                 ...col.tickets.map((ticket) => renderTicketCard(ticket, nowMs)),
-                h('button', { class: 'kanban-add', onclick: () => actions.newTicket() },
+                h('button', { class: 'board-add', onclick: () => actions.newTicket() },
                     tablerIcon('plus', { size: 14 }), t('board.add')),
             ),
         )
@@ -1156,7 +1234,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 const text = block.text || ''
                 if (!text.trim()) return blockMutedView(t('ticket.block.placeholder.markdown'), edit)
                 const div = h('div', { class: 'block-md', onclick: edit })
-                div.innerHTML = renderInlineMarkdown(text)
+                div.innerHTML = renderMarkdownBlock(text)
                 return div
             }
         }
@@ -1305,7 +1383,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
         const item = state.items.find((entry) => entry && entry.id === ui.ticketDocId)
-        if (!item || item.listType !== KANBAN_LIST_TYPE) {
+        if (!item || !isBoardType(item.listType)) {
             ui.ticketDocId = null
             return ui.view === 'board' ? renderBoardPane(state) : renderListsPane(state)
         }
@@ -1803,7 +1881,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     return
                 }
                 markLocalText(desc)
-                send(RPC_ADD, { text: desc, listType: KANBAN_LIST_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                send(RPC_ADD, { text: desc, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
                 closeDialog()
             }
             content = dialogFrame(t('ticket.create.title'), [
@@ -1890,7 +1968,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             event.preventDefault()
             actions.summonAddBar()
         } else if (event.key === 'g') {
-            preferencesToggle('isGridView')
+            // Grid view exists only on the grocery surface; ignore elsewhere.
+            if (ui.view === 'lists') preferencesToggle('isGridView')
         } else if (event.key === 't') {
             actions.cycleTheme()
         } else if (event.key === 'h') {

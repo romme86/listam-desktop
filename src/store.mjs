@@ -31,7 +31,7 @@ export function createDesktopStore(initial = {}) {
         isJoining: false,
         backendReady: false,
         roster: null,
-        // Owner-signed kanban board configuration pushed by the backend
+        // Owner-signed board configuration pushed by the backend
         // (rigor mode, states, properties, rules, automations). null until the
         // first board-config message; selectors fall back to defaults.
         boardConfig: null,

@@ -14,7 +14,8 @@ import {
     RPC_SET_BOARD_CONFIG,
 } from '@listam/protocol'
 import { applyOperationToList, normalizeListItem } from '@listam/domain/list-reducer'
-import { KANBAN_LIST_TYPE, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/kanban'
+import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
+import { TODO_LIST_TYPE } from '@listam/domain/identity'
 
 const FIXTURE_TEXTS = [
     ['Honeycrisp apples', false],
@@ -43,15 +44,15 @@ export function createMockBackend() {
         updatedAt: 1,
     }))
 
-    // Kanban board fixtures so ?mock=1 exercises the board, time-in-progress,
+    // Board fixtures so ?mock=1 exercises the board, time-in-progress,
     // on-time badges and the congruency dashboard without a Pear runtime.
     const A = 'a1'.repeat(32)
     const B = 'b2'.repeat(32)
     const HOUR = 3600000
     let boardConfig = normalizeBoardConfig(null) // rigor ON by default
-    const kanbanFixtures = [
+    const boardFixtures = [
         { text: 'Plan Tokyo itinerary', status: 'in_progress', priority: 'high', assignee: A, createdBy: A, estimatedHours: 6, estimatedComplexity: 45, inProgressMs: 4.2 * HOUR, inProgressSince: null, checklist: [{ id: 'k1', text: 'Confirm dates', done: true }, { id: 'k2', text: 'Compare flights', done: false }], blocks: [
-            { id: 'blk-1', type: 'markdown', text: 'Two weeks across **Tokyo**, *Kyoto* and Osaka. Anchor the trip around the [JR Pass](https://japanrailpass.net) and `book early`.' },
+            { id: 'blk-1', type: 'markdown', text: '# Trip overview\nTwo weeks across **Tokyo**, *Kyoto* and Osaka.\n## Getting around\nAnchor the trip around the [JR Pass](https://japanrailpass.net) and `book early`.' },
             { id: 'blk-2', type: 'callout', text: 'Reserve the ryokan before March — they fill fast.', tone: 'info' },
             { id: 'blk-3', type: 'checklist', items: [{ text: 'Pick travel dates', done: true }, { text: 'Compare flights', done: false }, { text: 'Reserve ryokan', done: false }] },
             { id: 'blk-4', type: 'numberedList', items: [{ text: 'Tokyo (5 nights)' }, { text: 'Kyoto (4 nights)' }, { text: 'Osaka (3 nights)' }] },
@@ -68,14 +69,32 @@ export function createMockBackend() {
         { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime' },
     ].map((tk) => normalizeListItem({
         listId: 'default',
-        listType: KANBAN_LIST_TYPE,
+        listType: BOARD_WRITE_TYPE,
         timeOfCompletion: tk.isDone ? 1 : 0,
         updatedAt: 1,
         ...tk,
         id: `mock-${++nextId}`,
         isDone: tk.isDone || false,
     })).filter(Boolean)
-    items = [...items, ...kanbanFixtures]
+
+    // To-do fixtures so ?mock=1 exercises the plain-text to-do surface (no
+    // categories, no grid — just checkbox rows).
+    const todoFixtures = [
+        ['Call the dentist', false],
+        ['Reply to the landlord', false],
+        ['Submit expense report', true],
+        ['Water the plants', false],
+    ].map(([text, isDone]) => normalizeListItem({
+        listId: 'default',
+        listType: TODO_LIST_TYPE,
+        text,
+        isDone,
+        timeOfCompletion: isDone ? 1 : 0,
+        updatedAt: 1,
+        id: `mock-${++nextId}`,
+    })).filter(Boolean)
+
+    items = [...items, ...boardFixtures, ...todoFixtures]
 
     function emit(event) {
         for (const listener of listeners) listener(event)
@@ -102,7 +121,7 @@ export function createMockBackend() {
                     isDone: extra.status === 'done',
                     updatedAt: nextId,
                 }
-                if (raw.listType === KANBAN_LIST_TYPE) {
+                if (isBoardType(raw.listType)) {
                     raw.status = raw.status || 'todo'
                     raw.createdBy = A
                     if (typeof raw.inProgressMs !== 'number') raw.inProgressMs = 0
@@ -114,7 +133,7 @@ export function createMockBackend() {
                 emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_UPDATE) {
                 let item = payload?.item
-                if (item && item.listType === KANBAN_LIST_TYPE) {
+                if (item && isBoardType(item.listType)) {
                     const existing = items.find((entry) => entry && entry.id === item.id)
                     item = applyStatusTransition(existing, item, item.updatedAt || Date.now(), {
                         writerKey: A,
