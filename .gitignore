@@ -3,3 +3,5 @@ node_modules/
 *.log
 listam-desktop-secrets.json
 installer/dist/
+data-local/
+lista.lock

@@ -3,9 +3,37 @@
 // source of truth, this store is the view of it. Item mutations go through
 // @listam/domain's id-keyed reduction — the same code path mobile and the
 // backend reduce with — so duplicate names never collapse by text.
-import { applyOperationToList } from '@listam/domain/list-reducer'
+//
+// We hold a multi-list `createListReduction` rather than the single-list
+// `applyOperationToList`: the latter re-buckets everything to 'default' and so
+// silently drops any item whose listId differs (registry meta-items live under
+// '__registry__', board tickets / named lists under their own ids). `allItems()`
+// re-projects every bucket, so nothing is lost on an incremental event.
+import { createListOperation, createListReduction } from '@listam/domain/list-reducer'
+import { DEFAULT_LIST_ID, normalizeListId } from '@listam/domain/identity'
 import { redactForLog, redactString } from '@listam/logging'
 import { DEFAULT_LEAF_BRIDGE_PORT } from './leaf-bridge-config.mjs'
+
+// Rebuild a reduction from a flat, possibly multi-list snapshot. Items are
+// grouped by their normalized listId and replayed as per-list 'list' operations
+// so each bucket keeps the snapshot order (a 'list' op appends in order, whereas
+// 'add'/'update' prepend). The grouping key MUST match the reduction's own
+// normalizeListId — two 'list' ops for one bucket would clear and replace it.
+// Exported so the mock backend can keep its own items multi-list too.
+export function reductionFromItems(items) {
+    const reduction = createListReduction()
+    const groups = new Map()
+    for (const item of Array.isArray(items) ? items : []) {
+        const listId = normalizeListId(item?.listId)
+        const group = groups.get(listId) ?? { listType: item?.listType, items: [] }
+        group.items.push(item)
+        groups.set(listId, group)
+    }
+    for (const [listId, group] of groups) {
+        reduction.applyOperation(createListOperation('list', group.items, { listId, listType: group.listType }))
+    }
+    return reduction
+}
 
 const MAX_DIAGNOSTIC_EVENTS = 50
 const MAX_NOTICES = 4
@@ -17,12 +45,23 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     categoryHeaders: true,
     theme: 'system',
     showKeyHints: true,
+    // Per-device gate for the "New board" create option. Off by default; never
+    // replicated (prefs are device-local). Hides board *creation*, not existing
+    // boards synced from other peers.
+    boardEnabled: false,
+    // Which list opens on launch — a per-device launch preference (mirrors the
+    // mobile/headless `defaultListId`), resolved against the synced registry via
+    // resolveLaunchList. Not replicated.
+    defaultListId: DEFAULT_LIST_ID,
     leafBridgeEnabled: false,
     leafBridgePort: DEFAULT_LEAF_BRIDGE_PORT,
 })
 
 export function createDesktopStore(initial = {}) {
     let noticeId = 0
+    // Persistent id-keyed reduction across all list buckets; the source of
+    // `state.items`. Rebuilt on each full sync and on reset.
+    let reduction = createListReduction()
     let state = {
         items: [],
         inviteKey: '',
@@ -89,7 +128,10 @@ export function createDesktopStore(initial = {}) {
     function applyClientEvent(event, now = 0) {
         switch (event.type) {
             case 'sync-list': {
-                const items = Array.isArray(event.items) ? event.items : []
+                // A full snapshot — reset the reduction so a re-sync replaces
+                // rather than appends, then re-project every list bucket.
+                reduction = reductionFromItems(event.items)
+                const items = reduction.allItems()
                 setState({ items, diagnostics: recordDiagnostic(`sync-list (${items.length} items)`, undefined, now) })
                 return 'sync-list'
             }
@@ -97,8 +139,9 @@ export function createDesktopStore(initial = {}) {
             case 'update-from-backend':
             case 'delete-from-backend': {
                 const type = event.type.split('-')[0]
+                reduction.applyOperation({ type, value: event.item })
                 setState({
-                    items: applyOperationToList(state.items, { type, value: event.item }),
+                    items: reduction.allItems(),
                     diagnostics: recordDiagnostic(event.type, undefined, now),
                 })
                 return event.type
@@ -110,6 +153,7 @@ export function createDesktopStore(initial = {}) {
                 })
                 return 'invite-key'
             case 'reset':
+                reduction = createListReduction()
                 setState({
                     items: [],
                     inviteKey: '',

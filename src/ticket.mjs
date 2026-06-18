@@ -24,8 +24,16 @@ import {
     blockToText,
     blockFromText,
 } from '@listam/domain/board'
+import {
+    markdownToHtml,
+    htmlToMarkdown,
+    inlineMarkdownToHtml,
+} from '@listam/domain/markdown'
 
 export {
+    markdownToHtml,
+    htmlToMarkdown,
+    inlineMarkdownToHtml,
     BOARD_LIST_TYPE,
     BOARD_WRITE_TYPE,
     DEFAULT_BOARD_CONFIG,
@@ -86,31 +94,6 @@ export function renderInlineMarkdown (text) {
     })
     return out.replace(/\n/g, '<br>')
 }
-
-// Block-level markdown -> HTML for a "Text" block, mirroring the mobile board
-// renderer (BlockBody.tsx): each `#`/`##`/`###` line becomes an <h1>/<h2>/<h3>,
-// every other line keeps inline markdown. Detection is lenient — 1-6 hashes are
-// accepted (mobile only emits 1-3) and 4-6 collapse onto <h3>. The output is
-// built entirely from renderInlineMarkdown (which escapes first), so it stays
-// XSS-safe and is fine to assign to innerHTML.
-export function renderMarkdownBlock (text) {
-    const lines = String(text == null ? '' : text).split('\n')
-    let out = ''
-    let prevInline = false
-    for (const line of lines) {
-        const heading = line.match(/^(#{1,6})\s+(.*)$/)
-        if (heading) {
-            const level = Math.min(heading[1].length, 3)
-            // Headings are block elements — no <br> needed around them.
-            out += `<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`
-            prevInline = false
-        } else {
-            // Join consecutive inline lines with <br>, matching the old
-            // newline-as-<br> behavior for heading-free text.
-            if (prevInline) out += '<br>'
-            out += renderInlineMarkdown(line)
-            prevInline = true
-        }
-    }
-    return out
-}
+// Block-level markdown rendering now lives in the shared bridge as
+// markdownToHtml (re-exported above); renderInlineMarkdown stays as the inline-
+// only renderer for callout views.

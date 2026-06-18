@@ -16,9 +16,19 @@ import {
     RPC_EXPORT_SEED,
     RPC_IMPORT,
 } from '@listam/protocol'
-import { applyOperationToList, normalizeListItem } from '@listam/domain/list-reducer'
+import { normalizeListItem } from '@listam/domain/list-reducer'
+import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-registry'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
+import { reductionFromItems } from './store.mjs'
+
+// Seeded lists/groups: groceries + to-do under a "Home" group, the board on its
+// own (Ungrouped) so ?mock=1 exercises both grouped rows and the implicit
+// Ungrouped bucket. The grocery list keeps the legacy 'default' id.
+const GROCERY_LIST = 'default'
+const BOARD_LIST = 'trip'
+const TODO_LIST = 'errands'
+const HOME_GROUP = 'home'
 
 const FIXTURE_TEXTS = [
     ['Honeycrisp apples', false],
@@ -71,7 +81,7 @@ export function createMockBackend() {
         { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime' },
         { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime' },
     ].map((tk) => normalizeListItem({
-        listId: 'default',
+        listId: BOARD_LIST,
         listType: BOARD_WRITE_TYPE,
         timeOfCompletion: tk.isDone ? 1 : 0,
         updatedAt: 1,
@@ -88,7 +98,7 @@ export function createMockBackend() {
         ['Submit expense report', true],
         ['Water the plants', false],
     ].map(([text, isDone]) => normalizeListItem({
-        listId: 'default',
+        listId: TODO_LIST,
         listType: TODO_LIST_TYPE,
         text,
         isDone,
@@ -97,7 +107,20 @@ export function createMockBackend() {
         id: `mock-${++nextId}`,
     })).filter(Boolean)
 
-    items = [...items, ...boardFixtures, ...todoFixtures]
+    // Registry meta-items declaring the seeded lists/groups (the read path the
+    // dynamic rail consumes). reduceRegistry reads the board's legacy wire type
+    // back as the canonical 'board'.
+    const registryFixtures = [
+        buildGroupMetaItem({ id: HOME_GROUP, name: 'Home', order: 0, updatedAt: 1 }),
+        buildListMetaItem({ id: GROCERY_LIST, name: 'Groceries', type: 'shopping', groupId: HOME_GROUP, order: 0, updatedAt: 1 }),
+        buildListMetaItem({ id: TODO_LIST, name: 'To-do', type: TODO_LIST_TYPE, groupId: HOME_GROUP, order: 1, updatedAt: 1 }),
+        buildListMetaItem({ id: BOARD_LIST, name: 'Tokyo trip', type: BOARD_WRITE_TYPE, groupId: null, order: 0, updatedAt: 1 }),
+    ]
+
+    // Keep the mock's own items multi-list (the single-list applyOperationToList
+    // would drop registry meta-items and the non-default board/to-do lists).
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...registryFixtures])
+    items = reduction.allItems()
 
     function emit(event) {
         for (const listener of listeners) listener(event)
@@ -132,7 +155,8 @@ export function createMockBackend() {
                 }
                 const item = normalizeListItem(raw)
                 if (!item) return null
-                items = applyOperationToList(items, { type: 'add', value: item })
+                reduction.applyOperation({ type: 'add', value: item })
+                items = reduction.allItems()
                 emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_UPDATE) {
                 let item = payload?.item
@@ -143,11 +167,13 @@ export function createMockBackend() {
                         doneStatuses: doneStatusesOf(boardConfig),
                     })
                 }
-                items = applyOperationToList(items, { type: 'update', value: item })
+                reduction.applyOperation({ type: 'update', value: item })
+                items = reduction.allItems()
                 emit({ type: 'update-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_DELETE) {
                 const item = payload?.item
-                items = applyOperationToList(items, { type: 'delete', value: item })
+                reduction.applyOperation({ type: 'delete', value: item })
+                items = reduction.allItems()
                 emit({ type: 'delete-from-backend', item, raw: JSON.stringify(item) })
             } else if (command === RPC_CREATE_INVITE) {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
@@ -177,7 +203,8 @@ export function createMockBackend() {
                 for (const entry of Array.isArray(env.items) ? env.items : []) {
                     const item = normalizeListItem(entry)
                     if (!item) continue
-                    items = applyOperationToList(items, { type: 'add', value: item })
+                    reduction.applyOperation({ type: 'add', value: item })
+                    items = reduction.allItems()
                     emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
                     count++
                 }

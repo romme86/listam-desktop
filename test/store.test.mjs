@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDesktopStore, selectSummary, DEFAULT_PREFERENCES } from '../src/store.mjs'
+import { loadUiPreferences, persistUiPreferences } from '../src/prefs.mjs'
 
 function item(id, text, overrides = {}) {
     return {
@@ -34,6 +35,45 @@ test('store reduces backend item events through the shared id-keyed reduction', 
 
     store.applyClientEvent({ type: 'delete-from-backend', item: item('b', 'Bread') })
     assert.equal(store.getState().items.some((entry) => entry.id === 'b'), false)
+})
+
+test('store keeps items across every list bucket, not just default', () => {
+    const store = createDesktopStore()
+
+    const registryMeta = item('work', 'Tokyo trip', {
+        listId: '__registry__',
+        listType: 'registry',
+        regKind: 'list',
+        regName: 'Tokyo trip',
+        regType: 'kanban',
+        regGroupId: null,
+        regOrder: 0,
+    })
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: [item('a', 'Milk'), registryMeta, item('w1', 'Book flights', { listId: 'work', listType: 'kanban' })],
+    })
+
+    // The default-list projection order is unchanged for default items.
+    assert.deepEqual(
+        store.getState().items.filter((e) => e.listId === 'default').map((e) => e.text),
+        ['Milk'],
+    )
+    // Registry meta-item and the non-default list item both survive the sync,
+    // with their reg* fields intact (applyOperationToList would have dropped them).
+    const meta = store.getState().items.find((e) => e.id === 'work')
+    assert.equal(meta?.listType, 'registry')
+    assert.equal(meta?.regType, 'kanban')
+    assert.equal(store.getState().items.some((e) => e.id === 'w1' && e.listId === 'work'), true)
+
+    // An incremental update to a non-default item must also survive (this is the
+    // path the single-list reducer used to drop).
+    store.applyClientEvent({
+        type: 'update-from-backend',
+        item: item('work', 'Kyoto trip', { listId: '__registry__', listType: 'registry', regName: 'Kyoto trip', updatedAt: 2 }),
+    })
+    assert.equal(store.getState().items.find((e) => e.id === 'work')?.regName, 'Kyoto trip')
+    assert.equal(store.getState().items.some((e) => e.id === 'a' && e.listId === 'default'), true)
 })
 
 test('store tracks sync, membership, and recovery message payloads', () => {
@@ -102,4 +142,19 @@ test('notices queue, cap, and dismiss; preferences merge over defaults', () => {
         done: 1,
         remaining: 1,
     })
+})
+
+test('boardEnabled preference defaults off, round-trips, and persists per device', () => {
+    const store = createDesktopStore()
+    assert.equal(store.getState().preferences.boardEnabled, false)
+
+    store.setPreferences({ boardEnabled: true })
+    assert.equal(store.getState().preferences.boardEnabled, true)
+
+    // Device-local persistence: a boolean key flows through the prefs codec
+    // (it validates each key's typeof against DEFAULT_PREFERENCES) and reloads.
+    const bag = new Map()
+    const storage = { getItem: (k) => bag.get(k) ?? null, setItem: (k, v) => bag.set(k, v) }
+    persistUiPreferences(storage, store.getState().preferences)
+    assert.equal(loadUiPreferences(storage).boardEnabled, true)
 })

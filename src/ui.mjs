@@ -20,7 +20,20 @@ import {
     RPC_IMPORT,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
-import { isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
+import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
+import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
+import { toNavLibrary, resolveLaunchList, step, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
+import {
+    newListMeta,
+    newGroupMeta,
+    patchListMeta,
+    patchGroupMeta,
+    deleteListMeta,
+    deleteGroupMeta,
+    nextListOrder,
+    nextGroupOrder,
+    detectExtraLists,
+} from './registry.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
 import { LOCALE_CHOICES, localeChoiceLabel } from './i18n.mjs'
@@ -43,7 +56,9 @@ import {
     blockFromText,
     normalizeBlocks,
     renderInlineMarkdown,
-    renderMarkdownBlock,
+    markdownToHtml,
+    htmlToMarkdown,
+    inlineMarkdownToHtml,
 } from './ticket.mjs'
 
 const NOTICE_TTL_MS = 4000
@@ -71,6 +86,168 @@ function h(tag, props = {}, ...children) {
     return el
 }
 
+// --- WYSIWYG block editor (contentEditable) input rules -------------------
+// The markdown + callout blocks edit as live-rendered rich text: the user only
+// ever sees compiled markdown, never the raw "**" / "#" syntax. These helpers
+// transform a just-completed markdown pattern in place. They are intentionally
+// markdown-invariant — htmlToMarkdown('<strong>x</strong>') === htmlToMarkdown('**x**')
+// — so the stored markdown is identical whether or not a rule fires, and the
+// block always re-renders correctly from markdownToHtml when reopened.
+const RICH_SAFE_URL = /^(https?:\/\/|mailto:)/i
+const ZWSP = String.fromCharCode(0x200b) // caret anchor, stripped on serialize
+
+function richBlockAncestor (node, root) {
+    let n = node
+    while (n && n !== root) {
+        if (n.nodeType === Node.ELEMENT_NODE && /^(?:p|div|h[1-6])$/i.test(n.tagName)) return n
+        n = n.parentNode
+    }
+    return null
+}
+
+// "# " / "## " / "### " at the very start of a paragraph -> heading. Fires the
+// instant the trigger space is typed, so the hashes vanish immediately.
+function applyHeadingInputRule (root) {
+    const sel = window.getSelection()
+    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false
+    const block = richBlockAncestor(sel.anchorNode, root)
+    if (!block || /^h[1-6]$/i.test(block.tagName)) return false
+    const m = /^(#{1,3}) /.exec(block.textContent)
+    if (!m) return false
+    const level = m[1].length
+    let toRemove = level + 1 // hashes + the single trigger space
+    let child = block.firstChild
+    while (child && toRemove > 0) {
+        if (child.nodeType === Node.TEXT_NODE) {
+            const take = Math.min(child.data.length, toRemove)
+            child.data = child.data.slice(take)
+            toRemove -= take
+            if (child.data.length === 0) { const next = child.nextSibling; child.remove(); child = next; continue }
+        }
+        if (toRemove <= 0) break
+        child = child.nextSibling
+    }
+    const heading = document.createElement('h' + level)
+    while (block.firstChild) {
+        const c = block.firstChild
+        if (c.nodeName === 'BR') { c.remove(); continue } // headings need no <br> filler
+        heading.appendChild(c)
+    }
+    // A caret cannot live inside a truly empty block element in Chromium, so seed
+    // a zero-width anchor (stripped on serialize) when the heading is still empty.
+    if (!heading.firstChild) heading.appendChild(document.createTextNode(ZWSP))
+    block.replaceWith(heading)
+    const r = document.createRange()
+    r.selectNodeContents(heading)
+    r.collapse(false) // caret at the end, *inside* the heading
+    sel.removeAllRanges()
+    sel.addRange(r)
+    return true
+}
+
+// `code`, **bold**, *italic*, [label](url) -> styled element when the closing
+// marker is typed and a matching opener sits in the same text node before the
+// caret. Drops the markers; leaves the caret outside the new (unstyled) element.
+// `run` is the capture group holding the exact text to replace ("*italic*"
+// excludes the char before the opening "*", so its run is group 1, not 0).
+const RICH_INLINE_RULES = [
+    { re: /`([^`]+)`$/, tag: 'code', run: 0, content: (m) => m[1] },
+    { re: /\*\*([^*]+)\*\*$/, tag: 'strong', run: 0, content: (m) => m[1] },
+    { re: /(?:^|[^*])(\*[^*\n]+\*)$/, tag: 'em', run: 1, content: (m) => m[1].slice(1, -1) },
+    { re: /\[([^\]]+)\]\(([^)\s]+)\)$/, tag: 'a', run: 0, content: (m) => m[1], url: (m) => m[2] },
+]
+function applyInlineInputRules () {
+    const sel = window.getSelection()
+    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false
+    const node = sel.anchorNode
+    if (!node || node.nodeType !== Node.TEXT_NODE) return false
+    const offset = sel.anchorOffset
+    const before = node.data.slice(0, offset)
+    for (const rule of RICH_INLINE_RULES) {
+        const m = rule.re.exec(before)
+        if (!m) continue
+        const start = offset - m[rule.run].length
+        if (start < 0) continue
+        let el
+        if (rule.tag === 'a') {
+            const url = rule.url(m)
+            if (!RICH_SAFE_URL.test(url)) continue
+            el = document.createElement('a')
+            el.setAttribute('href', url)
+        } else {
+            el = document.createElement(rule.tag)
+        }
+        el.textContent = rule.content(m)
+        const range = document.createRange()
+        range.setStart(node, start)
+        range.setEnd(node, offset)
+        range.deleteContents()
+        range.insertNode(el)
+        // Anchor the caret in a zero-width-space text node *after* the new
+        // element so continued typing lands outside it (Chromium otherwise keeps
+        // typing inside the just-styled span). The ZWSP is stripped on serialize.
+        const tail = document.createTextNode(ZWSP)
+        el.after(tail)
+        const r2 = document.createRange()
+        r2.setStart(tail, 1)
+        r2.collapse(true)
+        sel.removeAllRanges()
+        sel.addRange(r2)
+        return true
+    }
+    return false
+}
+
+// Chromium cannot place a caret inside a truly empty block element, so give each
+// empty <p>/<h1..3> a zero-width anchor (stripped on serialize). Lets a freshly
+// seeded empty heading/paragraph hold the caret after a re-render.
+function seedRichCaretAnchors (root) {
+    for (const el of root.querySelectorAll('p, h1, h2, h3')) {
+        if (!el.firstChild) el.appendChild(document.createTextNode(ZWSP))
+    }
+}
+
+// Caret position as a count of visible characters (ZWSP anchors excluded) from
+// the editor start. Stable across a re-render because the live node and a
+// markdown-reseeded node show the same compiled text — so we can restore the
+// caret where the user was instead of jumping to the end on a remote update.
+function richCaretOffset (root) {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return null
+    const range = sel.getRangeAt(0)
+    if (!root.contains(range.endContainer)) return null
+    const pre = range.cloneRange()
+    pre.selectNodeContents(root)
+    pre.setEnd(range.endContainer, range.endOffset)
+    return pre.toString().split(ZWSP).join("").length
+}
+
+function setRichCaretOffset (root, target) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    let remaining = target
+    let node
+    while ((node = walker.nextNode())) {
+        const visible = node.data.split(ZWSP).join("").length
+        if (remaining <= visible) {
+            let raw = 0
+            let seen = 0
+            while (raw < node.data.length && seen < remaining) {
+                if (node.data[raw] !== ZWSP) seen++
+                raw++
+            }
+            const r = document.createRange()
+            r.setStart(node, raw)
+            r.collapse(true)
+            const sel = window.getSelection()
+            sel.removeAllRanges()
+            sel.addRange(r)
+            return true
+        }
+        remaining -= visible
+    }
+    return false
+}
+
 // Grocery surfaces (the lists pane, its count, clear-done) operate on ordinary
 // grocery list items only. Board tickets live on their own board, and to-do
 // items are plain text with no grocery intelligence — both are excluded so they
@@ -79,7 +256,11 @@ function h(tag, props = {}, ...children) {
 // "soon"), so to-do lists synced from mobile are simply not surfaced here rather
 // than corrupting the grocery view with category grouping.
 function isGroceryItem(item) {
-    return !!item && !isBoardType(item.listType) && !isTodoType(item.listType)
+    // Registry meta-items (listType 'registry') describe lists/groups, not
+    // grocery entries — they share state.items but must never render as rows.
+    // (Board/to-do are already excluded by type; registry is the one a bare
+    // "not board, not todo" test would wrongly admit.)
+    return !!item && !isRegistryItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
 }
 
 // The to-do surface: plain text items (isTodoType), the mirror of isGroceryItem
@@ -90,7 +271,15 @@ function isTodoItem(item) {
 
 export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
     const ui = {
+        // `view` is the surface KIND showing in main: a list surface
+        // ('lists' | 'board' | 'todo') or a system view ('peers' | 'congruency'
+        // | 'diagnostics'). `activeListId` scopes the list surfaces to one
+        // registry list; resolved lazily against the synced registry on first
+        // render and whenever the current list disappears.
         view: 'lists',
+        activeListId: null,
+        editingListId: null,
+        editingGroupId: null,
         dialog: null,
         editingItemId: null,
         focusedItemId: null,
@@ -115,6 +304,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
+    // List/group ids double as the registry meta-item's id; clock + counter keeps
+    // them unique across a session without coordinating with peers.
+    let registryIdSeq = 0
+    const nextListId = () => `list-${now()}-${registryIdSeq++}`
+    const nextGroupId = () => `group-${now()}-${registryIdSeq++}`
+    // The reduced registry derived from the synced meta-items in state.items.
+    const currentRegistry = () => reduceRegistry(store.getState().items)
 
     // --- motion bookkeeping --------------------------------------------------
     // The renderer rebuilds the DOM on every store change, so animations are
@@ -258,21 +454,91 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         addItem(text) {
             const trimmed = text.trim()
             if (!trimmed) return false
-            // The add bar serves whichever simple-list surface is showing. A
-            // to-do add carries listType so the backend files it on the to-do
-            // list; dedupe is scoped to that same surface.
+            // The add bar serves whichever simple-list surface is showing, filed
+            // on the ACTIVE list. A to-do add carries the to-do type; dedupe is
+            // scoped to that same list + surface.
             const isTodo = ui.view === 'todo'
             const onSurface = isTodo ? isTodoItem : isGroceryItem
+            const listId = ui.activeListId
             const duplicate = store.getState().items.find(
-                (item) => onSurface(item) && !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
+                (item) => item.listId === listId && onSurface(item) && !item.isDone && item.text.trim().toLowerCase() === trimmed.toLowerCase(),
             )
             if (duplicate) {
                 store.pushNotice(locale.i18n.t('main.notification.duplicateAdd', { text: trimmed }), 'info')
                 return false
             }
             markLocalText(trimmed)
-            send(RPC_ADD, isTodo ? { text: trimmed, listType: TODO_LIST_TYPE } : { text: trimmed })
+            send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined })
             return true
+        },
+        // --- list registry (groups, lists, default) -----------------------
+        // Each mutation re-emits a FULL meta-item via RPC_UPDATE (never RPC_ADD,
+        // which would regenerate the id — a meta-item's id IS the list/group id).
+        // The builders rebuild from the current reduced entry, so a partial edit
+        // never clobbers sibling reg* fields. setDefaultList is device-local.
+        createList({ name, type, groupId = null }) {
+            const id = nextListId()
+            const meta = newListMeta({ id, name: (name ?? '').trim(), type, groupId, order: nextListOrder(currentRegistry(), groupId) }, now())
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+            return id
+        },
+        createGroup({ name }) {
+            const id = nextGroupId()
+            const meta = newGroupMeta({ id, name: (name ?? '').trim(), order: nextGroupOrder(currentRegistry()) }, now())
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+            return id
+        },
+        renameList(id, name) {
+            const meta = patchListMeta(currentRegistry(), id, { name: (name ?? '').trim() }, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+        },
+        renameGroup(id, name) {
+            const meta = patchGroupMeta(currentRegistry(), id, { name: (name ?? '').trim() }, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+        },
+        moveListToGroup(id, groupId) {
+            const registry = currentRegistry()
+            const dest = groupId === UNGROUPED_GROUP_ID ? null : groupId
+            const meta = patchListMeta(registry, id, { groupId: dest, order: nextListOrder(registry, dest) }, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+        },
+        reorderList(id, order) {
+            const meta = patchListMeta(currentRegistry(), id, { order }, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+        },
+        deleteList(id) {
+            const meta = deleteListMeta(currentRegistry(), id, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+            // Cascade: drop the list's items too, otherwise they'd resurface as
+            // an unnamed Ungrouped list (detectExtraLists picks up any listId
+            // that has items but no meta-item).
+            for (const item of store.getState().items.filter((i) => i.listId === id)) {
+                send(RPC_DELETE, { item })
+            }
+        },
+        deleteGroup(id) {
+            // Tombstone the group; its lists fall back to Ungrouped (their
+            // regGroupId now points at a missing group, which toNavLibrary
+            // already treats as ungrouped). No list data is lost.
+            const meta = deleteGroupMeta(currentRegistry(), id, now())
+            if (!meta) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item: meta })
+        },
+        setDefaultList(id) {
+            store.setPreferences({ defaultListId: id })
         },
         toggleItem(item) {
             markLocalId(item.id)
@@ -374,6 +640,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
             ui.blockEditingId = block.id
             ui.blockDraft = blockToText(block)
+            ui.blockCaret = null
             ui.blockMenu = null
             renderAll()
         },
@@ -405,6 +672,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ui.blockMenu = null
             ui.blockEditingId = block.id
             ui.blockDraft = blockToText(block)
+            ui.blockCaret = null
             actions.commitBlocks(item, next)
             renderAll()
         },
@@ -414,6 +682,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ui.blockMenu = null
             ui.blockEditingId = blockId
             ui.blockDraft = blockToText(block)
+            ui.blockCaret = null
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -461,9 +730,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             store.setPreferences({ theme: nextTheme(store.getState().preferences.theme) })
         },
         summonAddBar() {
-            // Stay on whichever simple-list surface is showing (grocery or
-            // to-do); from any other view default to the grocery list.
-            if (ui.view !== 'lists' && ui.view !== 'todo') ui.view = 'lists'
+            // The add bar only serves the simple-list surfaces (grocery / to-do)
+            // and files onto the active list; on a board or system view it's a
+            // no-op (the board has its own new-ticket flow).
+            if (ui.view !== 'lists' && ui.view !== 'todo') return
             ui.addBarOpen = true
             renderAll()
             queueMicrotask(() => root.querySelector('#add-item-input')?.focus())
@@ -537,22 +807,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- skeleton ----------------------------------------------------------
-    // Sidebar zones (design-guide proposal §5): brand, list rail (Overview and
-    // the future typed lists render as disabled "soon" placeholders until the
-    // project/list model lands), then status strip + system nav at the bottom.
-    const RAIL_DEFS = [
-        { key: 'overview', icon: 'layout-dashboard', soon: true, label: (t) => t('desktop.nav.overview') },
-        { key: 'lists', icon: 'shopping-cart', label: (t) => t('desktop.rail.groceries') },
-        { key: 'board', icon: 'layout-grid', label: (t) => t('desktop.rail.board') },
-        { key: 'todo', icon: 'checklist', label: (t) => t('desktop.rail.todo') },
-        { key: 'travel', icon: 'plane', soon: true, label: (t) => t('desktop.rail.travel') },
-    ]
+    // Sidebar zones: brand, the dynamic list rail (groups + lists from the
+    // synced registry, rebuilt each render), then status strip + system nav.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
         { key: 'congruency', icon: 'activity', label: (t) => t('desktop.nav.congruency') },
         { key: 'diagnostics', icon: 'activity', label: (t) => t('desktop.nav.activity') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
     ]
+    // The list surfaces a registry list can map to. System views sit outside this.
+    const LIST_SURFACES = new Set(['lists', 'board', 'todo'])
+    const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
+    const iconForType = (type) => (isBoardType(type) ? 'layout-grid' : isTodoType(type) ? 'checklist' : 'shopping-cart')
+
     const navButtons = {}
     function navButton(def) {
         const btn = h('button', {
@@ -569,11 +836,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         class: 'status-strip',
         onclick: () => { ui.view = 'peers'; renderAll() },
     })
+    const railHost = h('nav', { class: 'rail' })
     const sidebar = h('aside', { class: 'sidebar' },
         h('div', { class: 'brand' },
             h('span', { class: 'brand-wordmark' }, 'Listam'),
         ),
-        h('nav', { class: 'rail' }, ...RAIL_DEFS.map(navButton)),
+        railHost,
         h('div', { class: 'sidebar-bottom' },
             statusStrip,
             h('nav', { class: 'system-nav' }, ...SYSTEM_DEFS.map(navButton)),
@@ -601,32 +869,172 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         renderAll()
     }
 
+    // --- list navigation ----------------------------------------------------
+    // The nav library (groups + lists in display order) derived from the synced
+    // registry. Memoized per render: renderNav and renderMain both need it and
+    // `state` is a fresh object on every store change, so identity-keying is
+    // exact and cheap.
+    let navCacheState = null
+    let navCacheLib = null
+    function navLibrary(state) {
+        if (navCacheState === state && navCacheLib) return navCacheLib
+        const t = locale.i18n.t.bind(locale.i18n)
+        const registry = reduceRegistry(state.items)
+        const nameFor = (id, type) => (isBoardType(type) ? t('desktop.rail.board') : isTodoType(type) ? t('desktop.rail.todo') : t('desktop.rail.groceries'))
+        navCacheLib = toNavLibrary(registry, {
+            defaultListId: state.preferences.defaultListId,
+            ungroupedName: t('desktop.rail.ungrouped'),
+            extraLists: detectExtraLists(state.items, registry, nameFor),
+        })
+        navCacheState = state
+        return navCacheLib
+    }
+    // Keep activeListId pointing at a real list; re-resolve via the launch
+    // preference when it's unset or its list disappeared (rename keeps the id,
+    // delete drops it). Realigns the surface only when already showing a list.
+    function ensureActiveList(state) {
+        const lib = navLibrary(state)
+        const ids = new Set(Object.keys(lib.listsById))
+        if (!ui.activeListId || !ids.has(ui.activeListId)) {
+            ui.activeListId = resolveLaunchList(lib, ids) ?? DEFAULT_LIST_ID
+            if (LIST_SURFACES.has(ui.view)) ui.view = surfaceForType(lib.listsById[ui.activeListId]?.type)
+        }
+        return lib
+    }
+    function activeListEntry(state) {
+        return navLibrary(state).listsById[ui.activeListId] ?? null
+    }
+    function itemsForActiveList(state, predicate = () => true) {
+        return state.items.filter((item) => item.listId === ui.activeListId && predicate(item))
+    }
+    function selectList(state, listId) {
+        const entry = navLibrary(state).listsById[listId]
+        if (!entry) return
+        ui.activeListId = listId
+        ui.view = surfaceForType(entry.type)
+        ui.selectedTicketId = null
+        ui.ticketDocId = null
+        ui.editingListId = null
+        ui.editingGroupId = null
+        renderAll()
+    }
+
     // --- renderers ----------------------------------------------------------
+    // The remaining/in-progress badge for one list, scoped to its own items.
+    function listBadge(state, entry, listId) {
+        const scoped = state.items.filter((item) => item.listId === listId)
+        if (isBoardType(entry.type)) {
+            const inProgress = scoped.filter((item) => item.status === 'in_progress').length
+            return h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress))
+        }
+        const remaining = selectSummary(scoped).remaining
+        return h('span', { class: `badge${remaining === 0 ? ' zero' : ''}` }, String(remaining))
+    }
+    // Focus a freshly-rendered inline-rename input (editableText only restores
+    // focus across re-renders, not on first entry into edit mode), and select
+    // its text so typing replaces the current name.
+    function focusRailRename(id) {
+        queueMicrotask(() => {
+            const el = root.querySelector(`#${CSS.escape(id)}`)
+            if (el) { el.focus(); el.select?.() }
+        })
+    }
+    // A small hover-revealed "⋮" button (desktop has no native context menus).
+    function rowMenuButton(label, onClick) {
+        return h('button', {
+            class: 'rail-row-menu-btn',
+            'aria-label': label,
+            title: label,
+            onclick: (event) => { event.stopPropagation(); onClick() },
+        }, tablerIcon('dots', { size: 14 }))
+    }
+    function renderListRow(state, lib, listId) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const entry = lib.listsById[listId]
+        // Inline rename (the primary affordance): the row becomes an editable
+        // field, committed via the same actions.renameList the dialog uses.
+        if (ui.editingListId === listId) {
+            const input = editableText({
+                id: `rail-rename-${listId}`,
+                value: entry.name,
+                className: 'rail-rename-input',
+                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv); ui.editingListId = null; renderAll() },
+            })
+            return h('div', { class: 'rail-row editing' },
+                h('div', { class: 'nav-item' }, tablerIcon(iconForType(entry.type), { size: 15 }), input),
+            )
+        }
+        const active = LIST_SURFACES.has(ui.view) && ui.activeListId === listId
+        return h('div', { class: 'rail-row' },
+            h('button', {
+                class: `nav-item${active ? ' active' : ''}`,
+                onclick: () => selectList(state, listId),
+                ondblclick: () => { ui.editingListId = listId; renderAll(); focusRailRename(`rail-rename-${listId}`) },
+            },
+                tablerIcon(iconForType(entry.type), { size: 15 }),
+                h('span', { class: 'nav-label' }, entry.name),
+                listBadge(state, entry, listId),
+            ),
+            rowMenuButton(t('desktop.list.settings'), () => openDialog({ kind: 'list-settings', listId })),
+        )
+    }
+    function renderGroupHeader(state, group) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        if (ui.editingGroupId === group.id) {
+            const input = editableText({
+                id: `rail-grp-rename-${group.id}`,
+                value: group.name,
+                className: 'rail-rename-input',
+                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== group.name) actions.renameGroup(group.id, nv); ui.editingGroupId = null; renderAll() },
+            })
+            return h('div', { class: 'rail-row rail-group-row editing' }, input)
+        }
+        return h('div', { class: 'rail-row rail-group-row' },
+            h('div', {
+                class: 'rail-group-header label-sm',
+                ondblclick: () => { ui.editingGroupId = group.id; renderAll(); focusRailRename(`rail-grp-rename-${group.id}`) },
+            }, group.name),
+            rowMenuButton(t('desktop.group.settings'), () => openDialog({ kind: 'group-settings', groupId: group.id })),
+        )
+    }
+    function renderRail(state, lib) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const rows = []
+        const hasNamedGroups = lib.groups.some((g) => g.id !== UNGROUPED_GROUP_ID)
+        for (const group of lib.groups) {
+            // The implicit Ungrouped group never gets a header/menu of its own;
+            // real groups do. When everything is ungrouped the rail is flat.
+            if (group.id === UNGROUPED_GROUP_ID) {
+                if (hasNamedGroups) rows.push(h('div', { class: 'rail-group-header label-sm' }, group.name))
+            } else {
+                rows.push(renderGroupHeader(state, group))
+            }
+            for (const listId of group.listIds) rows.push(renderListRow(state, lib, listId))
+        }
+        if (rows.length === 0) rows.push(h('p', { class: 'rail-empty label-sm' }, t('desktop.rail.empty')))
+        rows.push(h('button', {
+            class: 'rail-new-btn',
+            onclick: () => openDialog({ kind: 'list-create', groupId: null }),
+        }, tablerIcon('plus', { size: 14 }), h('span', {}, t('desktop.list.new'))))
+        replaceChildren(railHost, ...rows)
+    }
+
     let prevPeerCount = null
     function renderNav(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const peersChanged = prevPeerCount !== null && prevPeerCount !== state.peerCount
         prevPeerCount = state.peerCount
-        const remaining = selectSummary(state.items.filter(isGroceryItem)).remaining
 
-        for (const def of [...RAIL_DEFS, ...SYSTEM_DEFS]) {
+        renderRail(state, ensureActiveList(state))
+
+        for (const def of SYSTEM_DEFS) {
             const btn = navButtons[def.key]
             btn.replaceChildren(
                 tablerIcon(def.icon, { size: 15 }),
                 h('span', { class: 'nav-label' }, def.label(t)),
             )
-            btn.classList.toggle('active', !def.soon && !def.action && ui.view === def.key)
-            if (def.soon) {
-                btn.append(h('span', { class: 'badge zero soon-chip' }, t('desktop.nav.soon')))
-            } else if (def.key === 'lists') {
-                btn.append(h('span', { class: `badge${remaining === 0 ? ' zero' : ''}` }, String(remaining)))
-            } else if (def.key === 'board') {
-                const inProgress = state.items.filter((i) => isBoardType(i.listType) && i.status === 'in_progress').length
-                btn.append(h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress)))
-            } else if (def.key === 'todo') {
-                const todoLeft = selectSummary(state.items.filter(isTodoItem)).remaining
-                btn.append(h('span', { class: `badge${todoLeft === 0 ? ' zero' : ''}` }, String(todoLeft)))
-            } else if (def.key === 'peers') {
+            btn.classList.toggle('active', !def.action && ui.view === def.key)
+            if (def.key === 'peers') {
                 btn.append(h('span', {
                     class: `badge${state.peerCount === 0 ? ' zero' : ''}${peersChanged ? ' pop' : ''}`,
                 }, String(state.peerCount)))
@@ -647,7 +1055,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Pane swaps (view change, list/grid flip, entering the full-screen
         // ticket doc) get an entrance; ordinary state updates re-render in place
         // without re-animating.
-        const paneKey = `${ui.ticketDocId ? `doc:${ui.ticketDocId}` : ui.view}:${state.preferences.isGridView}`
+        const paneKey = `${ui.ticketDocId ? `doc:${ui.ticketDocId}` : `${ui.view}:${ui.activeListId}`}:${state.preferences.isGridView}`
         if (prevPane !== paneKey) {
             prevPane = paneKey
             main.classList.remove('pane-enter')
@@ -674,6 +1082,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const hints = [
             ['N', t('desktop.hints.add')],
             ['G', t('desktop.hints.view')],
+            ['[ ]', t('desktop.hints.list')],
             ['Space', t('desktop.hints.done')],
             ['Del', t('desktop.hints.delete')],
             ['T', t('desktop.hints.theme')],
@@ -750,8 +1159,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderListsPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { preferences } = state
-        const items = state.items.filter(isGroceryItem)
+        const items = itemsForActiveList(state, isGroceryItem)
         const summary = selectSummary(items)
+        const title = activeListEntry(state)?.name || t('desktop.rail.groceries')
 
         const statusKey = !state.backendReady
             ? 'header.status.starting'
@@ -759,7 +1169,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, t('desktop.rail.groceries')),
+                h('h1', { class: 'page-title title-lg' }, title),
                 h('div', { class: 'header-actions' },
                     h('button', {
                         class: 'btn btn-secondary btn-icon',
@@ -797,15 +1207,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // deliberately omits the grid toggle and the category machinery.
     function renderTodoPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const items = state.items.filter(isTodoItem)
+        const items = itemsForActiveList(state, isTodoItem)
         const summary = selectSummary(items)
+        const title = activeListEntry(state)?.name || t('desktop.rail.todo')
         const statusKey = !state.backendReady
             ? 'header.status.starting'
             : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, t('desktop.rail.todo')),
+                h('h1', { class: 'page-title title-lg' }, title),
                 h('div', { class: 'header-actions' },
                     h('button', {
                         class: 'btn btn-secondary btn-icon',
@@ -992,13 +1403,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
         const config = selectBoardConfig(state)
-        const columns = groupByStatus(state.items, config)
+        const columns = groupByStatus(itemsForActiveList(state), config)
         const nowMs = now()
         const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs)))
         const selected = selectedTicket(state)
         replaceChildren(main,
             h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, t('board.title')),
+                h('h1', { class: 'page-title title-lg' }, activeListEntry(state)?.name || t('board.title')),
                 h('div', { class: 'header-actions' },
                     h('button', {
                         class: 'btn btn-secondary btn-icon',
@@ -1315,8 +1726,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             default: {
                 const text = block.text || ''
                 if (!text.trim()) return blockMutedView(t('ticket.block.placeholder.markdown'), edit)
-                const div = h('div', { class: 'block-md', onclick: edit })
-                div.innerHTML = renderMarkdownBlock(text)
+                // Same block model (markdownToHtml) the editor seeds with, so
+                // clicking into the block is visually seamless.
+                const div = h('div', { class: 'block-md block-rich', onclick: edit })
+                div.innerHTML = markdownToHtml(text)
                 return div
             }
         }
@@ -1338,7 +1751,101 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
+    // Seed a callout's contentEditable with inline-only HTML (no heading
+    // parsing — the callout view renders inline markdown only).
+    function inlineBlockToHtml(text) {
+        const lines = String(text == null ? '' : text).split('\n')
+        return lines.map((line) => `<p>${inlineMarkdownToHtml(line)}</p>`).join('') || '<p></p>'
+    }
+
+    // WYSIWYG editor for markdown + callout blocks: a contentEditable that is
+    // seeded with compiled markdown and re-serialized to markdown on every input
+    // via htmlToMarkdown, so the stored value stays markdown while the user only
+    // ever sees the rendered result. Markdown blocks also get block-level
+    // heading rules and the inline "/" command menu.
+    function renderRichBlockEditor(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const isMarkdown = block.type === 'markdown'
+        const placeholder = t(`ticket.block.placeholder.${block.type}`)
+        const menu = isMarkdown ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
+        if (menu) menu.classList.add('block-slash-inline', ui.blockDraft === '/' ? 'open' : 'hidden')
+
+        const ed = h('div', {
+            class: `block-md block-rich block-editor block-rich-${block.type}`,
+            contenteditable: 'true',
+            role: 'textbox',
+            'aria-multiline': 'true',
+            'aria-label': placeholder,
+            'data-placeholder': placeholder,
+            spellcheck: 'true',
+        })
+        ed.innerHTML = isMarkdown ? markdownToHtml(ui.blockDraft) : inlineBlockToHtml(ui.blockDraft)
+        seedRichCaretAnchors(ed)
+        ed.classList.toggle('is-empty', ui.blockDraft === '')
+
+        // Remember the caret across re-renders (the app rebuilds this editor on
+        // every P2P/local store update); null means "place at end" on next build.
+        const remember = () => { ui.blockCaret = richCaretOffset(ed) }
+        const sync = () => {
+            ui.blockDraft = htmlToMarkdown(ed.innerHTML)
+            ed.classList.toggle('is-empty', ui.blockDraft === '')
+            remember()
+            if (menu) {
+                menu.classList.toggle('hidden', ui.blockDraft !== '/')
+                menu.classList.toggle('open', ui.blockDraft === '/')
+            }
+        }
+        ed.addEventListener('input', () => {
+            // Live-interpret recognized markdown so the raw syntax never lingers.
+            if (isMarkdown && applyHeadingInputRule(ed)) { sync(); return }
+            applyInlineInputRules()
+            sync()
+        })
+        ed.addEventListener('keyup', remember)
+        ed.addEventListener('mouseup', remember)
+        ed.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
+            if ((event.metaKey || event.ctrlKey) && !event.altKey) {
+                const k = event.key.toLowerCase()
+                if (k === 'b') { event.preventDefault(); document.execCommand('bold'); sync() }
+                else if (k === 'i') { event.preventDefault(); document.execCommand('italic'); sync() }
+            }
+        })
+        // Paste as plain text: keeps the document to the whitelisted subset and
+        // lets pasted "**md**" flow through the same input rules on next edit.
+        ed.addEventListener('paste', (event) => {
+            event.preventDefault()
+            const text = (event.clipboardData || window.clipboardData)?.getData('text/plain') || ''
+            document.execCommand('insertText', false, text)
+        })
+        ed.addEventListener('blur', () => queueMicrotask(() => {
+            const live = root.querySelector('.block-editor')
+            if (live && live !== ed && main.ownerDocument.activeElement === live) return
+            if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
+        }))
+
+        queueMicrotask(() => {
+            if (main.ownerDocument.activeElement === ed) return
+            try { document.execCommand('styleWithCSS', false, false) } catch { /* not supported */ }
+            try { document.execCommand('defaultParagraphSeparator', false, 'p') } catch { /* not supported */ }
+            ed.focus()
+            // Restore the remembered caret, else place it at the very end.
+            if (ui.blockCaret != null && setRichCaretOffset(ed, ui.blockCaret)) return
+            try {
+                const r = document.createRange()
+                r.selectNodeContents(ed)
+                r.collapse(false)
+                const sel = window.getSelection()
+                sel.removeAllRanges()
+                sel.addRange(r)
+            } catch { /* ignore */ }
+        })
+        return h('div', { class: 'block-editor-wrap' }, ed, menu)
+    }
+
     function renderBlockEditor(item, block) {
+        if (block.type === 'markdown' || block.type === 'callout') return renderRichBlockEditor(item, block)
         const t = locale.i18n.t.bind(locale.i18n)
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
         // Markdown blocks get an inline "/" command menu, toggled purely via
@@ -1876,6 +2383,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 )
                 : h('p', { class: 'body-md', style: 'color: var(--secondary);' },
                     `${boardCfg.rigorOn ? t('settings.rigor.on') : t('settings.rigor.off')} — ${t('settings.rigor.readonlyHelp')}`)
+            // Per-device gate for offering board creation. Always lets existing
+            // boards stay visible; only the "New board" option is hidden when off.
+            const boardRow = h('div', { class: 'choice-row' },
+                h('button', {
+                    class: `btn ${state.preferences.boardEnabled ? 'btn-primary' : 'btn-secondary'}`,
+                    'aria-pressed': state.preferences.boardEnabled ? 'true' : 'false',
+                    onclick: () => store.setPreferences({ boardEnabled: true }),
+                }, t('settings.board.on')),
+                h('button', {
+                    class: `btn ${!state.preferences.boardEnabled ? 'btn-primary' : 'btn-secondary'}`,
+                    'aria-pressed': !state.preferences.boardEnabled ? 'true' : 'false',
+                    onclick: () => store.setPreferences({ boardEnabled: false }),
+                }, t('settings.board.off')),
+            )
             content = dialogFrame(t('desktop.settings.title'), [
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.theme.label')),
                 themeRow,
@@ -1884,6 +2405,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('settings.rigor.label')),
                 rigorRow,
                 canEditRigor ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.rigor.ownerHelp')) : null,
+                h('h3', { class: 'category-heading label-sm' }, t('settings.board.label')),
+                boardRow,
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.board.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
                 h('h3', { class: 'category-heading label-sm' }, t('backup.section')),
@@ -1935,6 +2459,116 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 }, isImport ? t('backup.unlockImport') : t('backup.encryptExport')),
             ])
             queueMicrotask(() => passwordInput.focus())
+        } else if (kind === 'list-create') {
+            const lib = navLibrary(state)
+            const createType = ui.dialog.createType || 'shopping'
+            const isGroup = createType === 'group'
+            const typeOptions = [
+                { type: 'shopping', label: t('desktop.rail.groceries') },
+                { type: TODO_LIST_TYPE, label: t('desktop.rail.todo') },
+                ...(state.preferences.boardEnabled ? [{ type: BOARD_WRITE_TYPE, label: t('desktop.rail.board') }] : []),
+                { type: 'group', label: t('desktop.group.label') },
+            ]
+            const typeRow = h('div', { class: 'choice-row' }, ...typeOptions.map((o) => h('button', {
+                class: `btn ${createType === o.type ? 'btn-primary' : 'btn-secondary'}`,
+                onclick: () => { ui.dialog.createType = o.type; renderAll() },
+            }, o.label)))
+            const nameInput = h('input', { class: 'input', placeholder: t('desktop.list.namePlaceholder') })
+            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...lib.groups.filter((g) => g.id !== UNGROUPED_GROUP_ID).map((g) => ({ id: g.id, name: g.name }))]
+            const groupSelect = h('select', { class: 'prop-select' }, ...groupOptions.map((g) => {
+                const opt = h('option', { value: g.id }, g.name)
+                if ((ui.dialog.groupId ?? '') === g.id) opt.setAttribute('selected', 'selected')
+                return opt
+            }))
+            const submit = () => {
+                const name = nameInput.value.trim()
+                if (!name) { store.pushNotice(t('desktop.list.nameRequired'), 'error'); return }
+                if (isGroup) actions.createGroup({ name })
+                else actions.createList({ name, type: createType, groupId: groupSelect.value || null })
+                closeDialog()
+            }
+            nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') submit() })
+            content = dialogFrame(t('desktop.list.create.title'), [
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.type')),
+                typeRow,
+                nameInput,
+                isGroup ? null : h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
+                isGroup ? null : groupSelect,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-primary', onclick: submit }, t('desktop.list.create')),
+            ])
+            queueMicrotask(() => nameInput.focus())
+        } else if (kind === 'list-settings') {
+            const entry = navLibrary(state).listsById[ui.dialog.listId]
+            if (!entry) { closeDialog(); return }
+            const listId = ui.dialog.listId
+            const isDefault = state.preferences.defaultListId === listId
+            const lib = navLibrary(state)
+            const nameInput = h('input', { class: 'input', value: entry.name })
+            const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
+            nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
+            nameInput.addEventListener('blur', commitName)
+            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...lib.groups.filter((g) => g.id !== UNGROUPED_GROUP_ID).map((g) => ({ id: g.id, name: g.name }))]
+            const groupSelect = h('select', {
+                class: 'prop-select',
+                onchange: (event) => actions.moveListToGroup(listId, event.target.value || UNGROUPED_GROUP_ID),
+            }, ...groupOptions.map((g) => {
+                const opt = h('option', { value: g.id }, g.name)
+                if ((entry.groupId ?? '') === g.id) opt.setAttribute('selected', 'selected')
+                return opt
+            }))
+            content = dialogFrame(entry.name || t('desktop.list.settings'), [
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
+                nameInput,
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
+                groupSelect,
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.launch')),
+                h('div', { class: 'choice-row' },
+                    h('button', {
+                        class: `btn ${isDefault ? 'btn-primary' : 'btn-secondary'}`,
+                        disabled: isDefault ? 'disabled' : undefined,
+                        onclick: () => { actions.setDefaultList(listId) },
+                    }, isDefault ? t('desktop.list.isDefault') : t('desktop.list.setDefault')),
+                ),
+            ], [
+                h('button', {
+                    class: 'btn btn-danger',
+                    onclick: () => {
+                        if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
+                        actions.deleteList(listId)
+                        closeDialog()
+                    },
+                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+            queueMicrotask(() => nameInput.focus())
+        } else if (kind === 'group-settings') {
+            const group = navLibrary(state).groups.find((g) => g.id === ui.dialog.groupId)
+            if (!group || group.id === UNGROUPED_GROUP_ID) { closeDialog(); return }
+            const groupId = ui.dialog.groupId
+            const nameInput = h('input', { class: 'input', value: group.name })
+            const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== group.name) actions.renameGroup(groupId, nv) }
+            nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
+            nameInput.addEventListener('blur', commitName)
+            content = dialogFrame(group.name || t('desktop.group.settings'), [
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
+                nameInput,
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'list-create', groupId }) }, t('desktop.group.newList')),
+                ),
+            ], [
+                h('button', {
+                    class: 'btn btn-danger',
+                    onclick: () => {
+                        if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
+                        actions.deleteGroup(groupId)
+                        closeDialog()
+                    },
+                }, ui.dialog.confirmDelete ? t('desktop.group.deleteConfirm') : t('desktop.group.delete')),
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+            queueMicrotask(() => nameInput.focus())
         } else if (kind === 'member-remove') {
             content = dialogFrame(t('members.confirmRemove.title'), [
                 h('p', { class: 'dialog-body' }, t('members.confirmRemove.message')),
@@ -1961,6 +2595,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const rows = [
                 ['N', t('desktop.shortcuts.addItem')],
                 ['G', t('desktop.shortcuts.toggleView')],
+                ['[ ]', t('desktop.shortcuts.switchList')],
                 ['↑ ↓', t('desktop.shortcuts.navigate')],
                 ['Space', t('desktop.shortcuts.toggleDone')],
                 ['Delete', t('desktop.shortcuts.deleteItem')],
@@ -2009,7 +2644,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     return
                 }
                 markLocalText(desc)
-                send(RPC_ADD, { text: desc, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
                 closeDialog()
             }
             content = dialogFrame(t('ticket.create.title'), [
@@ -2104,6 +2739,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             actions.toggleHints()
         } else if (event.key === '?') {
             openDialog({ kind: 'shortcuts' })
+        } else if (event.key === '[' || event.key === ']') {
+            // Move between lists in rail order; Shift jumps to the next group.
+            event.preventDefault()
+            const move = step(navLibrary(store.getState()), ui.activeListId, event.key === ']' ? 1 : -1, { jumpGroup: event.shiftKey })
+            if (move.listId) selectList(store.getState(), move.listId)
         } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
             const rows = [...root.querySelectorAll('[data-item-id]')]

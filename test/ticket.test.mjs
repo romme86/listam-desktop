@@ -15,7 +15,6 @@ import {
     blockFromText,
     normalizeBlocks,
     renderInlineMarkdown,
-    renderMarkdownBlock,
     escapeHtml,
 } from '../src/ticket.mjs'
 import { createDesktopStore } from '../src/store.mjs'
@@ -189,38 +188,5 @@ test('escapeHtml escapes the dangerous characters', () => {
     assert.equal(escapeHtml('<a href="b">&\'</a>'), '&lt;a href=&quot;b&quot;&gt;&amp;&#39;&lt;/a&gt;')
 })
 
-test('renderMarkdownBlock turns #/##/### lines into headings (matching mobile)', () => {
-    assert.equal(renderMarkdownBlock('# Title'), '<h1>Title</h1>')
-    assert.equal(renderMarkdownBlock('## Sub'), '<h2>Sub</h2>')
-    assert.equal(renderMarkdownBlock('### Deep'), '<h3>Deep</h3>')
-    // lenient detection: 4-6 hashes collapse onto <h3>
-    assert.equal(renderMarkdownBlock('#### Deeper'), '<h3>Deeper</h3>')
-    assert.equal(renderMarkdownBlock('###### Six'), '<h3>Six</h3>')
-})
-
-test('renderMarkdownBlock keeps inline markdown inside heading and body lines', () => {
-    assert.equal(renderMarkdownBlock('# **Bold** `c`'), '<h1><strong>Bold</strong> <code>c</code></h1>')
-    // heading then a body line: heading is a block element, body keeps inline md
-    assert.equal(renderMarkdownBlock('# Title\nbody **x**'), '<h1>Title</h1>body <strong>x</strong>')
-    // body line then heading: no stray <br> before the block heading
-    assert.equal(renderMarkdownBlock('intro\n## Sub'), 'intro<h2>Sub</h2>')
-})
-
-test('renderMarkdownBlock leaves heading-free text identical to renderInlineMarkdown', () => {
-    assert.equal(renderMarkdownBlock('line1\nline2'), 'line1<br>line2')
-    assert.equal(renderMarkdownBlock('a\n\nb'), 'a<br><br>b')
-    // a bare '#' with no following space is not a heading
-    assert.equal(renderMarkdownBlock('#nospace'), '#nospace')
-    assert.equal(renderMarkdownBlock(''), '')
-    assert.equal(renderMarkdownBlock(null), '')
-})
-
-test('renderMarkdownBlock is XSS-safe in heading and body lines', () => {
-    // heading content is escaped, never injected as raw HTML
-    const out = renderMarkdownBlock('# <img src=x onerror=alert(1)>')
-    assert.equal(out.includes('<img'), false)
-    assert.match(out, /^<h1>&lt;img/)
-    // raw HTML on a body line is escaped too
-    assert.match(renderMarkdownBlock('plain <script>'), /&lt;script&gt;/)
-    assert.equal(renderMarkdownBlock('plain <script>').includes('<script>'), false)
-})
+// Block-level markdown -> HTML is now markdownToHtml in @listam/domain/markdown,
+// covered by that package's markdown.test.mjs (incl. headings + round trip).
