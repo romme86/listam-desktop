@@ -2,58 +2,54 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { RPC_REQUEST_SYNC } from '@listam/protocol'
 import { reduceRegistry } from '@listam/domain/list-registry'
-import { toNavLibrary, resolveLaunchList, flatten } from '@listam/domain/list-nav'
+import { isBoardType, BOARD_LIST_TYPE } from '@listam/domain/board'
+import { isTodoType } from '@listam/domain/identity'
 import { createMockBackend } from '../src/mock-backend.mjs'
 import { detectExtraLists } from '../src/registry.mjs'
 
-test('the mock backend seeds a registry the nav library reads into groups + lists', async () => {
+test('the mock seeds grocery/board/todo on the default list + a named registry list', async () => {
     const { client } = createMockBackend()
     let synced = null
     client.onEvent((event) => { if (event.type === 'sync-list') synced = event.items })
     await client.send(RPC_REQUEST_SYNC)
     assert.ok(synced, 'sync-list emitted')
 
+    // Legacy desktop model: grocery, board AND to-do all live on listId 'default'
+    // (differentiated by listType) — they surface as the built-in rail entries.
+    const onDefault = synced.filter((i) => i.listId === 'default')
+    assert.ok(onDefault.some((i) => isBoardType(i.listType)), 'board tickets on default')
+    assert.ok(onDefault.some((i) => isTodoType(i.listType)), 'to-do items on default')
+    assert.ok(onDefault.some((i) => !isBoardType(i.listType) && !isTodoType(i.listType) && i.listType !== 'registry'), 'grocery items on default')
+
+    // The registry declares only the *named* extra list + its group; the default
+    // surfaces are built-ins, not registry entries.
     const registry = reduceRegistry(synced)
-    // The board's legacy wire type reads back as the canonical 'board'.
-    assert.equal(registry.lists.find((l) => l.id === 'trip')?.type, 'board')
+    assert.deepEqual(registry.groups.map((g) => g.name), ['Projects'])
+    assert.deepEqual(registry.lists.map((l) => ({ id: l.id, name: l.name, type: l.type, groupId: l.groupId })), [
+        { id: 'hardware', name: 'Hardware', type: 'shopping', groupId: 'projects' },
+    ])
+    // The named list's items live on its own listId.
+    assert.ok(synced.some((i) => i.listId === 'hardware' && i.text === 'M3 screws'))
 
-    const lib = toNavLibrary(registry, { defaultListId: 'default', ungroupedName: 'Ungrouped' })
-
-    const home = lib.groups.find((g) => g.name === 'Home')
-    assert.ok(home, 'Home group present')
-    assert.deepEqual(
-        home.listIds.map((id) => lib.listsById[id].name),
-        ['Groceries', 'To-do'],
-        'grouped lists are ordered by regOrder',
-    )
-
-    const ungrouped = lib.groups.at(-1)
-    assert.equal(ungrouped.name, 'Ungrouped', 'implicit Ungrouped group is last')
-    assert.deepEqual(ungrouped.listIds.map((id) => lib.listsById[id].name), ['Tokyo trip'])
-
-    // The per-device default resolves to the grocery list.
-    assert.equal(resolveLaunchList(lib, new Set(Object.keys(lib.listsById))), 'default')
+    // The board's legacy wire value normalizes to the canonical type on read.
+    assert.equal(BOARD_LIST_TYPE, 'board')
 })
 
-test('detectExtraLists surfaces lists that have items but no meta-item; the grocery list always appears even with an empty registry', () => {
-    const items = [
-        { id: 'i1', listId: 'default', listType: 'shopping', text: 'Milk', isDone: false, timeOfCompletion: 0, updatedAt: 1 },
-        { id: 'i2', listId: 'legacy', listType: 'todo', text: 'Old task', isDone: false, timeOfCompletion: 0, updatedAt: 1 },
-        // A registry meta-item (id IS the listId it describes) names 'default'
-        // and must NOT itself be mistaken for an extra list.
-        { id: 'default', listId: '__registry__', listType: 'registry', text: 'Groceries', isDone: false, timeOfCompletion: 0, updatedAt: 1, regKind: 'list', regName: 'Groceries', regType: 'shopping', regGroupId: null, regOrder: 0 },
+test('legacy default-only data adds NO registry surfaces (built-ins cover it); a separate list does surface', () => {
+    // Real/legacy data: everything on listId 'default', no registry meta-items.
+    const legacy = [
+        { id: 'a', listId: 'default', listType: 'shopping', text: 'Milk', isDone: false, timeOfCompletion: 0, updatedAt: 1 },
+        { id: 'b', listId: 'default', listType: 'kanban', text: 'Ship', status: 'todo', isDone: false, timeOfCompletion: 0, updatedAt: 1 },
+        { id: 'c', listId: 'default', listType: 'todo', text: 'Call', isDone: false, timeOfCompletion: 0, updatedAt: 1 },
     ]
+    const reg = reduceRegistry(legacy)
+    // The rail excludes the default list from registry surfaces (it's the
+    // built-ins), so legacy default-only data yields zero extra registry rows.
+    const extraNonDefault = detectExtraLists(legacy, reg, (id) => id).filter((l) => l.id !== 'default')
+    assert.deepEqual(extraNonDefault, [], 'no registry surfaces — board/todo come from built-ins')
 
-    // With a registry that already names 'default', only 'legacy' is extra.
-    const withDefault = reduceRegistry(items)
-    const extra = detectExtraLists(items, withDefault, (id) => `List ${id}`)
-    assert.deepEqual(extra.map((l) => l.id), ['legacy'])
-    assert.equal(extra[0].type, 'todo')
-    assert.equal(extra[0].name, 'List legacy')
-
-    // Empty registry → the grocery 'default' list still surfaces via extraLists,
-    // so the nav is never list-less.
-    const emptyReg = { groups: [], lists: [] }
-    const lib = toNavLibrary(emptyReg, { extraLists: detectExtraLists(items, emptyReg, (id) => id), ungroupedName: 'Ungrouped' })
-    assert.ok(flatten(lib).some((e) => e.listId === 'default'), 'default list present with no registry')
+    // A genuinely separate list (items, no meta-item) still surfaces.
+    const withWork = [...legacy, { id: 'w', listId: 'work', listType: 'shopping', text: 'Tape', isDone: false, timeOfCompletion: 0, updatedAt: 1 }]
+    const extras = detectExtraLists(withWork, reduceRegistry(withWork), (id) => id).filter((l) => l.id !== 'default')
+    assert.deepEqual(extras.map((l) => l.id), ['work'])
 })

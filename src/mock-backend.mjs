@@ -22,13 +22,13 @@ import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransit
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
 import { reductionFromItems } from './store.mjs'
 
-// Seeded lists/groups: groceries + to-do under a "Home" group, the board on its
-// own (Ungrouped) so ?mock=1 exercises both grouped rows and the implicit
-// Ungrouped bucket. The grocery list keeps the legacy 'default' id.
-const GROCERY_LIST = 'default'
-const BOARD_LIST = 'trip'
-const TODO_LIST = 'errands'
-const HOME_GROUP = 'home'
+// Grocery, board and to-do all live on the default list (the legacy desktop
+// model — one list, three types via listType), so they surface as the built-in
+// Groceries / Board / Todo rail entries. A separate registry list ("Hardware"
+// in a "Projects" group) exercises the multi-list / groups feature on top.
+const DEFAULT_LIST = 'default'
+const HARDWARE_LIST = 'hardware'
+const PROJECTS_GROUP = 'projects'
 
 const FIXTURE_TEXTS = [
     ['Honeycrisp apples', false],
@@ -81,7 +81,7 @@ export function createMockBackend() {
         { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime' },
         { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime' },
     ].map((tk) => normalizeListItem({
-        listId: BOARD_LIST,
+        listId: DEFAULT_LIST,
         listType: BOARD_WRITE_TYPE,
         timeOfCompletion: tk.isDone ? 1 : 0,
         updatedAt: 1,
@@ -98,7 +98,7 @@ export function createMockBackend() {
         ['Submit expense report', true],
         ['Water the plants', false],
     ].map(([text, isDone]) => normalizeListItem({
-        listId: TODO_LIST,
+        listId: DEFAULT_LIST,
         listType: TODO_LIST_TYPE,
         text,
         isDone,
@@ -107,19 +107,32 @@ export function createMockBackend() {
         id: `mock-${++nextId}`,
     })).filter(Boolean)
 
-    // Registry meta-items declaring the seeded lists/groups (the read path the
-    // dynamic rail consumes). reduceRegistry reads the board's legacy wire type
-    // back as the canonical 'board'.
+    // A second, named grocery list on its own listId — exercises the registry /
+    // groups feature alongside the built-in default surfaces.
+    const hardwareItems = [
+        ['M3 screws', false],
+        ['Wood glue', false],
+        ['Sandpaper', true],
+    ].map(([text, isDone]) => normalizeListItem({
+        listId: HARDWARE_LIST,
+        listType: 'shopping',
+        text,
+        isDone,
+        timeOfCompletion: isDone ? 1 : 0,
+        updatedAt: 1,
+        id: `mock-${++nextId}`,
+    })).filter(Boolean)
+
+    // Registry meta-items declaring the named list + its group (the read path the
+    // dynamic rail consumes for non-default lists).
     const registryFixtures = [
-        buildGroupMetaItem({ id: HOME_GROUP, name: 'Home', order: 0, updatedAt: 1 }),
-        buildListMetaItem({ id: GROCERY_LIST, name: 'Groceries', type: 'shopping', groupId: HOME_GROUP, order: 0, updatedAt: 1 }),
-        buildListMetaItem({ id: TODO_LIST, name: 'To-do', type: TODO_LIST_TYPE, groupId: HOME_GROUP, order: 1, updatedAt: 1 }),
-        buildListMetaItem({ id: BOARD_LIST, name: 'Tokyo trip', type: BOARD_WRITE_TYPE, groupId: null, order: 0, updatedAt: 1 }),
+        buildGroupMetaItem({ id: PROJECTS_GROUP, name: 'Projects', order: 0, updatedAt: 1 }),
+        buildListMetaItem({ id: HARDWARE_LIST, name: 'Hardware', type: 'shopping', groupId: PROJECTS_GROUP, order: 0, updatedAt: 1 }),
     ]
 
     // Keep the mock's own items multi-list (the single-list applyOperationToList
-    // would drop registry meta-items and the non-default board/to-do lists).
-    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...registryFixtures])
+    // would drop registry meta-items and the non-default named list).
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures])
     items = reduction.allItems()
 
     function emit(event) {

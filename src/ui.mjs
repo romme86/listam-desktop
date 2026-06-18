@@ -22,7 +22,7 @@ import {
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
-import { toNavLibrary, resolveLaunchList, step, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
+import { toNavLibrary, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
 import {
     newListMeta,
     newGroupMeta,
@@ -42,6 +42,7 @@ import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
 import {
     isBoardType,
     BOARD_WRITE_TYPE,
+    BOARD_LIST_TYPE,
     selectBoardConfig,
     groupByStatus,
     ticketBadges,
@@ -815,8 +816,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         { key: 'diagnostics', icon: 'activity', label: (t) => t('desktop.nav.activity') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
     ]
-    // The list surfaces a registry list can map to. System views sit outside this.
-    const LIST_SURFACES = new Set(['lists', 'board', 'todo'])
+    // Map a list type to its pane/view key. System views sit outside this.
     const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
     const iconForType = (type) => (isBoardType(type) ? 'layout-grid' : isTodoType(type) ? 'checklist' : 'shopping-cart')
 
@@ -870,48 +870,85 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- list navigation ----------------------------------------------------
-    // The nav library (groups + lists in display order) derived from the synced
-    // registry. Memoized per render: renderNav and renderMain both need it and
-    // `state` is a fresh object on every store change, so identity-keying is
-    // exact and cheap.
+    // A rail *surface* is a (listId, type) pair. Desktop's legacy data lives on
+    // a single list (listId 'default') differentiated only by listType, so the
+    // default list shows three built-in surfaces — Groceries / Board / Todo —
+    // that share listId 'default'. Each registry-declared list is one surface on
+    // its own listId. The active surface is (ui.activeListId, ui.activeType), and
+    // item filtering keys on BOTH so board/todo on the default list never bleed
+    // into the grocery view (and vice-versa).
+    const GROCERY_TYPE = 'shopping'
+    function typePredicate(type) {
+        if (isBoardType(type)) return (item) => isBoardType(item.listType)
+        if (isTodoType(type)) return (item) => isTodoItem(item)
+        return (item) => isGroceryItem(item)
+    }
+    function surfaceActive(surface) {
+        return ui.activeListId === surface.listId && surfaceForType(ui.activeType) === surfaceForType(surface.type)
+    }
+    // Build the rail: built-in default surfaces + registry lists grouped.
+    // Memoized per render (state is a fresh object on every store change).
     let navCacheState = null
-    let navCacheLib = null
-    function navLibrary(state) {
-        if (navCacheState === state && navCacheLib) return navCacheLib
+    let navCacheRail = null
+    function buildRail(state) {
+        if (navCacheState === state && navCacheRail) return navCacheRail
         const t = locale.i18n.t.bind(locale.i18n)
-        const registry = reduceRegistry(state.items)
-        const nameFor = (id, type) => (isBoardType(type) ? t('desktop.rail.board') : isTodoType(type) ? t('desktop.rail.todo') : t('desktop.rail.groceries'))
-        navCacheLib = toNavLibrary(registry, {
+        const items = state.items
+        const hasOnDefault = (pred) => items.some((item) => item.listId === DEFAULT_LIST_ID && pred(item))
+
+        // Always-present built-ins on the default list (the legacy surfaces).
+        // Board follows the gate-creation-only rule: shown when boardEnabled OR a
+        // board already has tickets, so synced/existing boards stay reachable.
+        const builtins = [{ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: t('desktop.rail.groceries'), builtin: true }]
+        if (state.preferences.boardEnabled || hasOnDefault((item) => isBoardType(item.listType))) {
+            builtins.push({ listId: DEFAULT_LIST_ID, type: BOARD_LIST_TYPE, name: t('desktop.rail.board'), builtin: true })
+        }
+        builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: t('desktop.rail.todo'), builtin: true })
+
+        // Registry lists (named, distinct listIds) organized into groups. The
+        // default list is the built-ins above, so it's never repeated here.
+        const registry = reduceRegistry(items)
+        const lib = toNavLibrary(registry, {
             defaultListId: state.preferences.defaultListId,
             ungroupedName: t('desktop.rail.ungrouped'),
-            extraLists: detectExtraLists(state.items, registry, nameFor),
+            extraLists: detectExtraLists(items, registry, (id) => id).filter((l) => l.id !== DEFAULT_LIST_ID),
         })
-        navCacheState = state
-        return navCacheLib
-    }
-    // Keep activeListId pointing at a real list; re-resolve via the launch
-    // preference when it's unset or its list disappeared (rename keeps the id,
-    // delete drops it). Realigns the surface only when already showing a list.
-    function ensureActiveList(state) {
-        const lib = navLibrary(state)
-        const ids = new Set(Object.keys(lib.listsById))
-        if (!ui.activeListId || !ids.has(ui.activeListId)) {
-            ui.activeListId = resolveLaunchList(lib, ids) ?? DEFAULT_LIST_ID
-            if (LIST_SURFACES.has(ui.view)) ui.view = surfaceForType(lib.listsById[ui.activeListId]?.type)
+        const groups = []
+        for (const g of lib.groups) {
+            const surfaces = g.listIds
+                .filter((id) => id !== DEFAULT_LIST_ID)
+                .map((id) => { const e = lib.listsById[id]; return { listId: id, type: e.type || GROCERY_TYPE, name: e.name || id, builtin: false } })
+            if (surfaces.length) groups.push({ id: g.id, name: g.id === UNGROUPED_GROUP_ID ? null : g.name, surfaces })
         }
-        return lib
+        navCacheRail = { builtins, groups }
+        navCacheState = state
+        return navCacheRail
     }
-    function activeListEntry(state) {
-        return navLibrary(state).listsById[ui.activeListId] ?? null
+    function allSurfaces(rail) {
+        return [...rail.builtins, ...rail.groups.flatMap((g) => g.surfaces)]
     }
-    function itemsForActiveList(state, predicate = () => true) {
-        return state.items.filter((item) => item.listId === ui.activeListId && predicate(item))
+    // Keep (activeListId, activeType) pointing at a real surface; fall back to
+    // the launch-default surface, else the first built-in (Groceries).
+    function ensureActiveList(state) {
+        const rail = buildRail(state)
+        const all = allSurfaces(rail)
+        if (!all.some(surfaceActive)) {
+            const pick = all.find((s) => s.listId === state.preferences.defaultListId) || all[0]
+            if (pick) { ui.activeListId = pick.listId; ui.activeType = pick.type; ui.view = surfaceForType(pick.type) }
+        }
+        return rail
     }
-    function selectList(state, listId) {
-        const entry = navLibrary(state).listsById[listId]
-        if (!entry) return
-        ui.activeListId = listId
-        ui.view = surfaceForType(entry.type)
+    function activeSurface(state) {
+        return allSurfaces(buildRail(state)).find(surfaceActive) ?? null
+    }
+    function itemsForActiveList(state) {
+        const pred = typePredicate(ui.activeType)
+        return state.items.filter((item) => item.listId === ui.activeListId && pred(item))
+    }
+    function selectSurface(state, surface) {
+        ui.activeListId = surface.listId
+        ui.activeType = surface.type
+        ui.view = surfaceForType(surface.type)
         ui.selectedTicketId = null
         ui.ticketDocId = null
         ui.editingListId = null
@@ -920,10 +957,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- renderers ----------------------------------------------------------
-    // The remaining/in-progress badge for one list, scoped to its own items.
-    function listBadge(state, entry, listId) {
-        const scoped = state.items.filter((item) => item.listId === listId)
-        if (isBoardType(entry.type)) {
+    // The remaining/in-progress badge for one surface, scoped to its (listId,type).
+    function surfaceBadge(state, surface) {
+        const pred = typePredicate(surface.type)
+        const scoped = state.items.filter((item) => item.listId === surface.listId && pred(item))
+        if (isBoardType(surface.type)) {
             const inProgress = scoped.filter((item) => item.status === 'in_progress').length
             return h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress))
         }
@@ -948,34 +986,34 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             onclick: (event) => { event.stopPropagation(); onClick() },
         }, tablerIcon('dots', { size: 14 }))
     }
-    function renderListRow(state, lib, listId) {
+    function renderSurfaceRow(state, surface) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const entry = lib.listsById[listId]
-        // Inline rename (the primary affordance): the row becomes an editable
-        // field, committed via the same actions.renameList the dialog uses.
-        if (ui.editingListId === listId) {
+        const { listId, type, name, builtin } = surface
+        // Inline rename (primary affordance) — registry lists only; the built-in
+        // default surfaces are fixed (they share one listId, so they have no
+        // individual registry meta-item to rename).
+        if (!builtin && ui.editingListId === listId) {
             const input = editableText({
                 id: `rail-rename-${listId}`,
-                value: entry.name,
+                value: name,
                 className: 'rail-rename-input',
-                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv); ui.editingListId = null; renderAll() },
+                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== name) actions.renameList(listId, nv); ui.editingListId = null; renderAll() },
             })
             return h('div', { class: 'rail-row editing' },
-                h('div', { class: 'nav-item' }, tablerIcon(iconForType(entry.type), { size: 15 }), input),
+                h('div', { class: 'nav-item' }, tablerIcon(iconForType(type), { size: 15 }), input),
             )
         }
-        const active = LIST_SURFACES.has(ui.view) && ui.activeListId === listId
         return h('div', { class: 'rail-row' },
             h('button', {
-                class: `nav-item${active ? ' active' : ''}`,
-                onclick: () => selectList(state, listId),
-                ondblclick: () => { ui.editingListId = listId; renderAll(); focusRailRename(`rail-rename-${listId}`) },
+                class: `nav-item${surfaceActive(surface) ? ' active' : ''}`,
+                onclick: () => selectSurface(state, surface),
+                ondblclick: builtin ? null : () => { ui.editingListId = listId; renderAll(); focusRailRename(`rail-rename-${listId}`) },
             },
-                tablerIcon(iconForType(entry.type), { size: 15 }),
-                h('span', { class: 'nav-label' }, entry.name),
-                listBadge(state, entry, listId),
+                tablerIcon(iconForType(type), { size: 15 }),
+                h('span', { class: 'nav-label' }, name),
+                surfaceBadge(state, surface),
             ),
-            rowMenuButton(t('desktop.list.settings'), () => openDialog({ kind: 'list-settings', listId })),
+            builtin ? null : rowMenuButton(t('desktop.list.settings'), () => openDialog({ kind: 'list-settings', listId })),
         )
     }
     function renderGroupHeader(state, group) {
@@ -997,21 +1035,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             rowMenuButton(t('desktop.group.settings'), () => openDialog({ kind: 'group-settings', groupId: group.id })),
         )
     }
-    function renderRail(state, lib) {
+    function renderRail(state, rail) {
         const t = locale.i18n.t.bind(locale.i18n)
         const rows = []
-        const hasNamedGroups = lib.groups.some((g) => g.id !== UNGROUPED_GROUP_ID)
-        for (const group of lib.groups) {
-            // The implicit Ungrouped group never gets a header/menu of its own;
-            // real groups do. When everything is ungrouped the rail is flat.
-            if (group.id === UNGROUPED_GROUP_ID) {
-                if (hasNamedGroups) rows.push(h('div', { class: 'rail-group-header label-sm' }, group.name))
-            } else {
-                rows.push(renderGroupHeader(state, group))
-            }
-            for (const listId of group.listIds) rows.push(renderListRow(state, lib, listId))
+        // Built-in default surfaces first (always present), then registry groups.
+        for (const surface of rail.builtins) rows.push(renderSurfaceRow(state, surface))
+        for (const group of rail.groups) {
+            if (group.name) rows.push(renderGroupHeader(state, { id: group.id, name: group.name }))
+            for (const surface of group.surfaces) rows.push(renderSurfaceRow(state, surface))
         }
-        if (rows.length === 0) rows.push(h('p', { class: 'rail-empty label-sm' }, t('desktop.rail.empty')))
         rows.push(h('button', {
             class: 'rail-new-btn',
             onclick: () => openDialog({ kind: 'list-create', groupId: null }),
@@ -1159,9 +1191,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderListsPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { preferences } = state
-        const items = itemsForActiveList(state, isGroceryItem)
+        const items = itemsForActiveList(state)
         const summary = selectSummary(items)
-        const title = activeListEntry(state)?.name || t('desktop.rail.groceries')
+        const title = activeSurface(state)?.name || t('desktop.rail.groceries')
 
         const statusKey = !state.backendReady
             ? 'header.status.starting'
@@ -1207,9 +1239,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // deliberately omits the grid toggle and the category machinery.
     function renderTodoPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const items = itemsForActiveList(state, isTodoItem)
+        const items = itemsForActiveList(state)
         const summary = selectSummary(items)
-        const title = activeListEntry(state)?.name || t('desktop.rail.todo')
+        const title = activeSurface(state)?.name || t('desktop.rail.todo')
         const statusKey = !state.backendReady
             ? 'header.status.starting'
             : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
@@ -1409,7 +1441,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const selected = selectedTicket(state)
         replaceChildren(main,
             h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, activeListEntry(state)?.name || t('board.title')),
+                h('h1', { class: 'page-title title-lg' }, activeSurface(state)?.name || t('board.title')),
                 h('div', { class: 'header-actions' },
                     h('button', {
                         class: 'btn btn-secondary btn-icon',
@@ -2460,7 +2492,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ])
             queueMicrotask(() => passwordInput.focus())
         } else if (kind === 'list-create') {
-            const lib = navLibrary(state)
+            const registry = reduceRegistry(state.items)
             const createType = ui.dialog.createType || 'shopping'
             const isGroup = createType === 'group'
             const typeOptions = [
@@ -2474,7 +2506,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 onclick: () => { ui.dialog.createType = o.type; renderAll() },
             }, o.label)))
             const nameInput = h('input', { class: 'input', placeholder: t('desktop.list.namePlaceholder') })
-            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...lib.groups.filter((g) => g.id !== UNGROUPED_GROUP_ID).map((g) => ({ id: g.id, name: g.name }))]
+            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...registry.groups.map((g) => ({ id: g.id, name: g.name }))]
             const groupSelect = h('select', { class: 'prop-select' }, ...groupOptions.map((g) => {
                 const opt = h('option', { value: g.id }, g.name)
                 if ((ui.dialog.groupId ?? '') === g.id) opt.setAttribute('selected', 'selected')
@@ -2500,16 +2532,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ])
             queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings') {
-            const entry = navLibrary(state).listsById[ui.dialog.listId]
+            const registry = reduceRegistry(state.items)
+            const entry = registry.lists.find((l) => l.id === ui.dialog.listId)
             if (!entry) { closeDialog(); return }
             const listId = ui.dialog.listId
             const isDefault = state.preferences.defaultListId === listId
-            const lib = navLibrary(state)
             const nameInput = h('input', { class: 'input', value: entry.name })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
             nameInput.addEventListener('blur', commitName)
-            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...lib.groups.filter((g) => g.id !== UNGROUPED_GROUP_ID).map((g) => ({ id: g.id, name: g.name }))]
+            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...registry.groups.map((g) => ({ id: g.id, name: g.name }))]
             const groupSelect = h('select', {
                 class: 'prop-select',
                 onchange: (event) => actions.moveListToGroup(listId, event.target.value || UNGROUPED_GROUP_ID),
@@ -2544,8 +2576,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ])
             queueMicrotask(() => nameInput.focus())
         } else if (kind === 'group-settings') {
-            const group = navLibrary(state).groups.find((g) => g.id === ui.dialog.groupId)
-            if (!group || group.id === UNGROUPED_GROUP_ID) { closeDialog(); return }
+            const group = reduceRegistry(state.items).groups.find((g) => g.id === ui.dialog.groupId)
+            if (!group) { closeDialog(); return }
             const groupId = ui.dialog.groupId
             const nameInput = h('input', { class: 'input', value: group.name })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== group.name) actions.renameGroup(groupId, nv) }
@@ -2740,10 +2772,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         } else if (event.key === '?') {
             openDialog({ kind: 'shortcuts' })
         } else if (event.key === '[' || event.key === ']') {
-            // Move between lists in rail order; Shift jumps to the next group.
+            // Move between rail surfaces in display order.
             event.preventDefault()
-            const move = step(navLibrary(store.getState()), ui.activeListId, event.key === ']' ? 1 : -1, { jumpGroup: event.shiftKey })
-            if (move.listId) selectList(store.getState(), move.listId)
+            const all = allSurfaces(buildRail(store.getState()))
+            const i = all.findIndex(surfaceActive)
+            const next = all[i + (event.key === ']' ? 1 : -1)]
+            if (next) selectSurface(store.getState(), next)
         } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
             const rows = [...root.querySelectorAll('[data-item-id]')]
