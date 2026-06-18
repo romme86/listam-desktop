@@ -15,6 +15,9 @@ import {
     RPC_RECOVER_STORAGE,
     RPC_GET_BOARD_CONFIG,
     RPC_SET_BOARD_CONFIG,
+    RPC_EXPORT_DATA,
+    RPC_EXPORT_SEED,
+    RPC_IMPORT,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import { isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
@@ -172,6 +175,85 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const send = (command, payload) => Promise.resolve(client.send(command, payload)).catch(() => {
         store.pushNotice(locale.i18n.t('backend.startFailed'), 'error')
     })
+
+    // --- encrypted backup / restore ---------------------------------------
+    // Unlike `send`, these need the worker's reply (the encrypted file or the
+    // import outcome), so they call client.send directly and parse the JSON.
+    async function backupRequest(command, payload) {
+        const raw = await client.send(command, payload)
+        try { return raw ? JSON.parse(raw) : null } catch { return null }
+    }
+    function backupErrorMessage(reason) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        switch (reason) {
+            case 'bad-password': return t('backup.error.badPassword')
+            case 'invalid-file': return t('backup.error.invalidFile')
+            case 'seed-incomplete': return t('backup.error.seedIncomplete')
+            case 'not-writable': return t('backup.error.notWritable')
+            default: return t('backup.error.generic')
+        }
+    }
+    function backupFilename(kind) {
+        const stamp = new Date().toISOString().slice(0, 10)
+        return kind === 'seed' ? `listam-seed-${stamp}.listamseed` : `listam-backup-${stamp}.listam`
+    }
+    function downloadTextFile(filename, text) {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }))
+        const anchor = h('a', { href: url, download: filename })
+        document.body.append(anchor)
+        anchor.click()
+        anchor.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }
+    function pickBackupFile() {
+        return new Promise((resolve) => {
+            const input = h('input', {
+                type: 'file',
+                accept: '.listam,.listamseed,application/json,application/octet-stream',
+                style: 'display:none',
+            })
+            input.addEventListener('change', () => {
+                const file = input.files && input.files[0]
+                if (!file) { input.remove(); resolve(null); return }
+                const reader = new FileReader()
+                reader.onload = () => { input.remove(); resolve(String(reader.result || '')) }
+                reader.onerror = () => { input.remove(); resolve(null) }
+                reader.readAsText(file)
+            }, { once: true })
+            document.body.append(input)
+            input.click()
+        })
+    }
+    async function startBackupImport() {
+        const fileText = await pickBackupFile()
+        if (fileText == null) return
+        let fileKind = null
+        try { fileKind = JSON.parse(fileText)?.kind } catch { /* shown as invalid on submit */ }
+        openDialog({ kind: 'backup', mode: 'import', fileText, fileKind })
+    }
+    async function runBackupExport(mode, password) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        closeDialog()
+        store.pushNotice(t('backup.working'), 'info')
+        const res = await backupRequest(mode === 'export-seed' ? RPC_EXPORT_SEED : RPC_EXPORT_DATA, { password })
+        if (res?.ok && res.file) {
+            downloadTextFile(backupFilename(res.kind), res.file)
+            store.pushNotice(t('backup.exported'), 'success')
+        } else {
+            store.pushNotice(backupErrorMessage(res?.reason), 'error')
+        }
+    }
+    async function runBackupImport(fileText, password) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        closeDialog()
+        store.pushNotice(t('backup.working'), 'info')
+        const res = await backupRequest(RPC_IMPORT, { password, file: fileText })
+        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
+        if (res.kind === 'seed') { store.pushNotice(t('backup.seedRestored'), 'success'); return }
+        if (res.reason === 'not-writable') { store.pushNotice(t('backup.error.notWritable'), 'error'); return }
+        store.pushNotice(t('backup.imported', { count: res.applied?.items ?? 0 }), 'success')
+        if (res.applied?.boardConfigSkipped) store.pushNotice(t('backup.boardConfigSkipped'), 'info')
+    }
     const actions = {
         addItem(text) {
             const trimmed = text.trim()
@@ -1804,9 +1886,55 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 canEditRigor ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.rigor.ownerHelp')) : null,
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
+                h('h3', { class: 'category-heading label-sm' }, t('backup.section')),
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-data' }) }, t('backup.exportData')),
+                    h('button', { class: 'btn btn-secondary', onclick: () => startBackupImport() }, t('backup.import')),
+                ),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.exportData.desc')),
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-seed' }) }, t('backup.exportSeed')),
+                ),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.exportSeed.desc')),
             ], [
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
+        } else if (kind === 'backup') {
+            const mode = ui.dialog.mode
+            const isImport = mode === 'import'
+            const isSeedExport = mode === 'export-seed'
+            const isSeedRestore = isImport && ui.dialog.fileKind === 'seed'
+            const title = isImport ? t('backup.import') : isSeedExport ? t('backup.exportSeed') : t('backup.exportData')
+            const passwordInput = h('input', { class: 'input', type: 'password', placeholder: t('backup.password.placeholder'), autocomplete: 'new-password' })
+            const confirmInput = isImport ? null : h('input', { class: 'input', type: 'password', placeholder: t('backup.password.confirm'), autocomplete: 'new-password' })
+            const submit = () => {
+                const password = passwordInput.value
+                if (isImport) {
+                    if (!password) { store.pushNotice(t('backup.password.tooShort'), 'error'); return }
+                    runBackupImport(ui.dialog.fileText, password)
+                    return
+                }
+                if (password.length < 8) { store.pushNotice(t('backup.password.tooShort'), 'error'); return }
+                if (password !== confirmInput.value) { store.pushNotice(t('backup.password.mismatch'), 'error'); return }
+                runBackupExport(mode, password)
+            }
+            const onkeydown = (event) => { if (event.key === 'Enter') submit() }
+            passwordInput.addEventListener('keydown', onkeydown)
+            if (confirmInput) confirmInput.addEventListener('keydown', onkeydown)
+            content = dialogFrame(title, [
+                isSeedExport ? h('p', { class: 'warning' }, t('backup.seed.warn')) : null,
+                isSeedRestore ? h('p', { class: 'warning' }, t('backup.seed.restoreWarn')) : null,
+                h('p', { class: 'dialog-body' }, isImport ? t('backup.password.enter') : t('backup.password.create')),
+                passwordInput,
+                confirmInput,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('backup.cancel')),
+                h('button', {
+                    class: `btn ${isSeedRestore ? 'btn-danger' : 'btn-primary'}`,
+                    onclick: submit,
+                }, isImport ? t('backup.unlockImport') : t('backup.encryptExport')),
+            ])
+            queueMicrotask(() => passwordInput.focus())
         } else if (kind === 'member-remove') {
             content = dialogFrame(t('members.confirmRemove.title'), [
                 h('p', { class: 'dialog-body' }, t('members.confirmRemove.message')),

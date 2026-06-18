@@ -12,6 +12,9 @@ import {
     RPC_REQUEST_SYNC,
     RPC_GET_BOARD_CONFIG,
     RPC_SET_BOARD_CONFIG,
+    RPC_EXPORT_DATA,
+    RPC_EXPORT_SEED,
+    RPC_IMPORT,
 } from '@listam/protocol'
 import { applyOperationToList, normalizeListItem } from '@listam/domain/list-reducer'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
@@ -158,6 +161,27 @@ export function createMockBackend() {
             } else if (command === RPC_JOIN_KEY) {
                 emit({ type: 'message', payload: { type: 'join-phase', phase: 'pairing' }, raw: '' })
                 setTimeout(() => emit({ type: 'message', payload: { type: 'join-error', message: 'Mock backend cannot join peers' }, raw: '' }), 800)
+            } else if (command === RPC_EXPORT_DATA || command === RPC_EXPORT_SEED) {
+                // The browser preview cannot load the bare crypto, so the mock
+                // file is NOT actually encrypted — it just carries the envelope
+                // shape so the export → download → import flow can be exercised.
+                const kind = command === RPC_EXPORT_SEED ? 'seed' : 'data'
+                const file = JSON.stringify({ format: 'listam-export', version: 1, kind, mock: true, items: kind === 'data' ? items : undefined })
+                return JSON.stringify({ ok: true, kind, file })
+            } else if (command === RPC_IMPORT) {
+                let env = null
+                try { env = JSON.parse(payload?.file) } catch { /* invalid */ }
+                if (!env || env.format !== 'listam-export') return JSON.stringify({ ok: false, reason: 'invalid-file' })
+                if (env.kind === 'seed') return JSON.stringify({ ok: true, kind: 'seed', restored: true })
+                let count = 0
+                for (const entry of Array.isArray(env.items) ? env.items : []) {
+                    const item = normalizeListItem(entry)
+                    if (!item) continue
+                    items = applyOperationToList(items, { type: 'add', value: item })
+                    emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
+                    count++
+                }
+                return JSON.stringify({ ok: true, kind: 'data', applied: { items: count } })
             }
             return null
         },
