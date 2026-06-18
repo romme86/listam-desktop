@@ -105,7 +105,7 @@ test('bridge manager: port change restarts, stop closes and resets', async () =>
 
     const stopped = await manager.handleAction({ action: 'stop' })
     assert.equal(runtime.calls.closes, 2)
-    assert.deepEqual(stopped, { running: false, port: 0, controlKey: null, connections: 0, error: null })
+    assert.deepEqual(stopped, { running: false, port: 0, controlKey: null, hubAddr: null, connections: 0, error: null })
 })
 
 test('bridge manager: leaf connect/disconnect updates published connections', async () => {

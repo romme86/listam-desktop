@@ -40,6 +40,7 @@
     "@listam/logging": "file:../listam-packages/packages/logging",
     "@listam/owner-control": "file:../listam-packages/packages/owner-control",
     "@listam/protocol": "file:../listam-packages/packages/protocol",
+    "@listam/provisioning": "file:../listam-packages/packages/provisioning",
     "@listam/secrets": "file:../listam-packages/packages/secrets",
     "autobase": "^7.20.0",
     "b4a": "^1.7.1",
@@ -62,6 +63,7 @@
   },
   "overrides": {
     "@listam/protocol": "file:../listam-packages/packages/protocol",
+    "@listam/provisioning": "file:../listam-packages/packages/provisioning",
     "@listam/domain": "file:../listam-packages/packages/domain",
     "@listam/logging": "file:../listam-packages/packages/logging",
     "@listam/secrets": "file:../listam-packages/packages/secrets",

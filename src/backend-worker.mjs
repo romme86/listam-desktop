@@ -164,7 +164,17 @@ const bridgeManager = createLeafBridgeManager({
     load: async () => {
         const tcpModule = await import('bare-tcp')
         const { startLeafBridge } = await import('@listam/backend/lib/leaf-bridge.mjs')
-        return { tcp: tcpModule.default ?? tcpModule, startLeafBridge }
+        // bare-os surfaces this host's LAN address so the bridge status can
+        // tell the renderer the hub_addr to provision a leaf with. Optional:
+        // a build without it just reports no hubAddr.
+        let os = null
+        try {
+            const osModule = await import('bare-os')
+            os = osModule.default ?? osModule
+        } catch {
+            /* no bare-os → hubAddr stays null */
+        }
+        return { tcp: tcpModule.default ?? tcpModule, startLeafBridge, os }
     },
     log,
     publish: (status) => send({ kind: 'bridge-status', status }),

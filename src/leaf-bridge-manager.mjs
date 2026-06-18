@@ -5,7 +5,27 @@
 // logic itself stays loadable and testable under plain Node.
 import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
 
-const STOPPED = Object.freeze({ running: false, port: 0, controlKey: null, connections: 0, error: null })
+const STOPPED = Object.freeze({ running: false, port: 0, controlKey: null, hubAddr: null, connections: 0, error: null })
+
+// LAN address(es) a leaf should dial back to, as `ip:port` — surfaced in the
+// status so the renderer can provision a leaf to this hub over Web Bluetooth.
+// `os` is injected (bare-os in the worker) and optional, so this degrades to
+// null under plain Node / in tests.
+function hubAddrFromOs(os, port) {
+    try {
+        const ifaces = os?.networkInterfaces?.() ?? {}
+        const out = []
+        for (const list of Object.values(ifaces)) {
+            for (const ni of list ?? []) {
+                const v4 = ni.family === 'IPv4' || ni.family === 4
+                if (v4 && !ni.internal) out.push(`${ni.address}:${port}`)
+            }
+        }
+        return out.join(',') || null
+    } catch {
+        return null
+    }
+}
 
 export function createLeafBridgeManager({ load, log, publish }) {
     let bridge = null
@@ -24,7 +44,7 @@ export function createLeafBridgeManager({ load, log, publish }) {
         await stop({ notify: false })
         const token = ++generation
         try {
-            const { tcp, startLeafBridge } = await load()
+            const { tcp, startLeafBridge, os } = await load()
             bridge = await startLeafBridge({
                 port,
                 logger: log,
@@ -38,6 +58,7 @@ export function createLeafBridgeManager({ load, log, publish }) {
                 running: true,
                 port: bridge.port,
                 controlKey: bridge.controlKey,
+                hubAddr: hubAddrFromOs(os, bridge.port),
                 connections: 0,
                 error: null,
             })

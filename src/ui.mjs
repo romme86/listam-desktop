@@ -20,6 +20,13 @@ import {
     RPC_IMPORT,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
+import {
+    SERVICE_UUID,
+    CHAR_CONFIG_UUID,
+    CHAR_STATUS_UUID,
+    buildProvisioningPayload,
+    provisionLeaf,
+} from '@listam/provisioning'
 import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
 import { toNavLibrary, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
@@ -2172,9 +2179,90 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('div', { class: 'invite-code' }, leaf.controlKey),
                     h('div', { style: 'margin-top: 1rem;' },
                         h('button', { class: 'btn btn-primary', onclick: () => copyLeafKey(leaf.controlKey) }, t('desktop.leaf.copy'))),
+                    renderLeafBleSection(leaf, t),
                 )
                 : null,
         )
+    }
+
+    // Provision a nearby leaf over Bluetooth straight from the renderer (Web
+    // Bluetooth). The leaf is provisioned to dial THIS desktop's bridge, so it
+    // reuses store.leafBridge.{controlKey,hubAddr}. Falls back to a hand-off
+    // message when Pear's Chromium doesn't expose navigator.bluetooth.
+    function renderLeafBleSection(leaf, t) {
+        const hasBle = typeof navigator !== 'undefined' && !!navigator.bluetooth
+        const heading = h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 1rem 1rem 0;' }, t('desktop.leafble.hint'))
+        if (!hasBle || !leaf.hubAddr) {
+            return h('div', {}, heading,
+                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.leafble.fallback')))
+        }
+        const ssidInput = h('input', { class: 'input', placeholder: t('desktop.leafble.wifiSsid') })
+        const pskInput = h('input', { class: 'input', type: 'password', placeholder: t('desktop.leafble.wifiPsk'), style: 'max-width: 220px;' })
+        return h('div', {}, heading,
+            h('div', { class: 'choice-row', style: 'padding: 0 1rem; gap: 0.5rem;' }, ssidInput, pskInput),
+            h('div', { style: 'margin-top: 0.75rem; padding: 0 1rem;' },
+                h('button', {
+                    class: 'btn btn-primary',
+                    onclick: () => pairLeafOverBle(leaf, ssidInput.value, pskInput.value),
+                }, t('desktop.leafble.pair'))),
+        )
+    }
+
+    async function pairLeafOverBle(leaf, ssid, psk) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        if (!navigator.bluetooth) return store.pushNotice(t('desktop.leafble.unavailable'), 'error')
+        if (!ssid || !ssid.trim()) return store.pushNotice(t('desktop.leafble.needWifi'), 'error')
+        if (!leaf?.controlKey || !leaf?.hubAddr) return store.pushNotice(t('desktop.leafble.noHub'), 'error')
+        let server = null
+        try {
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [{ services: [SERVICE_UUID] }, { namePrefix: 'listam-leaf' }],
+                optionalServices: [SERVICE_UUID],
+            })
+            store.pushNotice(t('desktop.leafble.connecting'), 'info')
+            server = await device.gatt.connect()
+            const service = await server.getPrimaryService(SERVICE_UUID)
+            const configChar = await service.getCharacteristic(CHAR_CONFIG_UUID)
+            const statusChar = await service.getCharacteristic(CHAR_STATUS_UUID)
+            // The negotiated ATT MTU (firmware prefers 247) comfortably fits a
+            // ~180-byte frame in one write; the leaf reassembles by offset.
+            const transport = {
+                mtu: 180,
+                async write(_uuid, bytes) {
+                    if (configChar.writeValueWithResponse) await configChar.writeValueWithResponse(bytes)
+                    else await configChar.writeValue(bytes)
+                },
+                async subscribe(_uuid, onValue) {
+                    await statusChar.startNotifications()
+                    const handler = (event) => {
+                        const dv = event.target.value
+                        onValue(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength))
+                    }
+                    statusChar.addEventListener('characteristicvaluechanged', handler)
+                    return () => {
+                        statusChar.removeEventListener('characteristicvaluechanged', handler)
+                        statusChar.stopNotifications().catch(() => {})
+                    }
+                },
+            }
+            const payload = buildProvisioningPayload({
+                controlKey: leaf.controlKey,
+                hubAddr: leaf.hubAddr,
+                wifi: [{ ssid: ssid.trim(), psk: psk ?? '' }],
+                audioAddr: leaf.audioAddr ?? undefined,
+            })
+            store.pushNotice(t('desktop.leafble.writing'), 'info')
+            await provisionLeaf({ transport, payload, mtu: transport.mtu })
+            store.pushNotice(t('desktop.leafble.success'), 'success')
+        } catch (error) {
+            store.pushNotice(t('desktop.leafble.failed', { message: error?.message ?? String(error) }), 'error')
+        } finally {
+            try {
+                server?.disconnect()
+            } catch {
+                /* already gone — the leaf reboots on success */
+            }
+        }
     }
 
     // H1 owner-control: pair this desktop with a headless instance via an
