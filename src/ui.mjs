@@ -29,6 +29,14 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
+import {
+    isLabelItem,
+    surfaceLabelKey,
+    buildSurfaceLabelItem,
+    buildPeerLabelItem,
+    reduceSurfaceLabels,
+    reducePeerLabels,
+} from '@listam/domain/labels'
 import { toNavLibrary, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
 import {
     newListMeta,
@@ -268,7 +276,9 @@ function isGroceryItem(item) {
     // grocery entries — they share state.items but must never render as rows.
     // (Board/to-do are already excluded by type; registry is the one a bare
     // "not board, not todo" test would wrongly admit.)
-    return !!item && !isRegistryItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
+    // Label meta-items (peer names, surface names) also share state.items but
+    // live in their own listId buckets and must never render as grocery rows.
+    return !!item && !isRegistryItem(item) && !isLabelItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
 }
 
 // The to-do surface: plain text items (isTodoType), the mirror of isGroceryItem
@@ -287,6 +297,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         view: 'lists',
         activeListId: null,
         editingListId: null,
+        // Inline rename target for a BUILT-IN surface (Groceries/Board/Todo).
+        // Keyed by surfaceLabelKey since built-ins share one listId, so
+        // editingListId can't distinguish them.
+        editingSurfaceKey: null,
         editingGroupId: null,
         dialog: null,
         editingItemId: null,
@@ -379,6 +393,34 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const send = (command, payload) => Promise.resolve(client.send(command, payload)).catch(() => {
         store.pushNotice(locale.i18n.t('backend.startFailed'), 'error')
     })
+
+    // --- this device's advertised name (synced peer-label item) ------------
+    // This device only learns its own autobase writer key from the membership
+    // roster (the isSelf writer), which arrives after boot. So the peer-label
+    // write is deferred: setDeviceName stores the device-local copy immediately
+    // and maybeAssertDeviceName (run each render) writes/updates the synced label
+    // once the key is known and the synced value differs. `assertedPeerLabel`
+    // guards against re-sending the same (key,name) on every render.
+    let assertedPeerLabel = ''
+    function selfWriterKey() {
+        return store.getState().roster?.writers?.find((w) => w.isSelf)?.writerKey ?? null
+    }
+    function assertDeviceName(name) {
+        const key = selfWriterKey()
+        if (!key) return
+        const signature = `${key} ${name}`
+        if (assertedPeerLabel === signature) return
+        assertedPeerLabel = signature
+        const synced = reducePeerLabels(store.getState().items).get(key) ?? ''
+        if (synced === name) return
+        const item = buildPeerLabelItem({ writerKey: key, name, updatedAt: now() })
+        markLocalId(item.id)
+        send(RPC_UPDATE, { item })
+    }
+    function maybeAssertDeviceName() {
+        const name = store.getState().preferences.deviceName
+        if (name) assertDeviceName(name)
+    }
 
     // --- encrypted backup / restore ---------------------------------------
     // Unlike `send`, these need the worker's reply (the encrypted file or the
@@ -547,6 +589,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         },
         setDefaultList(id) {
             store.setPreferences({ defaultListId: id })
+        },
+        // Device-local: which (listId:type) surface opens on launch. Works for
+        // both built-in and registry surfaces; takes precedence over defaultListId.
+        setDefaultSurface(surface) {
+            store.setPreferences({ defaultSurfaceKey: surfaceLabelKey(surface.listId, surface.type) })
+        },
+        // Synced rename of a built-in surface (Groceries/Board/Todo). They share
+        // listId 'default' and so have no registry meta-item; this writes a
+        // surface-name label item keyed by (listId:type). Empty name clears the
+        // override (reverts to the localized default).
+        renameBuiltin(listId, type, name) {
+            const item = buildSurfaceLabelItem({ listId, type, name: (name ?? '').trim(), updatedAt: now() })
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
+        },
+        // Advertise this device's name to peers. Stores the device-local copy and
+        // writes the synced peer-label item once this device's writer key is known
+        // (maybeAssertDeviceName re-tries on roster arrival if it wasn't yet).
+        setDeviceName(name) {
+            const clean = (name ?? '').trim()
+            store.setPreferences({ deviceName: clean })
+            assertDeviceName(clean)
         },
         toggleItem(item) {
             markLocalId(item.id)
@@ -885,6 +949,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // item filtering keys on BOTH so board/todo on the default list never bleed
     // into the grocery view (and vice-versa).
     const GROCERY_TYPE = 'shopping'
+    // The localized default label key for a built-in surface type.
+    function builtinFallbackKey(type) {
+        if (isBoardType(type)) return 'desktop.rail.board'
+        if (isTodoType(type)) return 'desktop.rail.todo'
+        return 'desktop.rail.groceries'
+    }
+    // A built-in surface's display name: a synced rename override (surface label)
+    // if present, else the localized default. `surfaceLabels` is the reduced
+    // Map<surfaceKey,name>; pass it in so callers reduce state.items once.
+    function builtinDisplayName(type, surfaceLabels) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        return surfaceLabels.get(surfaceLabelKey(DEFAULT_LIST_ID, type)) || t(builtinFallbackKey(type))
+    }
     function typePredicate(type) {
         if (isBoardType(type)) return (item) => isBoardType(item.listType)
         if (isTodoType(type)) return (item) => isTodoItem(item)
@@ -902,15 +979,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         const items = state.items
         const hasOnDefault = (pred) => items.some((item) => item.listId === DEFAULT_LIST_ID && pred(item))
+        // Synced rename overrides for the built-in surfaces (reduced once).
+        const surfaceLabels = reduceSurfaceLabels(items)
 
         // Always-present built-ins on the default list (the legacy surfaces).
         // Board follows the gate-creation-only rule: shown when boardEnabled OR a
         // board already has tickets, so synced/existing boards stay reachable.
-        const builtins = [{ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: t('desktop.rail.groceries'), builtin: true }]
+        const builtins = [{ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: builtinDisplayName(GROCERY_TYPE, surfaceLabels), builtin: true }]
         if (state.preferences.boardEnabled || hasOnDefault((item) => isBoardType(item.listType))) {
-            builtins.push({ listId: DEFAULT_LIST_ID, type: BOARD_LIST_TYPE, name: t('desktop.rail.board'), builtin: true })
+            builtins.push({ listId: DEFAULT_LIST_ID, type: BOARD_LIST_TYPE, name: builtinDisplayName(BOARD_LIST_TYPE, surfaceLabels), builtin: true })
         }
-        builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: t('desktop.rail.todo'), builtin: true })
+        builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: builtinDisplayName(TODO_LIST_TYPE, surfaceLabels), builtin: true })
 
         // Registry lists (named, distinct listIds) organized into groups. The
         // default list is the built-ins above, so it's never repeated here.
@@ -940,7 +1019,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const rail = buildRail(state)
         const all = allSurfaces(rail)
         if (!all.some(surfaceActive)) {
-            const pick = all.find((s) => s.listId === state.preferences.defaultListId) || all[0]
+            // Launch-default precedence: the chosen (listId:type) surface, then the
+            // legacy by-listId default, then the first built-in (Groceries).
+            const wantKey = state.preferences.defaultSurfaceKey
+            const pick = (wantKey && all.find((s) => surfaceLabelKey(s.listId, s.type) === wantKey))
+                || all.find((s) => s.listId === state.preferences.defaultListId)
+                || all[0]
             if (pick) { ui.activeListId = pick.listId; ui.activeType = pick.type; ui.view = surfaceForType(pick.type) }
         }
         return rail
@@ -959,6 +1043,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         ui.selectedTicketId = null
         ui.ticketDocId = null
         ui.editingListId = null
+        ui.editingSurfaceKey = null
         ui.editingGroupId = null
         renderAll()
     }
@@ -996,15 +1081,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderSurfaceRow(state, surface) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { listId, type, name, builtin } = surface
-        // Inline rename (primary affordance) — registry lists only; the built-in
-        // default surfaces are fixed (they share one listId, so they have no
-        // individual registry meta-item to rename).
-        if (!builtin && ui.editingListId === listId) {
+        // Built-ins rename via a synced surface-label item (they share one listId,
+        // so they have no registry meta-item); registry lists rename their meta-
+        // item. The two use distinct edit-state keys and distinct, colon-free DOM
+        // ids (a surfaceKey contains ':', which would break editableText's raw
+        // querySelector focus-restore).
+        const editKey = surfaceLabelKey(listId, type)
+        const editing = builtin ? ui.editingSurfaceKey === editKey : ui.editingListId === listId
+        const domId = builtin ? `rail-rename-builtin-${type}` : `rail-rename-${listId}`
+        const enterEdit = builtin
+            ? () => { ui.editingSurfaceKey = editKey; renderAll(); focusRailRename(domId) }
+            : () => { ui.editingListId = listId; renderAll(); focusRailRename(domId) }
+        if (editing) {
             const input = editableText({
-                id: `rail-rename-${listId}`,
+                id: domId,
                 value: name,
                 className: 'rail-rename-input',
-                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== name) actions.renameList(listId, nv); ui.editingListId = null; renderAll() },
+                onCommit: (v) => {
+                    const nv = v.trim()
+                    if (builtin) { if (nv !== name) actions.renameBuiltin(listId, type, nv); ui.editingSurfaceKey = null }
+                    else { if (nv && nv !== name) actions.renameList(listId, nv); ui.editingListId = null }
+                    renderAll()
+                },
             })
             return h('div', { class: 'rail-row editing' },
                 h('div', { class: 'nav-item' }, tablerIcon(iconForType(type), { size: 15 }), input),
@@ -1014,13 +1112,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('button', {
                 class: `nav-item${surfaceActive(surface) ? ' active' : ''}`,
                 onclick: () => selectSurface(state, surface),
-                ondblclick: builtin ? null : () => { ui.editingListId = listId; renderAll(); focusRailRename(`rail-rename-${listId}`) },
+                ondblclick: enterEdit,
             },
                 tablerIcon(iconForType(type), { size: 15 }),
                 h('span', { class: 'nav-label' }, name),
                 surfaceBadge(state, surface),
             ),
-            builtin ? null : rowMenuButton(t('desktop.list.settings'), () => openDialog({ kind: 'list-settings', listId })),
+            rowMenuButton(t('desktop.list.settings'), () => openDialog(
+                builtin ? { kind: 'list-settings', listId, builtinType: type } : { kind: 'list-settings', listId },
+            )),
         )
     }
     function renderGroupHeader(state, group) {
@@ -2380,8 +2480,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return [h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('members.subtitle.none'))]
         }
         const canAdminister = store.getState().roster?.canAdminister
+        // Synced device names; fall back to the raw writer key when unnamed.
+        const peerNames = reducePeerLabels(store.getState().items)
         return members.map((member) => h('div', { class: 'member-row' },
-            h('span', { class: 'who' }, member.writerKey),
+            h('span', { class: 'who', title: member.writerKey }, peerNames.get(member.writerKey) || member.writerKey),
             h('span', { class: `role-chip${member.isOwner ? ' owner' : ''}` },
                 member.isOwner ? t('members.role.owner') : member.isSelf ? t('members.role.self') : t('members.role.member')),
             canAdminister && !member.isSelf && !member.isOwner
@@ -2516,6 +2618,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('button', { class: 'btn btn-primary', onclick: () => actions.confirmJoin(ui.dialog.invite) }, t('common.join')),
             ])
         } else if (kind === 'settings') {
+            // This device's name, advertised to peers (synced peer label). Commit
+            // on Enter/blur; setDeviceName stores the local copy and writes the
+            // label once this device's writer key is known.
+            const deviceNameInput = h('input', {
+                class: 'input',
+                value: state.preferences.deviceName || '',
+                placeholder: t('desktop.settings.deviceName.placeholder'),
+                maxlength: '64',
+            })
+            const commitDeviceName = () => {
+                const nv = deviceNameInput.value.trim()
+                if (nv !== (state.preferences.deviceName || '')) actions.setDeviceName(nv)
+            }
+            deviceNameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitDeviceName(); deviceNameInput.blur() } })
+            deviceNameInput.addEventListener('blur', commitDeviceName)
             const themeRow = h('div', { class: 'choice-row' },
                 ...THEME_CHOICES.map((choice) => h('button', {
                     class: `btn ${state.preferences.theme === choice ? 'btn-primary' : 'btn-secondary'}`,
@@ -2570,6 +2687,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 }, t('settings.board.off')),
             )
             content = dialogFrame(t('desktop.settings.title'), [
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.deviceName.label')),
+                deviceNameInput,
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.deviceName.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.theme.label')),
                 themeRow,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.hints.show')),
@@ -2671,12 +2791,45 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('button', { class: 'btn btn-primary', onclick: submit }, t('desktop.list.create')),
             ])
             queueMicrotask(() => nameInput.focus())
+        } else if (kind === 'list-settings' && ui.dialog.builtinType) {
+            // Built-in surface (Groceries/Board/Todo): synced rename via a surface
+            // label + device-local launch-default. No group selector, no delete.
+            const type = ui.dialog.builtinType
+            const listId = ui.dialog.listId
+            const resolvedName = builtinDisplayName(type, reduceSurfaceLabels(state.items))
+            const isDefault = state.preferences.defaultSurfaceKey === surfaceLabelKey(listId, type)
+            const nameInput = h('input', { class: 'input', value: resolvedName })
+            // Empty clears the override (reverts to the localized default).
+            const commitName = () => { const nv = nameInput.value.trim(); if (nv !== resolvedName) actions.renameBuiltin(listId, type, nv) }
+            nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
+            nameInput.addEventListener('blur', commitName)
+            content = dialogFrame(resolvedName || t('desktop.list.settings'), [
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
+                nameInput,
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.launch')),
+                h('div', { class: 'choice-row' },
+                    h('button', {
+                        class: `btn ${isDefault ? 'btn-primary' : 'btn-secondary'}`,
+                        disabled: isDefault ? 'disabled' : undefined,
+                        onclick: () => actions.setDefaultSurface({ listId, type }),
+                    }, isDefault ? t('desktop.list.isDefault') : t('desktop.list.setDefault')),
+                ),
+            ], [
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+            queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings') {
             const registry = reduceRegistry(state.items)
             const entry = registry.lists.find((l) => l.id === ui.dialog.listId)
             if (!entry) { closeDialog(); return }
             const listId = ui.dialog.listId
-            const isDefault = state.preferences.defaultListId === listId
+            const surfaceKey = surfaceLabelKey(listId, entry.type || GROCERY_TYPE)
+            // Prefer the new surface-key default; fall back to the legacy by-listId
+            // flag so a previously-set default still shows as current.
+            const isDefault = state.preferences.defaultSurfaceKey
+                ? state.preferences.defaultSurfaceKey === surfaceKey
+                : state.preferences.defaultListId === listId
             const nameInput = h('input', { class: 'input', value: entry.name })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
@@ -2700,7 +2853,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', {
                         class: `btn ${isDefault ? 'btn-primary' : 'btn-secondary'}`,
                         disabled: isDefault ? 'disabled' : undefined,
-                        onclick: () => { actions.setDefaultList(listId) },
+                        onclick: () => { actions.setDefaultSurface({ listId, type: entry.type || GROCERY_TYPE }) },
                     }, isDefault ? t('desktop.list.isDefault') : t('desktop.list.setDefault')),
                 ),
             ], [
@@ -2933,6 +3086,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // --- render loop ----------------------------------------------------------
     function renderAll() {
         const state = store.getState()
+        // Advertise this device's name once its writer key is known (roster).
+        maybeAssertDeviceName()
         renderNav(state)
         renderMain(state)
         renderHints(state)

@@ -53,6 +53,18 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // mobile/headless `defaultListId`), resolved against the synced registry via
     // resolveLaunchList. Not replicated.
     defaultListId: DEFAULT_LIST_ID,
+    // Which (listId:type) SURFACE opens on launch — needed because the three
+    // built-in surfaces (Groceries/Board/Todo) share listId 'default', so
+    // defaultListId alone can't distinguish them. Takes precedence over
+    // defaultListId in ensureActiveList. '' = fall back to defaultListId.
+    // Device-local; must stay a string ('' not null) so prefs.mjs's typeof
+    // type-guard preserves it.
+    defaultSurfaceKey: '',
+    // This device's human-readable name, advertised to other peers via a synced
+    // peer-label item (see @listam/domain/labels). Device-local source of truth
+    // for the Settings input and for re-asserting the label once this device's
+    // writer key is known. '' = not named yet.
+    deviceName: '',
     leafBridgeEnabled: false,
     leafBridgePort: DEFAULT_LEAF_BRIDGE_PORT,
 })
