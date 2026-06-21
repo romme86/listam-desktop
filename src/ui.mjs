@@ -2188,14 +2188,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // Provision a nearby leaf over Bluetooth straight from the renderer (Web
     // Bluetooth). The leaf is provisioned to dial THIS desktop's bridge, so it
     // reuses store.leafBridge.{controlKey,hubAddr}. Falls back to a hand-off
-    // message when Pear's Chromium doesn't expose navigator.bluetooth.
+    // message when Web Bluetooth can't actually drive a chooser here.
     function renderLeafBleSection(leaf, t) {
-        const hasBle = typeof navigator !== 'undefined' && !!navigator.bluetooth
+        // Pear's Electron runtime exposes navigator.bluetooth but never wires up
+        // the select-bluetooth-device chooser, so requestDevice() finds nothing
+        // and immediately auto-cancels. Treat in-Pear as no-Web-Bluetooth and
+        // hand off to the Terminal/mobile path instead of offering a "Pair over
+        // Bluetooth" button that can never populate.
+        if (!webBluetoothUsable() || !leaf.hubAddr) return renderLeafBleFallback(leaf, t)
         const heading = h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 1rem 1rem 0;' }, t('desktop.leafble.hint'))
-        if (!hasBle || !leaf.hubAddr) {
-            return h('div', {}, heading,
-                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.leafble.fallback')))
-        }
         const ssidInput = h('input', { class: 'input', placeholder: t('desktop.leafble.wifiSsid') })
         const pskInput = h('input', { class: 'input', type: 'password', placeholder: t('desktop.leafble.wifiPsk'), style: 'max-width: 220px;' })
         return h('div', {}, heading,
@@ -2206,6 +2207,48 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     onclick: () => pairLeafOverBle(leaf, ssidInput.value, pskInput.value),
                 }, t('desktop.leafble.pair'))),
         )
+    }
+
+    // Web Bluetooth is only usable in a real browser context (e.g. the ?mock=1
+    // design preview). Inside the Pear runtime navigator.bluetooth is present
+    // but non-functional — there's no device chooser — so report it unusable.
+    function webBluetoothUsable() {
+        if (typeof navigator === 'undefined' || !navigator.bluetooth) return false
+        const inPear = typeof globalThis.Pear !== 'undefined' && !!globalThis.Pear?.config
+        return !inPear
+    }
+
+    // Hand-off shown when Bluetooth can't provision the leaf from here. The leaf
+    // still needs to dial THIS desktop, so we surface its LAN address and a
+    // ready-to-run Terminal command (control key baked in, Wi-Fi to fill) next
+    // to the mobile-app option.
+    function renderLeafBleFallback(leaf, t) {
+        const rows = [
+            h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 1rem 1rem 0;' }, t('desktop.leafble.fallback')),
+        ]
+        if (leaf.controlKey && leaf.hubAddr) {
+            const command = leafProvisionCommand(leaf)
+            rows.push(
+                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.leafble.fallbackAddr', { addr: leaf.hubAddr })),
+                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.leafble.fallbackTerminal')),
+                h('div', { class: 'invite-code', style: 'white-space: pre-wrap; word-break: break-all;' }, command),
+                h('div', { style: 'margin-top: 0.75rem; padding: 0 1rem;' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => copyLeafCommand(command) }, t('desktop.leafble.copyCmd'))),
+            )
+        }
+        return h('div', {}, ...rows)
+    }
+
+    // The exact one-liner listam-headless/tmp-provision-leaf.mjs expects, with
+    // this hub's control key + LAN address baked in; the user only fills in
+    // their Wi-Fi. NODE_PRESERVE_SYMLINKS=1 lets the symlinked workspace deps
+    // (@listam/provisioning) resolve under plain Node.
+    function leafProvisionCommand(leaf) {
+        return [
+            'WIFI_SSID="your-wifi" WIFI_PSK="your-password" \\',
+            `CONTROL_KEY="${leaf.controlKey}" HUB_ADDR="${leaf.hubAddr}" \\`,
+            'NODE_PRESERVE_SYMLINKS=1 node tmp-provision-leaf.mjs',
+        ].join('\n')
     }
 
     async function pairLeafOverBle(leaf, ssid, psk) {
@@ -2405,6 +2448,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         try {
             await navigator.clipboard.writeText(key)
             store.pushNotice(locale.i18n.t('desktop.leaf.copied'), 'success')
+        } catch {
+            store.pushNotice(locale.i18n.t('invite.share.failed'), 'error')
+        }
+    }
+
+    async function copyLeafCommand(command) {
+        try {
+            await navigator.clipboard.writeText(command)
+            store.pushNotice(locale.i18n.t('desktop.leafble.cmdCopied'), 'success')
         } catch {
             store.pushNotice(locale.i18n.t('invite.share.failed'), 'error')
         }

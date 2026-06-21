@@ -46,7 +46,7 @@ const FIXTURE_TEXTS = [
 export function createMockBackend() {
     const listeners = new Set()
     const bridgeListeners = new Set()
-    let bridgeStatus = { running: false, port: 0, controlKey: null, connections: 0, error: null }
+    let bridgeStatus = { running: false, port: 0, controlKey: null, hubAddr: null, connections: 0, error: null }
     let bridgeTimer = null
     let nextId = 0
     let items = FIXTURE_TEXTS.map(([text, isDone]) => normalizeListItem({
@@ -245,6 +245,7 @@ export function createMockBackend() {
                     running: true,
                     port: options.port ?? 9993,
                     controlKey: 'fadefeed'.repeat(8),
+                    hubAddr: `192.168.1.42:${options.port ?? 9993}`,
                     connections: 0,
                     error: null,
                 }
@@ -254,7 +255,7 @@ export function createMockBackend() {
                     emitBridge()
                 }, 1500)
             } else if (action === 'stop') {
-                bridgeStatus = { running: false, port: 0, controlKey: null, connections: 0, error: null }
+                bridgeStatus = { running: false, port: 0, controlKey: null, hubAddr: null, connections: 0, error: null }
             }
             emitBridge()
             return bridgeStatus
