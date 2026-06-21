@@ -621,6 +621,12 @@ button {
 @keyframes backdrop-in { from { opacity: 0; } }
 .dialog {
     width: min(560px, calc(100vw - 4rem));
+    /* Cap to the viewport and lay out as a column so a tall dialog (e.g.
+       Settings) scrolls its body instead of overflowing the screen with the
+       actions pushed out of reach. */
+    max-height: calc(100vh - 4rem);
+    display: flex;
+    flex-direction: column;
     background: var(--surface-0);
     border-radius: var(--r-dialog);
     padding: 2rem;
@@ -630,7 +636,9 @@ button {
     from { opacity: 0; transform: translateY(10px) scale(0.98); }
 }
 .dialog h2 { margin: 0 0 0.5rem; }
-.dialog .dialog-body { color: var(--ink-mute); margin-bottom: 1.5rem; }
+/* The scrollable region: min-height:0 lets it shrink below content height so
+   overflow-y actually engages; title + actions stay pinned outside it. */
+.dialog .dialog-body { color: var(--ink-mute); margin-bottom: 1.5rem; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
 .invite-code {
     font-family: var(--font-mono);
