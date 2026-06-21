@@ -45,6 +45,39 @@ function send(frame) {
     pipe.write(`${JSON.stringify(frame)}\n`)
 }
 
+// Bare ABORTS the whole worker process on an uncaught exception or unhandled
+// rejection — e.g. an error thrown from an autobase apply or a timer/replication
+// callback. That silently kills the backend, so the pipe closes and every
+// subsequent UI write fails with "Backend worker is not connected" ("Could not
+// start the Listam backend"). Registering listeners suppresses the abort: we
+// keep the worker alive (one recoverable error must never take the whole app
+// down) and persist the full stack next to the app storage so the root cause is
+// diagnosable. Errors are de-duped by message so a deterministic fault can't
+// spam the log file.
+const workerErrors = new Map()
+function reportWorkerError(kind, err) {
+    const message = err?.message ?? String(err)
+    const stack = err?.stack ?? (err == null ? '' : String(err))
+    const key = `${kind}:${message}`
+    const prev = workerErrors.get(key)
+    workerErrors.set(key, { kind, message, stack, count: (prev?.count ?? 0) + 1, at: nowIso() })
+    try { log.error(`worker ${kind}`, { message, count: workerErrors.get(key).count }) } catch {}
+    try {
+        const out = [...workerErrors.values()]
+            .map((e) => `[${e.at}] ${e.kind} (x${e.count}): ${e.message}\n${e.stack}\n`)
+            .join('\n')
+        fs.writeFileSync(join(Pear.config.storage, 'worker-errors.log'), out)
+    } catch { /* diagnostics are best-effort */ }
+    // Best-effort heads-up to the renderer; an unknown frame kind is ignored
+    // safely by the boot bridge, so this never breaks older renderers.
+    try { send({ kind: 'worker-error', message }) } catch { /* ignore */ }
+}
+function nowIso() {
+    try { return new Date().toISOString() } catch { return String(Date.now()) }
+}
+globalThis.Bare?.on?.('uncaughtException', (err) => reportWorkerError('uncaughtException', err))
+globalThis.Bare?.on?.('unhandledRejection', (err) => reportWorkerError('unhandledRejection', err))
+
 // Backend-originated RPC surface. Secret persistence is answered locally
 // (the secret file lives on this side of the pipe); everything else is
 // decoded and forwarded to the renderer.
