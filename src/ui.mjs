@@ -2268,9 +2268,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             onfocus: () => { ui.focusedItemId = item.id },
         }
         if (group.length > 1) Object.assign(props, reorderDnd(item, group, index, 'x'))
+        const planned = plannedRefs.has(planItemKey(item.listId, item.id))
         return h('div', props,
             h('span', { class: 'glyph' }, categoryIcon(section.canonicalKey, { size: 24 })),
             h('span', { class: 'item-text label-md' }, item.text),
+            h('button', {
+                class: `row-flag${planned ? ' flagged' : ''}`,
+                style: 'position: absolute; top: 4px; left: 4px;',
+                'aria-label': planned ? t('plan.inPlan') : t('plan.flag'),
+                title: planned ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
+                onclick: (event) => {
+                    event.stopPropagation()
+                    actions.toggleItemPlan(item)
+                },
+            }, tablerIcon('flag', { size: 14 })),
             h('button', {
                 class: 'row-delete',
                 style: 'position: absolute; top: 4px; right: 4px;',

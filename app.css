@@ -1359,3 +1359,19 @@ kbd {
 .ticket-flag:hover { opacity: 1; transform: scale(1.12); }
 .ticket-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
 .ticket-title { padding-right: 1.25rem; }
+
+/* Flag a grocery item into the plan from grid (shopping-mode) cards too. */
+.grid-card .row-flag {
+    opacity: 0;
+    color: var(--ink-faint);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.1rem;
+    border-radius: var(--r-field);
+    display: inline-flex;
+    transition: opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.grid-card:hover .row-flag, .grid-card:focus-within .row-flag { opacity: 0.7; }
+.grid-card .row-flag:hover { opacity: 1; transform: scale(1.12); }
+.grid-card .row-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
