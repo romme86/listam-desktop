@@ -37,7 +37,6 @@ import {
     reduceSurfaceLabels,
     reducePeerLabels,
 } from '@listam/domain/labels'
-import { toNavLibrary, UNGROUPED_GROUP_ID } from '@listam/domain/list-nav'
 import {
     newListMeta,
     newGroupMeta,
@@ -82,6 +81,8 @@ const NOTICE_LEAVE_MS = 180
 const ROW_EXIT_MS = 160
 const HINTS_LEAVE_MS = 150
 const REMOTE_ATTRIBUTION_MS = 5000
+// How often the Servers pane re-polls paired headless peers while it's open.
+const SERVERS_POLL_MS = 20000
 
 function replaceChildren(host, ...children) {
     host.replaceChildren(...children.filter((child) => child != null))
@@ -287,6 +288,36 @@ function isTodoItem(item) {
     return !!item && isTodoType(item.listType)
 }
 
+// Locale-neutral formatters for the Servers monitoring pane. Bytes use binary
+// units; durations collapse to the two coarsest non-zero parts.
+function formatBytes(n) {
+    const bytes = Number(n) || 0
+    if (bytes < 1024) return `${bytes} B`
+    const units = ['KB', 'MB', 'GB', 'TB']
+    let value = bytes / 1024
+    let unit = 0
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
+    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+function formatAgo(ms) {
+    const secs = Math.max(0, Math.round(Number(ms) / 1000))
+    if (secs < 60) return `${secs}s`
+    const mins = Math.round(secs / 60)
+    if (mins < 60) return `${mins}m`
+    const hrs = Math.round(mins / 60)
+    if (hrs < 24) return `${hrs}h`
+    return `${Math.round(hrs / 24)}d`
+}
+function formatUptime(ms) {
+    const secs = Math.max(0, Math.floor(Number(ms) / 1000))
+    const days = Math.floor(secs / 86400)
+    const hrs = Math.floor((secs % 86400) / 3600)
+    const mins = Math.floor((secs % 3600) / 60)
+    if (days > 0) return `${days}d ${hrs}h`
+    if (hrs > 0) return `${hrs}h ${mins}m`
+    return `${mins}m`
+}
+
 export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
     const ui = {
         // `view` is the surface KIND showing in main: a list surface
@@ -305,7 +336,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         dialog: null,
         editingItemId: null,
         focusedItemId: null,
-        controlStatus: {},
+        // Per-paired-server monitoring state, keyed by serverPublicKeyHex:
+        // { status, fetchedAt, error, busy, invite }. Populated by the Servers
+        // pane's owner-control status queries; `undefined` means never fetched.
+        servers: {},
         addBarOpen: false,
         // Board detail: selectedTicketId drives the right-hand split panel
         // (board stays on the left); ticketDocId promotes the same ticket to
@@ -319,6 +353,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         blockMenu: null,
         blockDrag: null,
         boardDrag: null,
+        // Rail drag-and-drop: the list surface being dragged between groups.
+        // { listId, type, builtin, fromGroupId } while a drag is in flight.
+        railDrag: null,
         boardConfigRequested: false,
     }
     const now = env.now ?? (() => Date.now())
@@ -333,6 +370,33 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const nextGroupId = () => `group-${now()}-${registryIdSeq++}`
     // The reduced registry derived from the synced meta-items in state.items.
     const currentRegistry = () => reduceRegistry(store.getState().items)
+
+    // Every list must belong to a group; "general" is the mandated default home
+    // (also where the former built-in Groceries/Board/Todo surfaces live). Its id
+    // is fixed so the registry entry stays addressable across peers and reloads.
+    const GENERAL_GROUP_ID = 'general'
+    // Ensure a real, synced "general" group meta-item exists so it is renamable
+    // and survives reloads. Idempotent (LWW by the fixed id); `pending` only
+    // suppresses duplicate sends until the backend echoes the create back, and
+    // is cleared once the group is observed — so a deleted general can re-form.
+    let generalGroupPending = false
+    function ensureGeneralGroup() {
+        if (currentRegistry().groups.some((g) => g.id === GENERAL_GROUP_ID)) {
+            generalGroupPending = false
+            return
+        }
+        if (generalGroupPending) return
+        generalGroupPending = true
+        const meta = newGroupMeta({ id: GENERAL_GROUP_ID, name: locale.i18n.t('desktop.group.general'), order: 0 }, now())
+        markLocalId(GENERAL_GROUP_ID)
+        send(RPC_UPDATE, { item: meta })
+    }
+    function maybeEnsureGeneralGroup() {
+        // Wait for the first full sync so we never blind-create "general" over an
+        // existing (possibly renamed) one that just hasn't replicated in yet.
+        const state = store.getState()
+        if (state.backendReady && state.synced) ensureGeneralGroup()
+    }
 
     // --- motion bookkeeping --------------------------------------------------
     // The renderer rebuilds the DOM on every store change, so animations are
@@ -521,14 +585,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined })
             return true
         },
-        // --- list registry (groups, lists, default) -----------------------
+        // --- list registry (groups, lists) --------------------------------
         // Each mutation re-emits a FULL meta-item via RPC_UPDATE (never RPC_ADD,
         // which would regenerate the id — a meta-item's id IS the list/group id).
         // The builders rebuild from the current reduced entry, so a partial edit
-        // never clobbers sibling reg* fields. setDefaultList is device-local.
-        createList({ name, type, groupId = null }) {
+        // never clobbers sibling reg* fields.
+        createList({ name, type, groupId = GENERAL_GROUP_ID }) {
+            // Every list must have a group; default to "general" and make sure
+            // that group's meta-item exists before filing the list under it.
+            const dest = groupId || GENERAL_GROUP_ID
+            if (dest === GENERAL_GROUP_ID) ensureGeneralGroup()
             const id = nextListId()
-            const meta = newListMeta({ id, name: (name ?? '').trim(), type, groupId, order: nextListOrder(currentRegistry(), groupId) }, now())
+            const meta = newListMeta({ id, name: (name ?? '').trim(), type, groupId: dest, order: nextListOrder(currentRegistry(), dest) }, now())
             markLocalId(id)
             send(RPC_UPDATE, { item: meta })
             return id
@@ -553,8 +621,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             send(RPC_UPDATE, { item: meta })
         },
         moveListToGroup(id, groupId) {
+            // A list always lands in a real group; an empty/missing target falls
+            // back to "general" (ensuring it exists).
+            const dest = groupId || GENERAL_GROUP_ID
+            if (dest === GENERAL_GROUP_ID) ensureGeneralGroup()
             const registry = currentRegistry()
-            const dest = groupId === UNGROUPED_GROUP_ID ? null : groupId
             const meta = patchListMeta(registry, id, { groupId: dest, order: nextListOrder(registry, dest) }, now())
             if (!meta) return
             markLocalId(id)
@@ -572,37 +643,69 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(id)
             send(RPC_UPDATE, { item: meta })
             // Cascade: drop the list's items too, otherwise they'd resurface as
-            // an unnamed Ungrouped list (detectExtraLists picks up any listId
-            // that has items but no meta-item).
+            // an unnamed stray list (detectExtraLists picks up any listId that
+            // has items but no meta-item).
             for (const item of store.getState().items.filter((i) => i.listId === id)) {
                 send(RPC_DELETE, { item })
             }
         },
         deleteGroup(id) {
-            // Tombstone the group; its lists fall back to Ungrouped (their
-            // regGroupId now points at a missing group, which toNavLibrary
-            // already treats as ungrouped). No list data is lost.
-            const meta = deleteGroupMeta(currentRegistry(), id, now())
+            // "general" is the mandated default home and can't be deleted (the UI
+            // hides its delete control too).
+            if (id === GENERAL_GROUP_ID) return
+            const registry = currentRegistry()
+            const meta = deleteGroupMeta(registry, id, now())
             if (!meta) return
             markLocalId(id)
             send(RPC_UPDATE, { item: meta })
+            // A list must always have a group: re-home this group's lists into
+            // "general" rather than leaving them orphaned.
+            const orphans = registry.lists.filter((l) => l.groupId === id)
+            if (orphans.length) ensureGeneralGroup()
+            for (const list of orphans) {
+                const moved = patchListMeta(registry, list.id, { groupId: GENERAL_GROUP_ID, order: nextListOrder(registry, GENERAL_GROUP_ID) }, now())
+                if (!moved) continue
+                markLocalId(list.id)
+                send(RPC_UPDATE, { item: moved })
+            }
         },
-        setDefaultList(id) {
-            store.setPreferences({ defaultListId: id })
-        },
-        // Device-local: which (listId:type) surface opens on launch. Works for
-        // both built-in and registry surfaces; takes precedence over defaultListId.
-        setDefaultSurface(surface) {
-            store.setPreferences({ defaultSurfaceKey: surfaceLabelKey(surface.listId, surface.type) })
-        },
-        // Synced rename of a built-in surface (Groceries/Board/Todo). They share
-        // listId 'default' and so have no registry meta-item; this writes a
+        // Synced rename of a former built-in surface (Groceries/Board/Todo). They
+        // share listId 'default' and so have no registry meta-item; this writes a
         // surface-name label item keyed by (listId:type). Empty name clears the
         // override (reverts to the localized default).
         renameBuiltin(listId, type, name) {
             const item = buildSurfaceLabelItem({ listId, type, name: (name ?? '').trim(), updatedAt: now() })
             markLocalId(item.id)
             send(RPC_UPDATE, { item })
+        },
+        // Delete a former built-in surface. With no registry meta-item to
+        // tombstone, deletion (a) cascades away its items on (default,type) and
+        // (b) records the surfaceKey in the device-local `hiddenBuiltins` so the
+        // surface drops off this rail.
+        deleteBuiltin(listId, type) {
+            const pred = typePredicate(type)
+            for (const item of store.getState().items.filter((i) => i.listId === listId && pred(i))) {
+                send(RPC_DELETE, { item })
+            }
+            const key = surfaceLabelKey(listId, type)
+            const hidden = Array.isArray(store.getState().preferences.hiddenBuiltins) ? store.getState().preferences.hiddenBuiltins : []
+            if (!hidden.includes(key)) store.setPreferences({ hiddenBuiltins: [...hidden, key] })
+            if (ui.activeListId === listId && surfaceForType(ui.activeType) === surfaceForType(type)) {
+                ui.activeListId = null
+                ui.activeType = null
+                ui.view = 'lists'
+            }
+        },
+        // Drag-assign a built-in to a group (device-local — they have no synced
+        // meta-item). 'general' is stored as absence so the map stays minimal.
+        setBuiltinGroup(listId, type, groupId) {
+            const dest = groupId || GENERAL_GROUP_ID
+            const key = surfaceLabelKey(listId, type)
+            const cur = store.getState().preferences.builtinGroups
+            const next = { ...(cur && typeof cur === 'object' ? cur : {}) }
+            if (dest === GENERAL_GROUP_ID) delete next[key]
+            else next[key] = dest
+            store.setPreferences({ builtinGroups: next })
         },
         // Advertise this device's name to peers. Stores the device-local copy and
         // writes the synced peer-label item once this device's writer key is known
@@ -876,6 +979,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 store.pushNotice(locale.i18n.t('desktop.leaf.startFailed'), 'error')
             }
         },
+        // Desktop-hosted voice on/off (Settings → Voice). Like the leaf bridge,
+        // the pref records intent; the worker's voice status is the truth shown.
+        async setVoice(enabled) {
+            if (typeof client.voice !== 'function') return
+            store.setPreferences({ voiceEnabled: enabled })
+            const p = store.getState().preferences
+            try {
+                const status = await client.voice(enabled ? 'start' : 'stop', {
+                    modelPath: p.voiceModelPath, locale: p.voiceLocale, prompt: p.voicePrompt,
+                })
+                if (status) {
+                    store.setState({ voice: status })
+                    if (enabled && !status.running) store.pushNotice(locale.i18n.t('desktop.voice.startFailed'), 'error')
+                }
+            } catch {
+                store.pushNotice(locale.i18n.t('desktop.voice.startFailed'), 'error')
+            }
+        },
+        setVoiceModelPath(path) { store.setPreferences({ voiceModelPath: (path ?? '').trim() }) },
+        setVoiceLocale(value) { store.setPreferences({ voiceLocale: value || 'auto' }) },
     }
 
     // --- skeleton ----------------------------------------------------------
@@ -883,6 +1006,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // synced registry, rebuilt each render), then status strip + system nav.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
+        { key: 'servers', icon: 'server', label: (t) => t('desktop.nav.servers') },
         { key: 'congruency', icon: 'activity', label: (t) => t('desktop.nav.congruency') },
         { key: 'diagnostics', icon: 'activity', label: (t) => t('desktop.nav.activity') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
@@ -942,9 +1066,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     // --- list navigation ----------------------------------------------------
     // A rail *surface* is a (listId, type) pair. Desktop's legacy data lives on
-    // a single list (listId 'default') differentiated only by listType, so the
-    // default list shows three built-in surfaces — Groceries / Board / Todo —
-    // that share listId 'default'. Each registry-declared list is one surface on
+    // a single list (listId 'default') differentiated only by listType, so that
+    // list yields three "built-in" surfaces — Groceries / Board / Todo — sharing
+    // listId 'default'. These are now presented as ordinary deletable lists
+    // inside the "general" group. Each registry-declared list is one surface on
     // its own listId. The active surface is (ui.activeListId, ui.activeType), and
     // item filtering keys on BOTH so board/todo on the default list never bleed
     // into the grocery view (and vice-versa).
@@ -970,8 +1095,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function surfaceActive(surface) {
         return ui.activeListId === surface.listId && surfaceForType(ui.activeType) === surfaceForType(surface.type)
     }
-    // Build the rail: built-in default surfaces + registry lists grouped.
-    // Memoized per render (state is a fresh object on every store change).
+    // Build the rail: every surface lives in a group. The former built-ins and
+    // any list without a (known) group fall into "general", which renders first;
+    // named registry groups follow. Memoized per render (state is a fresh object
+    // on every store change).
     let navCacheState = null
     let navCacheRail = null
     function buildRail(state) {
@@ -981,51 +1108,71 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const hasOnDefault = (pred) => items.some((item) => item.listId === DEFAULT_LIST_ID && pred(item))
         // Synced rename overrides for the built-in surfaces (reduced once).
         const surfaceLabels = reduceSurfaceLabels(items)
+        // Built-ins the user has deleted on THIS device are hidden (device-local).
+        const hidden = new Set(Array.isArray(state.preferences.hiddenBuiltins) ? state.preferences.hiddenBuiltins : [])
+        const builtinVisible = (type) => !hidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type))
 
-        // Always-present built-ins on the default list (the legacy surfaces).
+        // The former built-ins on the default list, now general-group lists.
         // Board follows the gate-creation-only rule: shown when boardEnabled OR a
         // board already has tickets, so synced/existing boards stay reachable.
-        const builtins = [{ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: builtinDisplayName(GROCERY_TYPE, surfaceLabels), builtin: true }]
-        if (state.preferences.boardEnabled || hasOnDefault((item) => isBoardType(item.listType))) {
+        const builtins = []
+        if (builtinVisible(GROCERY_TYPE)) builtins.push({ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: builtinDisplayName(GROCERY_TYPE, surfaceLabels), builtin: true })
+        if (builtinVisible(BOARD_LIST_TYPE) && (state.preferences.boardEnabled || hasOnDefault((item) => isBoardType(item.listType)))) {
             builtins.push({ listId: DEFAULT_LIST_ID, type: BOARD_LIST_TYPE, name: builtinDisplayName(BOARD_LIST_TYPE, surfaceLabels), builtin: true })
         }
-        builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: builtinDisplayName(TODO_LIST_TYPE, surfaceLabels), builtin: true })
+        if (builtinVisible(TODO_LIST_TYPE)) builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: builtinDisplayName(TODO_LIST_TYPE, surfaceLabels), builtin: true })
 
-        // Registry lists (named, distinct listIds) organized into groups. The
-        // default list is the built-ins above, so it's never repeated here.
         const registry = reduceRegistry(items)
-        const lib = toNavLibrary(registry, {
-            defaultListId: state.preferences.defaultListId,
-            ungroupedName: t('desktop.rail.ungrouped'),
-            extraLists: detectExtraLists(items, registry, (id) => id).filter((l) => l.id !== DEFAULT_LIST_ID),
-        })
-        const groups = []
-        for (const g of lib.groups) {
-            const surfaces = g.listIds
-                .filter((id) => id !== DEFAULT_LIST_ID)
-                .map((id) => { const e = lib.listsById[id]; return { listId: id, type: e.type || GROCERY_TYPE, name: e.name || id, builtin: false } })
-            if (surfaces.length) groups.push({ id: g.id, name: g.id === UNGROUPED_GROUP_ID ? null : g.name, surfaces })
+        // Lists with items but no meta-item (legacy/stray) — filed under general.
+        const extras = detectExtraLists(items, registry, (id) => id).filter((l) => l.id !== DEFAULT_LIST_ID)
+
+        // Bucket every surface by group; general (the default) holds anything
+        // whose group is general, empty, deleted, or missing. fileSurface stamps
+        // each surface with the group it actually landed in (drag reads it).
+        const generalSurfaces = []
+        const buckets = new Map()
+        for (const g of registry.groups) if (g.id !== GENERAL_GROUP_ID) buckets.set(g.id, [])
+        const fileSurface = (surface, groupId) => {
+            const dest = (groupId && groupId !== GENERAL_GROUP_ID && buckets.has(groupId)) ? groupId : GENERAL_GROUP_ID
+            surface.groupId = dest
+            if (dest === GENERAL_GROUP_ID) generalSurfaces.push(surface)
+            else buckets.get(dest).push(surface)
         }
-        navCacheRail = { builtins, groups }
+        // Built-ins first (preserving their fixed order), filed into their
+        // device-local group assignment (defaulting to general).
+        const builtinGroups = (state.preferences.builtinGroups && typeof state.preferences.builtinGroups === 'object') ? state.preferences.builtinGroups : {}
+        for (const b of builtins) {
+            fileSurface(b, builtinGroups[surfaceLabelKey(DEFAULT_LIST_ID, b.type)])
+        }
+        for (const l of registry.lists) {
+            if (l.id === DEFAULT_LIST_ID) continue
+            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false }, l.groupId)
+        }
+        for (const l of extras) {
+            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false }, null)
+        }
+
+        const generalName = registry.groups.find((g) => g.id === GENERAL_GROUP_ID)?.name || t('desktop.group.general')
+        const groups = [{ id: GENERAL_GROUP_ID, name: generalName, surfaces: generalSurfaces, general: true }]
+        for (const g of registry.groups) {
+            if (g.id === GENERAL_GROUP_ID) continue
+            groups.push({ id: g.id, name: g.name, surfaces: buckets.get(g.id) || [], general: false })
+        }
+        navCacheRail = { groups }
         navCacheState = state
         return navCacheRail
     }
     function allSurfaces(rail) {
-        return [...rail.builtins, ...rail.groups.flatMap((g) => g.surfaces)]
+        return rail.groups.flatMap((g) => g.surfaces)
     }
-    // Keep (activeListId, activeType) pointing at a real surface; fall back to
-    // the launch-default surface, else the first built-in (Groceries).
+    // The desktop opens with NO list selected. Only drop a stale selection (the
+    // active list was deleted); never auto-select a surface.
     function ensureActiveList(state) {
         const rail = buildRail(state)
-        const all = allSurfaces(rail)
-        if (!all.some(surfaceActive)) {
-            // Launch-default precedence: the chosen (listId:type) surface, then the
-            // legacy by-listId default, then the first built-in (Groceries).
-            const wantKey = state.preferences.defaultSurfaceKey
-            const pick = (wantKey && all.find((s) => surfaceLabelKey(s.listId, s.type) === wantKey))
-                || all.find((s) => s.listId === state.preferences.defaultListId)
-                || all[0]
-            if (pick) { ui.activeListId = pick.listId; ui.activeType = pick.type; ui.view = surfaceForType(pick.type) }
+        if (ui.activeListId != null && !allSurfaces(rail).some(surfaceActive)) {
+            ui.activeListId = null
+            ui.activeType = null
+            if (ui.view === 'board' || ui.view === 'todo') ui.view = 'lists'
         }
         return rail
     }
@@ -1081,6 +1228,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderSurfaceRow(state, surface) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { listId, type, name, builtin } = surface
+        const fromGroupId = surface.groupId ?? GENERAL_GROUP_ID
         // Built-ins rename via a synced surface-label item (they share one listId,
         // so they have no registry meta-item); registry lists rename their meta-
         // item. The two use distinct edit-state keys and distinct, colon-free DOM
@@ -1108,7 +1256,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('div', { class: 'nav-item' }, tablerIcon(iconForType(type), { size: 15 }), input),
             )
         }
-        return h('div', { class: 'rail-row' },
+        return h('div', {
+            class: 'rail-row',
+            // Drag a list onto another group to move it there (see renderRail's
+            // group drop zones). The whole row is the drag handle.
+            draggable: 'true',
+            ondragstart: (event) => {
+                ui.railDrag = { listId, type, builtin, fromGroupId }
+                event.dataTransfer.effectAllowed = 'move'
+                try { event.dataTransfer.setData('text/plain', listId) } catch { /* some platforms reject */ }
+                event.currentTarget.classList.add('dragging')
+            },
+            ondragend: (event) => { event.currentTarget.classList.remove('dragging'); ui.railDrag = null },
+        },
             h('button', {
                 class: `nav-item${surfaceActive(surface) ? ' active' : ''}`,
                 onclick: () => selectSurface(state, surface),
@@ -1142,20 +1302,38 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             rowMenuButton(t('desktop.group.settings'), () => openDialog({ kind: 'group-settings', groupId: group.id })),
         )
     }
+    // Move the dragged list into `targetGroupId` (a no-op within the same group).
+    // Registry lists patch their synced meta-item; built-ins record a device-local
+    // group assignment since they have no meta-item.
+    function handleRailDrop(targetGroupId) {
+        const drag = ui.railDrag
+        ui.railDrag = null
+        if (!drag || !targetGroupId || drag.fromGroupId === targetGroupId) return
+        if (drag.builtin) actions.setBuiltinGroup(drag.listId, drag.type, targetGroupId)
+        else actions.moveListToGroup(drag.listId, targetGroupId)
+    }
     function renderRail(state, rail) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const rows = []
-        // Built-in default surfaces first (always present), then registry groups.
-        for (const surface of rail.builtins) rows.push(renderSurfaceRow(state, surface))
+        const sections = []
+        // Each group is one drop zone (header + its rows); dropping a dragged list
+        // anywhere inside moves it into that group. "general" comes first.
         for (const group of rail.groups) {
-            if (group.name) rows.push(renderGroupHeader(state, { id: group.id, name: group.name }))
-            for (const surface of group.surfaces) rows.push(renderSurfaceRow(state, surface))
+            const section = h('section', {
+                class: 'rail-group',
+                ondragover: (event) => { if (ui.railDrag) { event.preventDefault(); section.classList.add('rail-drop') } },
+                ondragleave: (event) => { if (!section.contains(event.relatedTarget)) section.classList.remove('rail-drop') },
+                ondrop: (event) => { event.preventDefault(); section.classList.remove('rail-drop'); handleRailDrop(group.id) },
+            },
+                renderGroupHeader(state, { id: group.id, name: group.name }),
+                ...group.surfaces.map((surface) => renderSurfaceRow(state, surface)),
+            )
+            sections.push(section)
         }
-        rows.push(h('button', {
+        sections.push(h('button', {
             class: 'rail-new-btn',
-            onclick: () => openDialog({ kind: 'list-create', groupId: null }),
+            onclick: () => openDialog({ kind: 'list-create', groupId: GENERAL_GROUP_ID }),
         }, tablerIcon('plus', { size: 14 }), h('span', {}, t('desktop.list.new'))))
-        replaceChildren(railHost, ...rows)
+        replaceChildren(railHost, ...sections)
     }
 
     let prevPeerCount = null
@@ -1202,12 +1380,33 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             main.classList.add('pane-enter')
         }
         if (ui.ticketDocId) return renderTicketFull(state)
+        // A list surface ('lists' | 'board' | 'todo') needs an active list; with
+        // none selected (launch, or the active list was just deleted) show the
+        // "pick or create a list" placeholder instead.
+        const isListSurface = ui.view === 'lists' || ui.view === 'board' || ui.view === 'todo'
+        if (isListSurface && ui.activeListId == null) return renderNoListPane(state)
         if (ui.view === 'board') return renderBoardPane(state)
         if (ui.view === 'todo') return renderTodoPane(state)
         if (ui.view === 'congruency') return renderCongruencyPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
+        if (ui.view === 'servers') return renderServersPane()
         if (ui.view === 'diagnostics') return renderDiagnosticsPane(state)
         return renderListsPane(state)
+    }
+    // Shown when no list is selected. The rail still lists every list/group; this
+    // is just the main-pane placeholder that invites picking or creating one.
+    function renderNoListPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        return replaceChildren(main,
+            h('div', { class: 'empty-state no-list-empty' },
+                h('h2', {}, t('desktop.noList.title')),
+                h('p', {}, t('desktop.noList.subtitle')),
+                h('button', {
+                    class: 'btn btn-primary',
+                    onclick: () => openDialog({ kind: 'list-create', groupId: GENERAL_GROUP_ID }),
+                }, tablerIcon('plus', { size: 16 }), h('span', {}, t('desktop.list.new'))),
+            ),
+        )
     }
 
     function renderHints(state) {
@@ -2215,8 +2414,68 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('members.title')),
                 h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
             ),
-            renderOwnedDevices(),
             renderLeafBridge(state),
+            renderVoice(state),
+        )
+    }
+
+    // Desktop-hosted voice: the leaf streams mic audio to this app's audio
+    // bridge; the worker transcribes (whisper via bare-subprocess) and adds the
+    // item to THIS list — no separate peer/base. Mock client has no voice(), so
+    // the preview shows the unavailable state.
+    function renderVoice(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const section = (...children) => h('section', { class: 'pane-section' },
+            h('h3', { class: 'category-heading label-sm' }, t('desktop.voice.title')),
+            ...children,
+        )
+        if (typeof client.voice !== 'function') {
+            return section(h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.voice.unavailable')))
+        }
+        const voice = state.voice
+        const running = Boolean(voice?.running)
+        const hasModel = Boolean((state.preferences.voiceModelPath || '').trim())
+        const modelInput = h('input', {
+            class: 'input',
+            value: state.preferences.voiceModelPath || '',
+            placeholder: t('desktop.voice.modelPlaceholder'),
+            disabled: running ? '' : null,
+            'aria-label': t('desktop.voice.model'),
+            onchange: (event) => actions.setVoiceModelPath(event.target.value),
+        })
+        // Spoken-language hint: drives BOTH the whisper -l flag and the intent
+        // parser's grammar. 'auto' makes the parser fall back to English, so a
+        // non-English speaker must pick their language here or commands won't parse.
+        const VOICE_LANGS = [['auto', null], ['it', 'app.locale.italian'], ['en', 'app.locale.english'], ['es', 'app.locale.spanish'], ['de', 'app.locale.german'], ['fr', 'app.locale.french'], ['pt', 'app.locale.portuguese']]
+        const localeSelect = h('select', {
+            class: 'prop-select',
+            disabled: running ? '' : null,
+            'aria-label': t('header.section.language'),
+            onchange: (event) => actions.setVoiceLocale(event.target.value),
+        }, ...VOICE_LANGS.map(([v, key]) => {
+            const opt = h('option', { value: v }, v === 'auto' ? t('desktop.voice.localeAuto') : t(key))
+            if ((state.preferences.voiceLocale || 'auto') === v) opt.setAttribute('selected', 'selected')
+            return opt
+        }))
+        return section(
+            h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.voice.description')),
+            h('div', { style: 'padding: 0 1rem;' }, modelInput),
+            h('div', { class: 'choice-row', style: 'padding: 0.5rem 1rem 0;' }, h('span', { class: 'label-md', style: 'color: var(--secondary);' }, t('header.section.language')), localeSelect),
+            h('div', { class: 'summary-bar label-md' },
+                h('span', { class: `dot${running ? ' live' : ''}` }),
+                h('span', {}, running ? t('desktop.voice.running', { port: voice.port }) : t('desktop.voice.off')),
+            ),
+            h('div', { class: 'choice-row', style: 'padding: 0 1rem;' },
+                h('button', {
+                    class: `btn ${running ? 'btn-primary' : 'btn-secondary'}`,
+                    'aria-pressed': running ? 'true' : 'false',
+                    disabled: (!running && !hasModel) ? 'disabled' : null,
+                    onclick: () => actions.setVoice(!running),
+                }, running ? t('desktop.voice.disable') : t('desktop.voice.enable')),
+            ),
+            voice?.error
+                ? h('p', { class: 'body-md warning', style: 'padding: 0 1rem;' }, t('desktop.voice.error', { message: voice.error }))
+                : null,
         )
     }
 
@@ -2408,20 +2667,176 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
     }
 
-    // H1 owner-control: pair this desktop with a headless instance via an
-    // operator-minted code, then query it with signed, capability-scoped
-    // commands. Requires the Pear runtime (hyperdht); the browser preview
-    // shows the section in its unavailable state.
-    function renderOwnedDevices() {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const section = (...children) => h('section', { class: 'pane-section' },
-            h('h3', { class: 'category-heading label-sm' }, t('desktop.control.title')),
-            ...children,
+    // --- Servers pane (H1 owner-control) -----------------------------------
+    // Monitor and reach the user's always-on headless peers (e.g. the Geekom):
+    // pair via an operator-minted code, poll a signed, capability-scoped status
+    // command over hyperdht, and issue safe controls (mint invite, export,
+    // shutdown). Requires the Pear runtime; the browser preview shows the
+    // unavailable state. Status is cached in ui.servers keyed by server key.
+    function copyText(text, successKey) {
+        return navigator.clipboard.writeText(text).then(
+            () => store.pushNotice(locale.i18n.t(successKey), 'success'),
+            () => store.pushNotice(locale.i18n.t('invite.share.failed'), 'error'),
         )
-        if (!ownerControl) {
-            return section(h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.unavailable')))
-        }
+    }
 
+    // Query one server's status; updates ui.servers[key] then re-renders. The
+    // busy flag both shows a spinner-ish state and guards against overlapping
+    // polls (the auto-poll and a manual click can race).
+    function serverCan(key, capability) {
+        const server = ownerControl?.listServers().find((entry) => entry.serverPublicKeyHex === key)
+        return (server?.capabilities ?? []).includes(capability)
+    }
+
+    async function refreshServer(key, { silent = false } = {}) {
+        if (!ownerControl) return
+        const prev = ui.servers[key] ?? {}
+        if (prev.busy) return
+        // A server that never granted status:read would reject every status
+        // request, so skip it (the card shows a no-access state instead).
+        if (!serverCan(key, 'status:read')) return
+        ui.servers[key] = { ...prev, busy: true }
+        if (!silent) renderAll()
+        // Re-read the live entry at write time rather than reusing the pre-await
+        // `prev`: a poll resolving must not clobber an invite (or any field) set
+        // by mintServerInvite/etc. while the status round-trip was in flight.
+        // This handler owns only busy/status/error/fetchedAt. On failure we drop
+        // `status` so the card shows a clean offline state, not stale stats.
+        try {
+            const reply = await ownerControl.request(key, 'status')
+            const cur = ui.servers[key] ?? {}
+            ui.servers[key] = reply?.ok
+                ? { ...cur, status: reply.status, error: null, busy: false, fetchedAt: now() }
+                : { ...cur, status: undefined, busy: false, error: reply?.reason ?? 'error', fetchedAt: now() }
+        } catch (error) {
+            const cur = ui.servers[key] ?? {}
+            ui.servers[key] = { ...cur, status: undefined, busy: false, error: error?.message ?? 'error', fetchedAt: now() }
+        }
+        renderAll()
+    }
+
+    function refreshAllServers(opts) {
+        if (!ownerControl) return
+        // refreshServer self-skips servers without status:read.
+        for (const server of ownerControl.listServers()) refreshServer(server.serverPublicKeyHex, opts)
+    }
+
+    async function mintServerInvite(key) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        try {
+            const reply = await ownerControl.request(key, 'invite')
+            if (reply?.ok && reply.inviteKey) {
+                ui.servers[key] = { ...(ui.servers[key] ?? {}), invite: reply.inviteKey }
+                store.pushNotice(t('desktop.servers.inviteMinted'), 'success')
+            } else {
+                store.pushNotice(`${t('desktop.servers.inviteFailed')} (${reply?.reason ?? 'error'})`, 'error')
+            }
+        } catch (error) {
+            store.pushNotice(`${t('desktop.servers.inviteFailed')} (${error?.message ?? 'error'})`, 'error')
+        }
+        renderAll()
+    }
+
+    async function exportServer(key) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        try {
+            const reply = await ownerControl.request(key, 'export')
+            if (reply?.ok && reply.export) {
+                await navigator.clipboard.writeText(JSON.stringify(reply.export, null, 2))
+                const count = Array.isArray(reply.export.items) ? reply.export.items.length : 0
+                store.pushNotice(t('desktop.servers.exported', { count }), 'success')
+            } else {
+                store.pushNotice(`${t('desktop.servers.exportFailed')} (${reply?.reason ?? 'error'})`, 'error')
+            }
+        } catch (error) {
+            store.pushNotice(`${t('desktop.servers.exportFailed')} (${error?.message ?? 'error'})`, 'error')
+        }
+    }
+
+    async function shutdownServer(key) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        closeDialog()
+        try {
+            const reply = await ownerControl.request(key, 'shutdown')
+            if (reply?.ok) store.pushNotice(t('desktop.servers.shutdownOk'), 'success')
+            else store.pushNotice(`${t('desktop.servers.shutdownFailed')} (${reply?.reason ?? 'error'})`, 'error')
+        } catch (error) {
+            store.pushNotice(`${t('desktop.servers.shutdownFailed')} (${error?.message ?? 'error'})`, 'error')
+        }
+        // The peer is going away; drop its cached status (so it reads offline)
+        // and any minted invite (a single-use code is useless once it shuts down).
+        ui.servers[key] = { ...(ui.servers[key] ?? {}), status: undefined, error: null, invite: undefined }
+        renderAll()
+    }
+
+    function renderServerStats(status, t) {
+        const rows = []
+        const add = (label, value) => rows.push(h('div', { class: 'kv-row' },
+            h('span', { class: 'label-sm', style: 'color: var(--secondary);' }, label),
+            h('span', { class: 'body-md' }, value),
+        ))
+        add(t('desktop.servers.field.role'), String(status.role ?? '—'))
+        add(t('desktop.servers.field.joined'), status.joined ? t('desktop.servers.yes') : t('desktop.servers.no'))
+        add(t('desktop.servers.field.peers'), String(status.peerCount ?? 0))
+        add(t('desktop.servers.field.items'), String(status.itemCount ?? 0))
+        if (status.quota) {
+            add(t('desktop.servers.field.storage'),
+                `${formatBytes(status.quota.usedBytes)} / ${formatBytes(status.quota.maxBytes)}${status.quota.exceeded ? ' ⚠' : ''}`)
+        }
+        add(t('desktop.servers.field.invite'), status.inviteActive ? t('desktop.servers.yes') : t('desktop.servers.no'))
+        const leaf = status.leafBridge
+        add(t('desktop.servers.field.leaf'), leaf ? (leaf.hubAddr || `:${leaf.port}`) : t('desktop.servers.leafOff'))
+        if (leaf?.audioAddr) add(t('desktop.servers.field.voice'), leaf.audioAddr)
+        if (status.startedAt) add(t('desktop.servers.field.uptime'), formatUptime(now() - status.startedAt))
+        if (status.updatedAt) add(t('desktop.servers.field.updated'), t('desktop.servers.updatedAgo', { ago: formatAgo(now() - status.updatedAt) }))
+        return h('div', { class: 'kv-rows', style: 'padding: 0.5rem 1rem;' }, ...rows)
+    }
+
+    function renderServerCard(server, t) {
+        const key = server.serverPublicKeyHex
+        const entry = ui.servers[key] ?? {}
+        const status = entry.status
+        const online = !!status && !entry.error
+        const caps = server.capabilities ?? []
+        const can = (cap) => caps.includes(cap)
+        const canRead = can('status:read')
+        const stateLabel = !canRead
+            ? t('desktop.servers.noStatusAccess')
+            : entry.busy
+                ? t('desktop.servers.checking')
+                : (online ? t('desktop.servers.online') : t('desktop.servers.offline'))
+        return h('section', { class: 'pane-section' },
+            h('div', { class: 'summary-bar label-md' },
+                h('span', { class: `dot${!entry.busy && online ? ' live' : ''}` }),
+                h('span', { class: 'body-md', style: 'font-weight: 600;' }, server.name),
+                h('span', { class: 'role-chip' }, key.slice(0, 8)),
+                h('span', { class: 'label-sm', style: 'color: var(--secondary);' }, stateLabel),
+            ),
+            status ? renderServerStats(status, t) : null,
+            entry.error
+                ? h('p', { class: 'body-md warning', style: 'padding: 0 1rem;' }, t('desktop.servers.error', { message: entry.error }))
+                : null,
+            entry.invite
+                ? h('div', { style: 'padding: 0 1rem;' },
+                    h('div', { class: 'invite-code' }, entry.invite),
+                    h('div', { style: 'margin-top: 0.75rem;' },
+                        h('button', { class: 'btn btn-secondary', onclick: () => copyText(entry.invite, 'desktop.peers.copied') }, t('desktop.peers.copy'))),
+                )
+                : null,
+            h('p', { class: 'label-sm', style: 'color: var(--outline); padding: 0 1rem;' },
+                `${t('desktop.control.capabilities')}: ${caps.join(', ') || '—'}`),
+            h('div', { class: 'choice-row', style: 'padding: 0 1rem; flex-wrap: wrap; gap: 0.5rem;' },
+                canRead ? h('button', { class: 'btn btn-secondary', disabled: entry.busy ? '' : null, onclick: () => refreshServer(key) }, t('desktop.servers.refresh')) : null,
+                can('invite:create') ? h('button', { class: 'btn btn-secondary', onclick: () => mintServerInvite(key) }, t('desktop.servers.mintInvite')) : null,
+                can('export:create') ? h('button', { class: 'btn btn-secondary', onclick: () => exportServer(key) }, t('desktop.servers.export')) : null,
+                can('service:shutdown')
+                    ? h('button', { class: 'btn btn-danger', onclick: () => openDialog({ kind: 'server-shutdown', serverKey: key, serverName: server.name }) }, t('desktop.servers.shutdown'))
+                    : null,
+            ),
+        )
+    }
+
+    function renderServerPairForm(t) {
         const codeInput = h('input', { class: 'input', placeholder: t('desktop.control.codePlaceholder') })
         const nameInput = h('input', { class: 'input', placeholder: t('desktop.control.namePlaceholder'), style: 'max-width: 220px;' })
         const pairAction = async () => {
@@ -2437,40 +2852,48 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 store.pushNotice(`${t('desktop.control.pairFailed')} (${error?.message ?? 'error'})`, 'error')
             }
         }
-
-        const servers = ownerControl.listServers()
-        return section(
-            servers.length === 0
-                ? h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.empty'))
-                : h('div', { class: 'kv-rows' }, ...servers.map((server) => h('div', { class: 'member-row' },
-                    h('span', {},
-                        h('div', { class: 'body-md' }, server.name),
-                        h('div', { class: 'label-sm', style: 'color: var(--outline);' }, `${t('desktop.control.capabilities')}: ${server.capabilities.join(', ') || '—'}`),
-                        ui.controlStatus[server.serverPublicKeyHex]
-                            ? h('div', { class: 'label-md', style: 'color: var(--secondary); margin-top: 0.25rem;' }, ui.controlStatus[server.serverPublicKeyHex])
-                            : null,
-                    ),
-                    h('span', { class: 'role-chip' }, server.serverPublicKeyHex.slice(0, 8)),
-                    h('button', {
-                        class: 'btn btn-secondary',
-                        onclick: async () => {
-                            try {
-                                const reply = await ownerControl.request(server.serverPublicKeyHex, 'status')
-                                ui.controlStatus[server.serverPublicKeyHex] = reply?.ok
-                                    ? JSON.stringify(reply.status)
-                                    : `${t('desktop.control.queryFailed')} (${reply?.reason ?? 'error'})`
-                            } catch (error) {
-                                ui.controlStatus[server.serverPublicKeyHex] = `${t('desktop.control.queryFailed')} (${error?.message ?? 'error'})`
-                            }
-                            renderAll()
-                        },
-                    }, t('desktop.control.query')),
-                ))),
-            h('div', { class: 'add-bar', style: 'margin-top: 1.5rem; margin-bottom: 0;' },
+        return h('section', { class: 'pane-section' },
+            h('h3', { class: 'category-heading label-sm' }, t('desktop.servers.pairTitle')),
+            h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.servers.pairHint')),
+            h('div', { class: 'add-bar', style: 'margin-top: 1rem; margin-bottom: 0;' },
                 codeInput,
                 nameInput,
                 h('button', { class: 'btn btn-primary', onclick: pairAction }, t('desktop.control.pair')),
             ),
+        )
+    }
+
+    function renderServersPane() {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const header = h('header', { class: 'page-header' },
+            h('h1', { class: 'page-title title-lg' }, t('desktop.servers.title')),
+            h('div', { class: 'header-actions' },
+                ownerControl ? h('button', { class: 'btn btn-secondary', onclick: () => refreshAllServers() }, t('desktop.servers.refreshAll')) : null,
+            ),
+        )
+        if (!ownerControl) {
+            replaceChildren(main, header,
+                h('section', { class: 'pane-section' },
+                    h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.unavailable'))),
+            )
+            return
+        }
+        const servers = ownerControl.listServers()
+        // Auto-query any status:read server we've never reached, so opening the
+        // pane shows live status without a manual click. The busy guard in
+        // refreshServer keeps re-renders from re-firing the in-flight request;
+        // gating on the capability here avoids re-calling a no-op every render.
+        for (const server of servers) {
+            if (ui.servers[server.serverPublicKeyHex] === undefined && (server.capabilities ?? []).includes('status:read')) {
+                refreshServer(server.serverPublicKeyHex, { silent: true })
+            }
+        }
+        replaceChildren(main, header,
+            servers.length === 0
+                ? h('section', { class: 'pane-section' },
+                    h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.servers.empty')))
+                : h('div', {}, ...servers.map((server) => renderServerCard(server, t))),
+            renderServerPairForm(t),
         )
     }
 
@@ -2766,17 +3189,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 onclick: () => { ui.dialog.createType = o.type; renderAll() },
             }, o.label)))
             const nameInput = h('input', { class: 'input', placeholder: t('desktop.list.namePlaceholder') })
-            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...registry.groups.map((g) => ({ id: g.id, name: g.name }))]
-            const groupSelect = h('select', { class: 'prop-select' }, ...groupOptions.map((g) => {
+            // Every list needs a group; always offer "general" (the default home)
+            // even before its meta-item has synced, and preselect it.
+            const groupChoices = [...registry.groups]
+            if (!groupChoices.some((g) => g.id === GENERAL_GROUP_ID)) groupChoices.unshift({ id: GENERAL_GROUP_ID, name: t('desktop.group.general') })
+            const defaultGroupId = ui.dialog.groupId || GENERAL_GROUP_ID
+            const groupSelect = h('select', { class: 'prop-select' }, ...groupChoices.map((g) => {
                 const opt = h('option', { value: g.id }, g.name)
-                if ((ui.dialog.groupId ?? '') === g.id) opt.setAttribute('selected', 'selected')
+                if (g.id === defaultGroupId) opt.setAttribute('selected', 'selected')
                 return opt
             }))
             const submit = () => {
                 const name = nameInput.value.trim()
                 if (!name) { store.pushNotice(t('desktop.list.nameRequired'), 'error'); return }
                 if (isGroup) actions.createGroup({ name })
-                else actions.createList({ name, type: createType, groupId: groupSelect.value || null })
+                else actions.createList({ name, type: createType, groupId: groupSelect.value || GENERAL_GROUP_ID })
                 closeDialog()
             }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') submit() })
@@ -2792,12 +3219,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ])
             queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings' && ui.dialog.builtinType) {
-            // Built-in surface (Groceries/Board/Todo): synced rename via a surface
-            // label + device-local launch-default. No group selector, no delete.
+            // Former built-in surface (Groceries/Board/Todo): synced rename via a
+            // surface label. It lives in "general"; delete clears its items and
+            // hides it from this device (no registry meta-item to tombstone).
             const type = ui.dialog.builtinType
             const listId = ui.dialog.listId
             const resolvedName = builtinDisplayName(type, reduceSurfaceLabels(state.items))
-            const isDefault = state.preferences.defaultSurfaceKey === surfaceLabelKey(listId, type)
             const nameInput = h('input', { class: 'input', value: resolvedName })
             // Empty clears the override (reverts to the localized default).
             const commitName = () => { const nv = nameInput.value.trim(); if (nv !== resolvedName) actions.renameBuiltin(listId, type, nv) }
@@ -2807,15 +3234,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.launch')),
-                h('div', { class: 'choice-row' },
-                    h('button', {
-                        class: `btn ${isDefault ? 'btn-primary' : 'btn-secondary'}`,
-                        disabled: isDefault ? 'disabled' : undefined,
-                        onclick: () => actions.setDefaultSurface({ listId, type }),
-                    }, isDefault ? t('desktop.list.isDefault') : t('desktop.list.setDefault')),
-                ),
             ], [
+                h('button', {
+                    class: 'btn btn-danger',
+                    onclick: () => {
+                        if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
+                        actions.deleteBuiltin(listId, type)
+                        closeDialog()
+                    },
+                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
             queueMicrotask(() => nameInput.focus())
@@ -2824,23 +3251,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const entry = registry.lists.find((l) => l.id === ui.dialog.listId)
             if (!entry) { closeDialog(); return }
             const listId = ui.dialog.listId
-            const surfaceKey = surfaceLabelKey(listId, entry.type || GROCERY_TYPE)
-            // Prefer the new surface-key default; fall back to the legacy by-listId
-            // flag so a previously-set default still shows as current.
-            const isDefault = state.preferences.defaultSurfaceKey
-                ? state.preferences.defaultSurfaceKey === surfaceKey
-                : state.preferences.defaultListId === listId
             const nameInput = h('input', { class: 'input', value: entry.name })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
             nameInput.addEventListener('blur', commitName)
-            const groupOptions = [{ id: '', name: t('desktop.rail.ungrouped') }, ...registry.groups.map((g) => ({ id: g.id, name: g.name }))]
+            // Every list belongs to a group; offer existing groups (always with
+            // "general") and preselect the current one, defaulting to general.
+            const groupChoices = [...registry.groups]
+            if (!groupChoices.some((g) => g.id === GENERAL_GROUP_ID)) groupChoices.unshift({ id: GENERAL_GROUP_ID, name: t('desktop.group.general') })
+            const currentGroupId = groupChoices.some((g) => g.id === entry.groupId) ? entry.groupId : GENERAL_GROUP_ID
             const groupSelect = h('select', {
                 class: 'prop-select',
-                onchange: (event) => actions.moveListToGroup(listId, event.target.value || UNGROUPED_GROUP_ID),
-            }, ...groupOptions.map((g) => {
+                onchange: (event) => actions.moveListToGroup(listId, event.target.value || GENERAL_GROUP_ID),
+            }, ...groupChoices.map((g) => {
                 const opt = h('option', { value: g.id }, g.name)
-                if ((entry.groupId ?? '') === g.id) opt.setAttribute('selected', 'selected')
+                if (g.id === currentGroupId) opt.setAttribute('selected', 'selected')
                 return opt
             }))
             content = dialogFrame(entry.name || t('desktop.list.settings'), [
@@ -2848,14 +3273,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 nameInput,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.list.launch')),
-                h('div', { class: 'choice-row' },
-                    h('button', {
-                        class: `btn ${isDefault ? 'btn-primary' : 'btn-secondary'}`,
-                        disabled: isDefault ? 'disabled' : undefined,
-                        onclick: () => { actions.setDefaultSurface({ listId, type: entry.type || GROCERY_TYPE }) },
-                    }, isDefault ? t('desktop.list.isDefault') : t('desktop.list.setDefault')),
-                ),
             ], [
                 h('button', {
                     class: 'btn btn-danger',
@@ -2872,6 +3289,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const group = reduceRegistry(state.items).groups.find((g) => g.id === ui.dialog.groupId)
             if (!group) { closeDialog(); return }
             const groupId = ui.dialog.groupId
+            // "general" is the mandated default home — renamable, but not deletable.
+            const isGeneral = groupId === GENERAL_GROUP_ID
             const nameInput = h('input', { class: 'input', value: group.name })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== group.name) actions.renameGroup(groupId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
@@ -2879,11 +3298,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             content = dialogFrame(group.name || t('desktop.group.settings'), [
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
                 nameInput,
+                isGeneral ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.group.generalNote')) : null,
                 h('div', { class: 'choice-row' },
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'list-create', groupId }) }, t('desktop.group.newList')),
                 ),
             ], [
-                h('button', {
+                isGeneral ? null : h('button', {
                     class: 'btn btn-danger',
                     onclick: () => {
                         if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
@@ -2900,6 +3320,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => actions.confirmRemoveMember(ui.dialog.member) }, t('common.remove')),
+            ])
+        } else if (kind === 'server-shutdown') {
+            content = dialogFrame(t('desktop.servers.shutdown'), [
+                h('p', { class: 'dialog-body warning' }, t('desktop.servers.shutdownConfirm', { name: ui.dialog.serverName })),
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-danger', onclick: () => shutdownServer(ui.dialog.serverKey) }, t('desktop.servers.shutdown')),
             ])
         } else if (kind === 'recovery') {
             content = dialogFrame(t('backend.recovery.title'), [
@@ -3088,6 +3515,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const state = store.getState()
         // Advertise this device's name once its writer key is known (roster).
         maybeAssertDeviceName()
+        // Materialize the mandated default "general" group once we're writable.
+        maybeEnsureGeneralGroup()
         renderNav(state)
         renderMain(state)
         renderHints(state)
@@ -3102,5 +3531,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     store.subscribe(renderAll)
     renderAll()
+
+    // Live-ish monitoring: while the Servers pane is open, re-poll paired
+    // servers every 20s. Silent so an in-flight poll doesn't flicker the dots;
+    // the busy guard in refreshServer prevents overlap. One interval for the
+    // app's lifetime — cheap when the pane isn't showing.
+    if (ownerControl && typeof setInterval === 'function') {
+        setInterval(() => { if (ui.view === 'servers') refreshAllServers({ silent: true }) }, SERVERS_POLL_MS)
+    }
     return { renderAll, openDialog, closeDialog, actions }
 }

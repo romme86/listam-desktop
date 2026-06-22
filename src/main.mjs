@@ -55,6 +55,7 @@ async function boot() {
             Pear: globalThis.Pear,
             onEvent,
             onBridgeStatus: (status) => store.setState({ leafBridge: status }),
+            onVoiceStatus: (status) => store.setState({ voice: status }),
         })
         store.setState({ backendReady: true })
         if (backend.secretsMode !== 'secure-store') {
@@ -80,6 +81,27 @@ async function boot() {
             backend.client.bridge('start', { port: prefs.leafBridgePort })
                 .then((status) => { if (status) store.setState({ leafBridge: status }) })
                 .catch((error) => log.error('[listam] leaf-bridge auto-start failed', { message: error?.message }))
+        }
+        // Desktop-hosted voice: resume the audio bridge + whisper pipeline when
+        // the user left voice enabled with a model configured. Items land in this
+        // base directly; errors surface via state.voice.error in Settings.
+        if (prefs.voiceEnabled && prefs.voiceModelPath) {
+            // Force whisper's -l from the resolved UI locale (en/es/de/fr/it/pt)
+            // unless the user pinned a specific voice language. Without a forced
+            // locale whisper auto-detects per clip and mishears short Italian
+            // commands ("aggiungi pane") as English, adding the item in English.
+            // Sentinels: '' = track UI locale (default); 'auto' = real whisper
+            // auto-detect; any other value = that forced language.
+            const voiceLocale = prefs.voiceLocale && prefs.voiceLocale !== ''
+                ? prefs.voiceLocale
+                : locale.i18n.locale
+            backend.client.voice('start', {
+                modelPath: prefs.voiceModelPath,
+                locale: voiceLocale,
+                prompt: prefs.voicePrompt,
+            })
+                .then((status) => { if (status) store.setState({ voice: status }) })
+                .catch((error) => log.error('[listam] voice auto-start failed', { message: error?.message }))
         }
         return
     }

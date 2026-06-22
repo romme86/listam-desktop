@@ -47,6 +47,7 @@
     "bare-fs": "^4.4.4",
     "bare-path": "^3.0.1",
     "bare-rpc": "^0.2.12",
+    "bare-subprocess": "^5.2.3",
     "bare-tcp": "^2.5.1",
     "bare-url": "^2.4.3",
     "blind-pairing": "^2.3.1",

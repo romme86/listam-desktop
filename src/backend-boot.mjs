@@ -5,7 +5,7 @@
 // newline-delimited JSON; events arrive already decoded to client events.
 const BOOT_TIMEOUT_MS = 45000
 
-export async function bootDesktopBackend({ Pear, onEvent, onBridgeStatus }) {
+export async function bootDesktopBackend({ Pear, onEvent, onBridgeStatus, onVoiceStatus }) {
     const applink = Pear?.config?.applink
     if (!applink) throw new Error('Pear applink unavailable')
 
@@ -39,6 +39,8 @@ export async function bootDesktopBackend({ Pear, onEvent, onBridgeStatus }) {
             resolve?.(frame.data)
         } else if (frame.kind === 'bridge-status') {
             onBridgeStatus?.(frame.status)
+        } else if (frame.kind === 'voice-status') {
+            onVoiceStatus?.(frame.status)
         }
     }
 
@@ -69,6 +71,21 @@ export async function bootDesktopBackend({ Pear, onEvent, onBridgeStatus }) {
             const id = ++requestId
             const response = new Promise((resolve) => pendingResponses.set(id, resolve))
             write({ kind: 'bridge', id, action, port: options.port })
+            const data = await response
+            try {
+                return data ? JSON.parse(data) : null
+            } catch {
+                return null
+            }
+        },
+        // Voice host control (Settings → voice). `action` is 'start'|'stop';
+        // `config` carries { modelPath, binPath, locale, prompt, audioPort }.
+        // Returns the worker's voice status { running, port, error }.
+        async voice(action, config = {}) {
+            if (!ready) throw new Error('Backend worker is not connected')
+            const id = ++requestId
+            const response = new Promise((resolve) => pendingResponses.set(id, resolve))
+            write({ kind: 'voice', id, action, config })
             const data = await response
             try {
                 return data ? JSON.parse(data) : null

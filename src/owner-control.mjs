@@ -20,6 +20,9 @@ import {
 const DEVICE_SEED_KEY = 'listam.control.v1.deviceSeed'
 const PAIRED_SERVERS_KEY = 'listam.control.v1.pairedServers'
 const REQUEST_TIMEOUT_MS = 30_000
+// The dial gets its own (shorter) budget so a slow open + a slow request can't
+// stack into a ~60s cold-path wait on REQUEST_TIMEOUT_MS twice.
+const OPEN_TIMEOUT_MS = 15_000
 
 export async function createOwnerControlManager({ Pear }) {
     const storageDir = Pear?.config?.storage
@@ -43,33 +46,69 @@ export async function createOwnerControlManager({ Pear }) {
 
     const dht = new DHT()
 
-    async function withSession(serverPublicKeyHex, run) {
+    // ONE persistent encrypted connection per server, reused for every command.
+    // hyperdht will not let us reconnect to a server key once a connection to it
+    // has been torn down (a fresh dht.connect to the same key closes before it
+    // opens — verified on a private testnet AND against a live mainnet peer), so
+    // the previous connect-and-destroy-per-request pattern made the very first
+    // command after pairing fail. Keep the socket open across requests instead;
+    // the Servers pane's 20s poll holds it warm. Map values are the in-flight
+    // open promise so concurrent first calls (auto-fetch + poll) share one dial.
+    const connections = new Map() // serverPublicKeyHex -> Promise<{ socket, session }>
+
+    function openConnection(serverPublicKeyHex) {
         const socket = dht.connect(b4a.from(serverPublicKeyHex, 'hex'))
         socket.on('error', () => {})
-        await new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error('control connection timed out')), REQUEST_TIMEOUT_MS)
-            socket.once('open', () => { clearTimeout(timer); resolve() })
+        const slot = new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { socket.destroy(); reject(new Error('control connection timed out')) }, OPEN_TIMEOUT_MS)
+            socket.once('open', () => {
+                clearTimeout(timer)
+                const session = createOwnerControlSession({
+                    keyPair: deviceKeyPair,
+                    write: (line) => socket.write(line + '\n'),
+                })
+                let buffered = ''
+                socket.on('data', (chunk) => {
+                    buffered += b4a.toString(chunk)
+                    let newline = buffered.indexOf('\n')
+                    while (newline >= 0) {
+                        session.handleLine(buffered.slice(0, newline))
+                        buffered = buffered.slice(newline + 1)
+                        newline = buffered.indexOf('\n')
+                    }
+                })
+                resolve({ socket, session })
+            })
             socket.once('close', () => { clearTimeout(timer); reject(new Error('control connection closed')) })
         })
-        const session = createOwnerControlSession({
-            keyPair: deviceKeyPair,
-            write: (line) => socket.write(line + '\n'),
-        })
-        let buffered = ''
-        socket.on('data', (chunk) => {
-            buffered += b4a.toString(chunk)
-            let newline = buffered.indexOf('\n')
-            while (newline >= 0) {
-                session.handleLine(buffered.slice(0, newline))
-                buffered = buffered.slice(newline + 1)
-                newline = buffered.indexOf('\n')
-            }
-        })
-        try {
-            return await withTimeout(run(session), REQUEST_TIMEOUT_MS)
-        } finally {
-            socket.destroy()
+        // Drop the cached slot the moment the socket dies (or the dial fails) so
+        // the next call dials afresh rather than reusing a dead session.
+        socket.once('close', () => { if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex) })
+        slot.catch(() => { if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex) })
+        connections.set(serverPublicKeyHex, slot)
+        return slot
+    }
+
+    function getConnection(serverPublicKeyHex) {
+        return connections.get(serverPublicKeyHex) ?? openConnection(serverPublicKeyHex)
+    }
+
+    async function runOnServer(serverPublicKeyHex, run) {
+        const slot = getConnection(serverPublicKeyHex)
+        let entry = await slot
+        if (entry.socket.destroyed) {
+            // Only evict the exact slot we observed dead: a concurrent caller may
+            // already have installed a fresh connection between our await and now
+            // (same `=== slot` guard the close handler and slot.catch use).
+            if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex)
+            entry = await getConnection(serverPublicKeyHex)
         }
+        // A request that times out leaves its entry in the reused session's
+        // pending map until the socket closes (the session has no cancel API).
+        // We deliberately don't destroy the socket on timeout — a fresh dial to
+        // the same key would fail (hyperdht won't reconnect), so we'd rather keep
+        // the warm connection and accept a tiny, close-bounded pending residue.
+        return withTimeout(run(entry.session), REQUEST_TIMEOUT_MS)
     }
 
     return {
@@ -80,7 +119,7 @@ export async function createOwnerControlManager({ Pear }) {
         async pair(code, name) {
             const parsed = parsePairingCode(code)
             if (!parsed) return { ok: false, reason: 'invalid-code' }
-            const result = await withSession(parsed.serverPublicKeyHex, (session) => session.pair(parsed.secretHex, name))
+            const result = await runOnServer(parsed.serverPublicKeyHex, (session) => session.pair(parsed.secretHex, name))
             if (result?.ok) {
                 servers = [
                     ...servers.filter((entry) => entry.serverPublicKeyHex !== parsed.serverPublicKeyHex),
@@ -96,9 +135,13 @@ export async function createOwnerControlManager({ Pear }) {
             return result
         },
         request(serverPublicKeyHex, command, payload) {
-            return withSession(serverPublicKeyHex, (session) => session.request(command, payload))
+            return runOnServer(serverPublicKeyHex, (session) => session.request(command, payload))
         },
         async close() {
+            for (const slot of connections.values()) {
+                slot.then(({ socket }) => socket.destroy(), () => {})
+            }
+            connections.clear()
             try {
                 await dht.destroy()
             } catch {}

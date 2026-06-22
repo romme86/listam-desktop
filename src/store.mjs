@@ -49,17 +49,20 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // replicated (prefs are device-local). Hides board *creation*, not existing
     // boards synced from other peers.
     boardEnabled: false,
-    // Which list opens on launch — a per-device launch preference (mirrors the
-    // mobile/headless `defaultListId`), resolved against the synced registry via
-    // resolveLaunchList. Not replicated.
+    // Legacy launch-default prefs. The desktop now always opens with NO list
+    // selected, so these are no longer applied; kept only so older persisted
+    // preference blobs round-trip cleanly through prefs.mjs.
     defaultListId: DEFAULT_LIST_ID,
-    // Which (listId:type) SURFACE opens on launch — needed because the three
-    // built-in surfaces (Groceries/Board/Todo) share listId 'default', so
-    // defaultListId alone can't distinguish them. Takes precedence over
-    // defaultListId in ensureActiveList. '' = fall back to defaultListId.
-    // Device-local; must stay a string ('' not null) so prefs.mjs's typeof
-    // type-guard preserves it.
     defaultSurfaceKey: '',
+    // The former built-in surfaces (Groceries/Board/Todo) are now ordinary
+    // deletable lists inside the 'general' group. Since they share the legacy
+    // 'default' listId and so have no registry meta-item to tombstone, deleting
+    // one records its surfaceKey here (device-local) to hide it from this rail.
+    hiddenBuiltins: [],
+    // Built-ins have no synced meta-item, so their group is tracked per-device:
+    // surfaceKey -> groupId. Absent / 'general' means the default home. Lets a
+    // built-in be dragged into another group like any registry list.
+    builtinGroups: {},
     // This device's human-readable name, advertised to other peers via a synced
     // peer-label item (see @listam/domain/labels). Device-local source of truth
     // for the Settings input and for re-asserting the label once this device's
@@ -67,6 +70,17 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     deviceName: '',
     leafBridgeEnabled: false,
     leafBridgePort: DEFAULT_LEAF_BRIDGE_PORT,
+    // Desktop-hosted voice (leaf streams audio here, the worker transcribes with
+    // whisper via bare-subprocess and writes the item into THIS base). All
+    // device-local. voiceModelPath must point at a multilingual GGML model
+    // (ggml-medium.bin, not .en) for non-English — see voice-italian bug.
+    voiceEnabled: false,
+    voiceModelPath: '',
+    // '' = track the UI locale (whisper gets -l <ui lang>); 'auto' = whisper
+    // auto-detect; any other value forces that language. Default '' so an Italian
+    // UI transcribes Italian without per-clip mis-detection to English.
+    voiceLocale: '',
+    voicePrompt: '',
 })
 
 export function createDesktopStore(initial = {}) {
@@ -81,6 +95,10 @@ export function createDesktopStore(initial = {}) {
         joinPhase: null,
         isJoining: false,
         backendReady: false,
+        // True once the backend has delivered at least one full snapshot, so the
+        // reduced registry reflects real synced state (not an empty pre-sync
+        // view). Gates one-time writes like materializing the 'general' group.
+        synced: false,
         roster: null,
         // Owner-signed board configuration pushed by the backend
         // (rigor mode, states, properties, rules, automations). null until the
@@ -93,6 +111,8 @@ export function createDesktopStore(initial = {}) {
         // Live leaf-bridge state pushed by the backend worker; null until the
         // worker reports it. { running, port, controlKey, connections, error }
         leafBridge: null,
+        // Live desktop voice-host state from the worker. { running, port, error }
+        voice: null,
         preferences: { ...DEFAULT_PREFERENCES, ...(initial.preferences ?? {}) },
     }
     const listeners = new Set()
@@ -144,7 +164,7 @@ export function createDesktopStore(initial = {}) {
                 // rather than appends, then re-project every list bucket.
                 reduction = reductionFromItems(event.items)
                 const items = reduction.allItems()
-                setState({ items, diagnostics: recordDiagnostic(`sync-list (${items.length} items)`, undefined, now) })
+                setState({ items, synced: true, diagnostics: recordDiagnostic(`sync-list (${items.length} items)`, undefined, now) })
                 return 'sync-list'
             }
             case 'add-from-backend':
@@ -170,6 +190,7 @@ export function createDesktopStore(initial = {}) {
                     items: [],
                     inviteKey: '',
                     roster: null,
+                    synced: false,
                     diagnostics: recordDiagnostic('reset', undefined, now),
                 })
                 return 'reset'

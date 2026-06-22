@@ -30,6 +30,7 @@ import { createLogger } from '@listam/logging'
 import { createFileSecretStore, prepareDesktopSecrets, persistDesktopSecret } from './secret-store.mjs'
 import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
 import { createLeafBridgeManager } from './leaf-bridge-manager.mjs'
+import { createVoiceHost } from './voice-host-worker.mjs'
 
 const log = createLogger({ app: 'desktop-worker' })
 const Pear = globalThis.Pear
@@ -78,6 +79,39 @@ function nowIso() {
 globalThis.Bare?.on?.('uncaughtException', (err) => reportWorkerError('uncaughtException', err))
 globalThis.Bare?.on?.('unhandledRejection', (err) => reportWorkerError('unhandledRejection', err))
 
+// Lightweight item projection the desktop voice host reads for remove-by-text
+// and registry resolution. Fed from the same decoded client events the renderer
+// receives (tapped in createRpc below).
+const voiceItems = new Map()
+function projectVoiceEvent(event) {
+    const type = event?.type
+    if (type === 'sync-list') {
+        voiceItems.clear()
+        for (const item of (Array.isArray(event.items) ? event.items : [])) if (item?.id) voiceItems.set(item.id, item)
+    } else if (type === 'add-from-backend' || type === 'update-from-backend') {
+        if (event.item?.id) voiceItems.set(event.item.id, event.item)
+    } else if (type === 'delete-from-backend') {
+        if (event.item?.id) voiceItems.delete(event.item.id)
+    } else if (type === 'reset') {
+        voiceItems.clear()
+    }
+}
+
+// Write into the DESKTOP's own base by invoking the backend request handler the
+// renderer's RPCs already go through. The voice host uses this so a spoken add
+// lands in the desktop list with no second peer/base/pairing.
+function callBackend(command, payload) {
+    return new Promise((resolve) => {
+        if (!backendHandler) return resolve(null)
+        let replied = null
+        Promise.resolve(backendHandler({
+            command,
+            data: b4a.from(typeof payload === 'string' ? payload : JSON.stringify(payload ?? '')),
+            reply(value) { replied = dataToString(value) },
+        })).then(() => resolve(replied)).catch(() => resolve(replied))
+    })
+}
+
 // Backend-originated RPC surface. Secret persistence is answered locally
 // (the secret file lives on this side of the pipe); everything else is
 // decoded and forwarded to the renderer.
@@ -98,7 +132,9 @@ function createRpc(handler) {
                     }
                     const id = ++eventId
                     firstReply = new Promise((resolve) => pendingEventReplies.set(id, resolve))
-                    send({ kind: 'event', id, event: decodeBackendRequest(command, payload) })
+                    const event = decodeBackendRequest(command, payload)
+                    projectVoiceEvent(event)
+                    send({ kind: 'event', id, event })
                 },
                 reply() {
                     return firstReply ?? Promise.resolve(null)
@@ -114,6 +150,9 @@ function createRpc(handler) {
 async function handleFrame(frame) {
     if (frame.kind === 'bridge') {
         const status = await bridgeManager.handleAction(frame)
+        send({ kind: 'res', id: frame.id, data: JSON.stringify(status) })
+    } else if (frame.kind === 'voice') {
+        const status = await voiceHost.handleAction(frame)
         send({ kind: 'res', id: frame.id, data: JSON.stringify(status) })
     } else if (frame.kind === 'req') {
         if (!backendHandler) {
@@ -181,6 +220,7 @@ async function main() {
 
     await startBackend(platform)
     await maybeStartLeafBridge()
+    await maybeStartVoice()
     send({ kind: 'ready', secretsMode: prepared.mode })
     // Definitive initial bridge state for the renderer — covers the CLI-flag
     // boot path, whose earlier status push raced the renderer's listener.
@@ -212,6 +252,51 @@ const bridgeManager = createLeafBridgeManager({
     log,
     publish: (status) => send({ kind: 'bridge-status', status }),
 })
+
+// Desktop voice host: leaf audio → whisper (bare-subprocess) → intent → write to
+// THIS base. Modules are imported only when voice is started, so a build without
+// bare-subprocess still boots. Controlled by 'voice' frames from the renderer
+// (Settings toggle) and, for dev/testing, the LISTAM_VOICE_* env.
+const voiceHost = createVoiceHost({
+    callBackend,
+    getItems: () => [...voiceItems.values()],
+    load: async () => {
+        const [tcpModule, subprocessModule] = await Promise.all([import('bare-tcp'), import('bare-subprocess')])
+        const { createStt } = await import('@listam/backend/lib/stt/index.mjs')
+        const { startAudioBridge } = await import('@listam/backend/lib/audio-bridge.mjs')
+        const { createVoiceController } = await import('@listam/backend/lib/voice-controller.mjs')
+        const { createVoiceFeedbackHandler } = await import('@listam/backend/lib/voice-feedback.mjs')
+        const { parseIntent, detectWake } = await import('@listam/domain/voice-intent')
+        const { isRegistryItem } = await import('@listam/domain/list-registry')
+        const { isLabelItem } = await import('@listam/domain/labels')
+        return {
+            tcp: tcpModule.default ?? tcpModule,
+            subprocess: subprocessModule.default ?? subprocessModule,
+            fs,
+            tmpDir: Pear.config.storage,
+            createStt, startAudioBridge, createVoiceController, createVoiceFeedbackHandler,
+            parseIntent, detectWake, isRegistryItem, isLabelItem,
+        }
+    },
+    log,
+    publish: (status) => send({ kind: 'voice-status', status }),
+})
+
+function workerEnv() {
+    return globalThis.Bare?.env ?? globalThis.process?.env ?? {}
+}
+
+async function maybeStartVoice() {
+    const env = workerEnv()
+    if (env.LISTAM_VOICE_ENABLED !== '1' || !env.LISTAM_VOICE_MODEL) return
+    await voiceHost.start({
+        modelPath: env.LISTAM_VOICE_MODEL,
+        binPath: env.LISTAM_VOICE_BIN || 'whisper-cli',
+        locale: env.LISTAM_VOICE_LOCALE || 'auto',
+        prompt: env.LISTAM_VOICE_PROMPT || null,
+        audioPort: Number(env.LISTAM_VOICE_PORT) || undefined,
+    })
+}
 
 function readLeafBridgePort() {
     const args = Array.isArray(Pear?.config?.args) ? Pear.config.args : []
