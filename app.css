@@ -1265,3 +1265,34 @@ kbd {
 @media (max-width: 920px) {
     .plan-planner { grid-template-columns: 1fr; }
 }
+
+/* Drag handle on reorderable plan rows (the whole row is the drag source). */
+.plan-grip {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ink-faint);
+    cursor: grab;
+    opacity: 0;
+    transition: opacity var(--t-fast) var(--ease);
+    margin-left: -0.25rem;
+}
+.plan-row:hover .plan-grip, .plan-row:focus-within .plan-grip { opacity: 0.7; }
+
+/* Flag a board ticket into the day plan — hover-revealed, acid when flagged. */
+.ticket-card { position: relative; }
+.ticket-flag {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem;
+    border-radius: var(--r-field);
+    color: var(--ink-faint);
+    opacity: 0;
+    transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.ticket-card:hover .ticket-flag, .ticket-card:focus-within .ticket-flag { opacity: 0.7; }
+.ticket-flag:hover { opacity: 1; transform: scale(1.12); }
+.ticket-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
+.ticket-title { padding-right: 1.25rem; }

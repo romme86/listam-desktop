@@ -73,6 +73,7 @@ import {
     BOARD_WRITE_TYPE,
     BOARD_LIST_TYPE,
     selectBoardConfig,
+    doneStatusesOf,
     groupByStatus,
     ticketBadges,
     selectWriterStats,
@@ -1730,6 +1731,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const byKey = new Map()
         for (const it of state.items) byKey.set(`${it.listId}::${it.id}`, it)
 
+        // Board tickets track "done" via status, not isDone — route their overview
+        // checkbox through a board status change so the source column updates too.
+        const boardConfig = selectBoardConfig(state)
+        const boardDone = new Set(doneStatusesOf(boardConfig))
+        const firstDoneStatus = doneStatusesOf(boardConfig)[0] || 'done'
+        const firstOpenStatus = (boardConfig.states || []).map((s) => s.id).find((id) => !boardDone.has(id)) || 'todo'
+        const isItemDone = (item) => (isBoardType(item.listType) ? (item.isDone || boardDone.has(item.status)) : !!item.isDone)
+        const toggleItemDone = (item) => {
+            if (isBoardType(item.listType)) actions.moveTicket(item, isItemDone(item) ? firstOpenStatus : firstDoneStatus)
+            else actions.toggleItem(item)
+        }
+
         const today = toDateKey(now())
         const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
         const selected = (ui.planDate && week.includes(ui.planDate)) ? ui.planDate : today
@@ -1754,7 +1767,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 rec,
                 kind: 'item',
                 item: src,
-                done: !!src.isDone,
+                done: isItemDone(src),
                 label: src.text,
                 chip: planSurfaceName(rec.refListId, src.listType, registry, surfaceLabels),
             }
@@ -1796,9 +1809,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         })
 
         const planRow = (resolved, dayRecords, index, opts = {}) => {
-            const dnd = (dayRecords && dayRecords.length > 1) ? planDnd(resolved.rec, dayRecords, index) : {}
+            const draggable = !!(dayRecords && dayRecords.length > 1)
+            const dnd = draggable ? planDnd(resolved.rec, dayRecords, index) : {}
+            // A visible grip on reorderable rows so drag-to-reorder (and drag onto
+            // a day pill) is discoverable; the whole row is the drag source.
+            const grip = draggable
+                ? h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
+                : null
             if (resolved.kind === 'list') {
                 return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
+                    grip,
                     h('button', {
                         class: 'plan-check',
                         'aria-label': t('plan.clearFromPlan'),
@@ -1829,13 +1849,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 queueMicrotask(() => editInput.focus())
                 return h('div', { class: 'plan-row' }, editInput)
             }
-            return h('div', { class: `plan-row${item.isDone ? ' done' : ''}${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
+            const done = isItemDone(item)
+            return h('div', { class: `plan-row${done ? ' done' : ''}${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
+                grip,
                 h('button', {
                     class: 'plan-check',
-                    'aria-pressed': item.isDone ? 'true' : 'false',
+                    'aria-pressed': done ? 'true' : 'false',
                     'aria-label': t('main.item.toggle'),
-                    onclick: () => actions.toggleItem(item),
-                }, tablerIcon(item.isDone ? 'square-check' : 'square', { size: opts.spotlight ? 22 : 18 })),
+                    onclick: () => toggleItemDone(item),
+                }, tablerIcon(done ? 'square-check' : 'square', { size: opts.spotlight ? 22 : 18 })),
                 h('span', { class: 'plan-text', ondblclick: () => { ui.editingItemId = item.id; renderAll() } }, item.text),
                 h('span', { class: 'plan-chip' }, resolved.chip),
                 h('button', {
@@ -2294,6 +2316,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: t('board.newTicket'),
                         onclick: () => actions.newTicket(),
                     }, tablerIcon('plus', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${plannedRefs.has(planListKey(ui.activeListId, ui.activeType)) ? ' active' : ''}`,
+                        'aria-label': t('plan.flagList'),
+                        title: t('plan.flagList'),
+                        onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
+                    }, tablerIcon('flag', { size: 16 })),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
@@ -2404,6 +2432,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 reorderItemTo(group, drag.id, index, dropBefore(event, 'y'))
             },
         },
+            h('button', {
+                class: `ticket-flag${plannedRefs.has(planItemKey(item.listId, item.id)) ? ' flagged' : ''}`,
+                'aria-label': plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : t('plan.flag'),
+                title: plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
+                onclick: (event) => { event.stopPropagation(); actions.toggleItemPlan(item) },
+            }, tablerIcon('flag', { size: 13 })),
             h('div', { class: 'ticket-title' }, item.text),
             chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
             meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
