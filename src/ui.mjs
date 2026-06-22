@@ -323,10 +323,12 @@ function formatUptime(ms) {
 export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
     const ui = {
         // `view` is the surface KIND showing in main: a list surface
-        // ('lists' | 'board' | 'todo') or a system view ('peers' | 'congruency'
-        // | 'diagnostics'). `activeListId` scopes the list surfaces to one
-        // registry list; resolved lazily against the synced registry on first
-        // render and whenever the current list disappears.
+        // ('lists' | 'board' | 'todo') or the 'peers' system view. (Servers is a
+        // section inside the peers pane; congruency + activity moved into the
+        // Settings → Analytics dialog, so they're no longer top-level views.)
+        // `activeListId` scopes the list surfaces to one registry list; resolved
+        // lazily against the synced registry on first render and whenever the
+        // current list disappears.
         view: 'lists',
         activeListId: null,
         editingListId: null,
@@ -783,6 +785,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             else next[key] = dest
             store.setPreferences({ builtinGroups: next })
         },
+        // Collapse/expand a rail group (device-local). Stored as presence so the
+        // map only carries collapsed groups; absence means expanded.
+        toggleGroupCollapsed(groupId) {
+            if (!groupId) return
+            const cur = store.getState().preferences.collapsedGroups
+            const next = { ...(cur && typeof cur === 'object' ? cur : {}) }
+            if (next[groupId]) delete next[groupId]
+            else next[groupId] = true
+            store.setPreferences({ collapsedGroups: next })
+        },
         // Advertise this device's name to peers. Stores the device-local copy and
         // writes the synced peer-label item once this device's writer key is known
         // (maybeAssertDeviceName re-tries on roster arrival if it wasn't yet).
@@ -1114,11 +1126,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // --- skeleton ----------------------------------------------------------
     // Sidebar zones: brand, the dynamic list rail (groups + lists from the
     // synced registry, rebuilt each render), then status strip + system nav.
+    // Servers, Congruency and Activity no longer have their own nav entries:
+    // Servers is now a section inside the Peers & Devices pane, and Congruency
+    // + Activity live in Settings → Analytics.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
-        { key: 'servers', icon: 'server', label: (t) => t('desktop.nav.servers') },
-        { key: 'congruency', icon: 'activity', label: (t) => t('desktop.nav.congruency') },
-        { key: 'diagnostics', icon: 'activity', label: (t) => t('desktop.nav.activity') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
     ]
     // Map a list type to its pane/view key. System views sit outside this.
@@ -1137,10 +1149,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         navButtons[def.key] = btn
         return btn
     }
-    const statusStrip = h('button', {
-        class: 'status-strip',
-        onclick: () => { ui.view = 'peers'; renderAll() },
-    })
     const railHost = h('nav', { class: 'rail' })
     const sidebar = h('aside', { class: 'sidebar' },
         h('div', { class: 'brand' },
@@ -1148,7 +1156,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         ),
         railHost,
         h('div', { class: 'sidebar-bottom' },
-            statusStrip,
             h('nav', { class: 'system-nav' }, ...SYSTEM_DEFS.map(navButton)),
         ),
     )
@@ -1294,6 +1301,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return state.items.filter((item) => item.listId === ui.activeListId && pred(item))
     }
     function selectSurface(state, surface) {
+        // If the target lives in a collapsed group, expand it so its now-active
+        // row is actually visible in the rail — otherwise selecting via the
+        // [ / ] surface-cycling shortcut would leave a live selection with no
+        // highlighted row anywhere. (buildRail stamps every surface with groupId.)
+        if (surface.groupId && isGroupCollapsed(store.getState(), surface.groupId)) {
+            actions.toggleGroupCollapsed(surface.groupId)
+        }
         ui.activeListId = surface.listId
         ui.activeType = surface.type
         ui.view = surfaceForType(surface.type)
@@ -1306,16 +1320,27 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- renderers ----------------------------------------------------------
-    // The remaining/in-progress badge for one surface, scoped to its (listId,type).
-    function surfaceBadge(state, surface) {
+    // The badge count for one surface, scoped to its (listId,type): in-progress
+    // tickets for a board, otherwise remaining (not-done) items.
+    function surfaceBadgeCount(state, surface) {
         const pred = typePredicate(surface.type)
         const scoped = state.items.filter((item) => item.listId === surface.listId && pred(item))
-        if (isBoardType(surface.type)) {
-            const inProgress = scoped.filter((item) => item.status === 'in_progress').length
-            return h('span', { class: `badge${inProgress === 0 ? ' zero' : ''}` }, String(inProgress))
-        }
-        const remaining = selectSummary(scoped).remaining
-        return h('span', { class: `badge${remaining === 0 ? ' zero' : ''}` }, String(remaining))
+        if (isBoardType(surface.type)) return scoped.filter((item) => item.status === 'in_progress').length
+        return selectSummary(scoped).remaining
+    }
+    // The remaining/in-progress badge for one surface, scoped to its (listId,type).
+    function surfaceBadge(state, surface) {
+        const count = surfaceBadgeCount(state, surface)
+        return h('span', { class: `badge${count === 0 ? ' zero' : ''}` }, String(count))
+    }
+    // Sum of every surface's badge count in a group — shown on the group header
+    // when it is collapsed (the per-surface badges are then hidden).
+    function groupBadgeCount(state, group) {
+        return group.surfaces.reduce((sum, surface) => sum + surfaceBadgeCount(state, surface), 0)
+    }
+    function isGroupCollapsed(state, groupId) {
+        const map = state.preferences.collapsedGroups
+        return !!(map && typeof map === 'object' && map[groupId])
     }
     // Focus a freshly-rendered inline-rename input (editableText only restores
     // focus across re-renders, not on first entry into edit mode), and select
@@ -1404,11 +1429,24 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             })
             return h('div', { class: 'rail-row rail-group-row editing' }, input)
         }
-        return h('div', { class: 'rail-row rail-group-row' },
+        const collapsed = isGroupCollapsed(state, group.id)
+        // Collapsed groups roll up their surfaces' badges into one count on the
+        // header; expanded groups show no header badge (each surface has its own).
+        const rolled = collapsed ? groupBadgeCount(state, group) : 0
+        return h('div', { class: `rail-row rail-group-row${collapsed ? ' collapsed' : ''}` },
+            h('button', {
+                class: 'rail-group-toggle',
+                'aria-label': collapsed ? t('desktop.group.expand') : t('desktop.group.collapse'),
+                'aria-expanded': collapsed ? 'false' : 'true',
+                onclick: () => actions.toggleGroupCollapsed(group.id),
+            }, tablerIcon('chevron-down', { size: 14 })),
             h('div', {
                 class: 'rail-group-header label-sm',
                 ondblclick: () => { ui.editingGroupId = group.id; renderAll(); focusRailRename(`rail-grp-rename-${group.id}`) },
             }, group.name),
+            collapsed
+                ? h('span', { class: `badge rail-group-badge${rolled === 0 ? ' zero' : ''}` }, String(rolled))
+                : null,
             rowMenuButton(t('desktop.group.settings'), () => openDialog({ kind: 'group-settings', groupId: group.id })),
         )
     }
@@ -1428,14 +1466,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Each group is one drop zone (header + its rows); dropping a dragged list
         // anywhere inside moves it into that group. "general" comes first.
         for (const group of rail.groups) {
+            const collapsed = isGroupCollapsed(state, group.id)
             const section = h('section', {
-                class: 'rail-group',
+                class: `rail-group${collapsed ? ' collapsed' : ''}`,
                 ondragover: (event) => { if (ui.railDrag) { event.preventDefault(); section.classList.add('rail-drop') } },
                 ondragleave: (event) => { if (!section.contains(event.relatedTarget)) section.classList.remove('rail-drop') },
                 ondrop: (event) => { event.preventDefault(); section.classList.remove('rail-drop'); handleRailDrop(group.id) },
             },
-                renderGroupHeader(state, { id: group.id, name: group.name }),
-                ...group.surfaces.map((surface) => renderSurfaceRow(state, surface)),
+                // groupBadgeCount needs the full surface list, so the header reads
+                // the real group (with surfaces), not just {id,name}.
+                renderGroupHeader(state, group),
+                ...(collapsed ? [] : group.surfaces.map((surface) => renderSurfaceRow(state, surface))),
             )
             sections.push(section)
         }
@@ -1467,14 +1508,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 }, String(state.peerCount)))
             }
         }
-
-        const live = state.peerCount > 0
-        replaceChildren(statusStrip,
-            h('span', { class: `dot${live ? ' live' : ''}` }),
-            h('span', { class: 'label-sm' }, live
-                ? `${t('desktop.status.live')} · ${t('desktop.status.peers', { count: state.peerCount })}`
-                : t('desktop.status.local')),
-        )
     }
 
     let prevPane = null
@@ -1489,6 +1522,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             void main.offsetWidth
             main.classList.add('pane-enter')
         }
+        // Expose the active view so panes can scope layout rules without a
+        // wrapper element (children render directly into `main`).
+        main.dataset.view = ui.ticketDocId ? 'doc' : ui.view
         if (ui.ticketDocId) return renderTicketFull(state)
         // A list surface ('lists' | 'board' | 'todo') needs an active list; with
         // none selected (launch, or the active list was just deleted) show the
@@ -1497,10 +1533,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (isListSurface && ui.activeListId == null) return renderNoListPane(state)
         if (ui.view === 'board') return renderBoardPane(state)
         if (ui.view === 'todo') return renderTodoPane(state)
-        if (ui.view === 'congruency') return renderCongruencyPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
-        if (ui.view === 'servers') return renderServersPane()
-        if (ui.view === 'diagnostics') return renderDiagnosticsPane(state)
         return renderListsPane(state)
     }
     // Shown when no list is selected. The rail still lists every list/group; this
@@ -2519,28 +2552,25 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderCongruencyPane(state) {
+    // Congruency analytics body (used inside Settings → Analytics). Returns the
+    // nodes; the caller supplies the surrounding heading and container.
+    function congruencyContent(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
         const stats = selectWriterStats(state.items)
         const legend = (cls, label) => h('span', { class: 'lg' }, h('span', { class: `sw ${cls}` }), label)
-        replaceChildren(main,
-            h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, t('congruency.title')),
-            ),
-            h('section', { class: 'pane-section' },
-                h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('congruency.subtitle')),
-                stats.length === 0
-                    ? h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('congruency.empty'))
-                    : h('div', { class: 'congruency-cards' }, ...stats.map(renderCongruencyCard)),
-                stats.length
-                    ? h('div', { class: 'congruency-legend label-sm' },
-                        legend('on-time', t('congruency.legend.onTime')),
-                        legend('over', t('congruency.legend.overtime')),
-                        legend('under', t('congruency.legend.undertime')))
-                    : null,
-            ),
-        )
+        return [
+            h('p', { class: 'body-md analytics-note' }, t('congruency.subtitle')),
+            stats.length === 0
+                ? h('p', { class: 'body-md analytics-note' }, t('congruency.empty'))
+                : h('div', { class: 'congruency-cards' }, ...stats.map(renderCongruencyCard)),
+            stats.length
+                ? h('div', { class: 'congruency-legend label-sm' },
+                    legend('on-time', t('congruency.legend.onTime')),
+                    legend('over', t('congruency.legend.overtime')),
+                    legend('under', t('congruency.legend.undertime')))
+                : null,
+        ]
     }
 
     function renderCongruencyCard(stat) {
@@ -2582,14 +2612,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
-            h('section', { class: 'pane-section' },
-                h('div', { class: 'summary-bar label-md' },
-                    h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
-                    h('span', {}, state.peerCount === 0
-                        ? t('desktop.peers.none')
-                        : t('desktop.peers.connected', { count: state.peerCount })),
-                ),
+            h('div', { class: 'summary-bar label-md' },
+                h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                h('span', {}, state.peerCount === 0
+                    ? t('desktop.peers.none')
+                    : t('desktop.peers.connected', { count: state.peerCount })),
             ),
+            h('section', { class: 'pane-section' },
+                h('h3', { class: 'category-heading label-sm' }, t('members.title')),
+                h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
+            ),
+            buildServersSection(t),
             h('section', { class: 'pane-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.peers.invite.title')),
                 state.inviteKey
@@ -2598,11 +2631,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         h('div', { style: 'margin-top: 1rem;' },
                             h('button', { class: 'btn btn-primary', onclick: copyInvite }, t('desktop.peers.copy'))),
                     )
-                    : h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.peers.invite.none')),
-            ),
-            h('section', { class: 'pane-section' },
-                h('h3', { class: 'category-heading label-sm' }, t('members.title')),
-                h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
+                    : h('p', { class: 'body-md pane-note' }, t('desktop.peers.invite.none')),
             ),
             renderLeafBridge(state),
             renderVoice(state),
@@ -2979,7 +3008,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (leaf?.audioAddr) add(t('desktop.servers.field.voice'), leaf.audioAddr)
         if (status.startedAt) add(t('desktop.servers.field.uptime'), formatUptime(now() - status.startedAt))
         if (status.updatedAt) add(t('desktop.servers.field.updated'), t('desktop.servers.updatedAgo', { ago: formatAgo(now() - status.updatedAt) }))
-        return h('div', { class: 'kv-rows', style: 'padding: 0.5rem 1rem;' }, ...rows)
+        return h('div', { class: 'kv-rows' }, ...rows)
     }
 
     function renderServerCard(server, t) {
@@ -2995,27 +3024,27 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             : entry.busy
                 ? t('desktop.servers.checking')
                 : (online ? t('desktop.servers.online') : t('desktop.servers.offline'))
-        return h('section', { class: 'pane-section' },
-            h('div', { class: 'summary-bar label-md' },
+        return h('div', { class: 'server-card' },
+            h('div', { class: 'server-card-head' },
                 h('span', { class: `dot${!entry.busy && online ? ' live' : ''}` }),
-                h('span', { class: 'body-md', style: 'font-weight: 600;' }, server.name),
+                h('span', { class: 'body-md server-name' }, server.name),
                 h('span', { class: 'role-chip' }, key.slice(0, 8)),
-                h('span', { class: 'label-sm', style: 'color: var(--secondary);' }, stateLabel),
+                h('span', { class: 'label-sm server-state' }, stateLabel),
             ),
             status ? renderServerStats(status, t) : null,
             entry.error
-                ? h('p', { class: 'body-md warning', style: 'padding: 0 1rem;' }, t('desktop.servers.error', { message: entry.error }))
+                ? h('p', { class: 'body-md warning' }, t('desktop.servers.error', { message: entry.error }))
                 : null,
             entry.invite
-                ? h('div', { style: 'padding: 0 1rem;' },
+                ? h('div', {},
                     h('div', { class: 'invite-code' }, entry.invite),
                     h('div', { style: 'margin-top: 0.75rem;' },
                         h('button', { class: 'btn btn-secondary', onclick: () => copyText(entry.invite, 'desktop.peers.copied') }, t('desktop.peers.copy'))),
                 )
                 : null,
-            h('p', { class: 'label-sm', style: 'color: var(--outline); padding: 0 1rem;' },
+            h('p', { class: 'label-sm server-caps' },
                 `${t('desktop.control.capabilities')}: ${caps.join(', ') || '—'}`),
-            h('div', { class: 'choice-row', style: 'padding: 0 1rem; flex-wrap: wrap; gap: 0.5rem;' },
+            h('div', { class: 'choice-row server-actions' },
                 canRead ? h('button', { class: 'btn btn-secondary', disabled: entry.busy ? '' : null, onclick: () => refreshServer(key) }, t('desktop.servers.refresh')) : null,
                 can('invite:create') ? h('button', { class: 'btn btn-secondary', onclick: () => mintServerInvite(key) }, t('desktop.servers.mintInvite')) : null,
                 can('export:create') ? h('button', { class: 'btn btn-secondary', onclick: () => exportServer(key) }, t('desktop.servers.export')) : null,
@@ -3042,9 +3071,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 store.pushNotice(`${t('desktop.control.pairFailed')} (${error?.message ?? 'error'})`, 'error')
             }
         }
-        return h('section', { class: 'pane-section' },
+        return h('div', { class: 'server-pair' },
             h('h3', { class: 'category-heading label-sm' }, t('desktop.servers.pairTitle')),
-            h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.servers.pairHint')),
+            h('p', { class: 'body-md pane-note' }, t('desktop.servers.pairHint')),
             h('div', { class: 'add-bar', style: 'margin-top: 1rem; margin-bottom: 0;' },
                 codeInput,
                 nameInput,
@@ -3053,20 +3082,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderServersPane() {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const header = h('header', { class: 'page-header' },
-            h('h1', { class: 'page-title title-lg' }, t('desktop.servers.title')),
-            h('div', { class: 'header-actions' },
-                ownerControl ? h('button', { class: 'btn btn-secondary', onclick: () => refreshAllServers() }, t('desktop.servers.refreshAll')) : null,
-            ),
+    // Servers are remote headless peers operated over owner-control. They render
+    // as a section *inside* the Peers & Devices pane (no longer a top-level nav
+    // view). Returns the section nodes; the pane supplies the surrounding layout.
+    function buildServersSection(t) {
+        const heading = h('div', { class: 'pane-section-head' },
+            h('h3', { class: 'category-heading label-sm' }, t('desktop.servers.title')),
+            ownerControl ? h('button', { class: 'btn btn-secondary', onclick: () => refreshAllServers() }, t('desktop.servers.refreshAll')) : null,
         )
         if (!ownerControl) {
-            replaceChildren(main, header,
-                h('section', { class: 'pane-section' },
-                    h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.control.unavailable'))),
+            return h('section', { class: 'pane-section' }, heading,
+                h('p', { class: 'body-md pane-note' }, t('desktop.control.unavailable')),
             )
-            return
         }
         const servers = ownerControl.listServers()
         // Auto-query any status:read server we've never reached, so opening the
@@ -3078,11 +3105,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 refreshServer(server.serverPublicKeyHex, { silent: true })
             }
         }
-        replaceChildren(main, header,
+        return h('section', { class: 'pane-section' }, heading,
             servers.length === 0
-                ? h('section', { class: 'pane-section' },
-                    h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.servers.empty')))
-                : h('div', {}, ...servers.map((server) => renderServerCard(server, t))),
+                ? h('p', { class: 'body-md pane-note' }, t('desktop.servers.empty'))
+                : h('div', { class: 'server-cards' }, ...servers.map((server) => renderServerCard(server, t))),
             renderServerPairForm(t),
         )
     }
@@ -3105,32 +3131,27 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         ))
     }
 
-    function renderDiagnosticsPane(state) {
+    // Activity analytics body (used inside Settings → Analytics): a health
+    // summary plus the recent backend event log. Returns the nodes.
+    function activityContent(state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        replaceChildren(main,
-            h('header', { class: 'page-header' },
-                h('h1', { class: 'page-title title-lg' }, t('desktop.diagnostics.title')),
+        return [
+            h('h4', { class: 'analytics-subhead label-sm' }, t('desktop.diagnostics.summary')),
+            h('div', { class: 'kv-rows' },
+                kvRow(t('desktop.diagnostics.backendReady'), state.backendReady ? t('header.status.ready') : t('header.status.starting')),
+                kvRow(t('desktop.diagnostics.peerCount'), String(state.peerCount)),
+                kvRow(t('desktop.diagnostics.joinPhase'), state.joinPhase ?? '—'),
+                kvRow(t('desktop.diagnostics.locale'), `${locale.i18n.locale} / ${locale.i18n.groceryLocale}`),
             ),
-            h('section', { class: 'pane-section' },
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.diagnostics.summary')),
-                h('div', { class: 'kv-rows' },
-                    kvRow(t('desktop.diagnostics.backendReady'), state.backendReady ? t('header.status.ready') : t('header.status.starting')),
-                    kvRow(t('desktop.diagnostics.peerCount'), String(state.peerCount)),
-                    kvRow(t('desktop.diagnostics.joinPhase'), state.joinPhase ?? '—'),
-                    kvRow(t('desktop.diagnostics.locale'), `${locale.i18n.locale} / ${locale.i18n.groceryLocale}`),
-                ),
-            ),
-            h('section', { class: 'pane-section' },
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.diagnostics.events')),
-                state.diagnostics.length === 0
-                    ? h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('desktop.diagnostics.empty'))
-                    : h('div', { class: 'event-log' },
-                        ...state.diagnostics.slice().reverse().map((entry) => h('div', { class: 'event-line' },
-                            h('span', { class: 'ts' }, formatTime(entry.at)),
-                            h('span', {}, entry.label),
-                        ))),
-            ),
-        )
+            h('h4', { class: 'analytics-subhead label-sm' }, t('desktop.diagnostics.events')),
+            state.diagnostics.length === 0
+                ? h('p', { class: 'body-md analytics-note' }, t('desktop.diagnostics.empty'))
+                : h('div', { class: 'event-log' },
+                    ...state.diagnostics.slice().reverse().map((entry) => h('div', { class: 'event-line' },
+                        h('span', { class: 'ts' }, formatTime(entry.at)),
+                        h('span', {}, entry.label),
+                    ))),
+        ]
     }
 
     function kvRow(key, value) {
@@ -3325,6 +3346,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-seed' }) }, t('backup.exportSeed')),
                 ),
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.exportSeed.desc')),
+                // Analytics: congruency calibration + recent backend activity,
+                // relocated here from their former top-level nav views.
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.analytics.title')),
+                h('div', { class: 'analytics-section' },
+                    h('h4', { class: 'analytics-subhead label-sm' }, t('congruency.title')),
+                    ...congruencyContent(state),
+                    ...activityContent(state),
+                ),
             ], [
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
@@ -3758,12 +3787,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     store.subscribe(renderAll)
     renderAll()
 
-    // Live-ish monitoring: while the Servers pane is open, re-poll paired
-    // servers every 20s. Silent so an in-flight poll doesn't flicker the dots;
-    // the busy guard in refreshServer prevents overlap. One interval for the
-    // app's lifetime — cheap when the pane isn't showing.
+    // Live-ish monitoring: while the Peers & Devices pane is open (which now
+    // hosts the Servers section), re-poll paired servers every 20s. Silent so an
+    // in-flight poll doesn't flicker the dots; the busy guard in refreshServer
+    // prevents overlap. One interval for the app's lifetime — cheap when hidden.
     if (ownerControl && typeof setInterval === 'function') {
-        setInterval(() => { if (ui.view === 'servers') refreshAllServers({ silent: true }) }, SERVERS_POLL_MS)
+        setInterval(() => { if (ui.view === 'peers') refreshAllServers({ silent: true }) }, SERVERS_POLL_MS)
     }
     return { renderAll, openDialog, closeDialog, actions }
 }

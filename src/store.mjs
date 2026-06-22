@@ -63,6 +63,10 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // surfaceKey -> groupId. Absent / 'general' means the default home. Lets a
     // built-in be dragged into another group like any registry list.
     builtinGroups: {},
+    // Collapsed rail groups, device-local: groupId -> true. Absent means
+    // expanded. When collapsed, the group's surface rows are hidden and its
+    // header shows a single badge summing the surfaces' counts.
+    collapsedGroups: {},
     // This device's human-readable name, advertised to other peers via a synced
     // peer-label item (see @listam/domain/labels). Device-local source of truth
     // for the Settings input and for re-asserting the label once this device's
