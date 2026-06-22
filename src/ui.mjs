@@ -40,6 +40,19 @@ import {
     reducePeerLabels,
 } from '@listam/domain/labels'
 import {
+    isPlanItem,
+    reducePlan,
+    groupPlanByDate,
+    computePlanReorder,
+    buildItemPlanEntry,
+    buildListPlanEntry,
+    buildPlanItem,
+    planItemKey,
+    planListKey,
+    toDateKey,
+    shiftDateKey,
+} from '@listam/domain/plan'
+import {
     newListMeta,
     newGroupMeta,
     patchListMeta,
@@ -281,7 +294,7 @@ function isGroceryItem(item) {
     // "not board, not todo" test would wrongly admit.)
     // Label meta-items (peer names, surface names) also share state.items but
     // live in their own listId buckets and must never render as grocery rows.
-    return !!item && !isRegistryItem(item) && !isLabelItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
+    return !!item && !isRegistryItem(item) && !isLabelItem(item) && !isPlanItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
 }
 
 // The to-do surface: plain text items (isTodoType), the mirror of isGroceryItem
@@ -327,7 +340,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // | 'diagnostics'). `activeListId` scopes the list surfaces to one
         // registry list; resolved lazily against the synced registry on first
         // render and whenever the current list disappears.
-        view: 'lists',
+        // The desktop opens on the cross-list Overview (the day plan).
+        view: 'overview',
+        // Selected day in the Overview (a 'YYYY-MM-DD' key); '' tracks today.
+        planDate: '',
+        // Plan row drag (reorder within a day / drop onto a day pill): { ref, fromDate }.
+        planDrag: null,
         activeListId: null,
         editingListId: null,
         // Inline rename target for a BUILT-IN surface (Groceries/Board/Todo).
@@ -791,6 +809,69 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             store.setPreferences({ deviceName: clean })
             assertDeviceName(clean)
         },
+        // --- day plan (Overview) ------------------------------------------
+        // Plan entries are synced meta-items: a pointer to a source item (or a
+        // whole list) plus a day key. Every write upserts via RPC_UPDATE keyed
+        // on the deterministic plan ref, exactly like the registry/label
+        // meta-items — never RPC_ADD (which would regenerate the id).
+        flagItemForDay(item, dateKey) {
+            if (!item) return
+            const entry = buildItemPlanEntry({ listId: item.listId, itemId: item.id, plannedFor: dateKey, planOrder: now(), updatedAt: now() })
+            markLocalId(entry.id)
+            send(RPC_UPDATE, { item: entry })
+        },
+        flagListForDay(listId, listType, dateKey) {
+            const entry = buildListPlanEntry({ listId, listType, plannedFor: dateKey, planOrder: now(), updatedAt: now() })
+            markLocalId(entry.id)
+            send(RPC_UPDATE, { item: entry })
+        },
+        // One-click row star: toggle an item in/out of today's plan.
+        toggleItemPlan(item) {
+            if (!item) return
+            const ref = planItemKey(item.listId, item.id)
+            if (reducePlan(store.getState().items).has(ref)) actions.clearFromPlan(ref)
+            else actions.flagItemForDay(item, toDateKey(now()))
+        },
+        toggleListPlan(listId, listType) {
+            const ref = planListKey(listId, listType)
+            if (reducePlan(store.getState().items).has(ref)) actions.clearFromPlan(ref)
+            else actions.flagListForDay(listId, listType, toDateKey(now()))
+        },
+        isItemPlanned(item) {
+            return !!item && reducePlan(store.getState().items).has(planItemKey(item.listId, item.id))
+        },
+        // Move a plan entry to another day (drop onto a day pill, or future-day pick).
+        movePlanToDay(ref, dateKey) {
+            const rec = reducePlan(store.getState().items).get(ref)
+            if (!rec || rec.plannedFor === dateKey) return
+            const entry = buildPlanItem({ id: ref, kind: rec.kind, refListId: rec.refListId, refItemId: rec.refItemId, refType: rec.refType, plannedFor: dateKey, planOrder: now(), updatedAt: now() })
+            markLocalId(ref)
+            send(RPC_UPDATE, { item: entry })
+        },
+        // Remove a plan entry (unflag an item / clear a list-card). An empty
+        // plannedFor is the conflict-free clear (reducePlan drops it).
+        clearFromPlan(ref) {
+            const rec = reducePlan(store.getState().items).get(ref)
+            if (!rec) return
+            const entry = buildPlanItem({ id: ref, kind: rec.kind, refListId: rec.refListId, refItemId: rec.refItemId, refType: rec.refType, plannedFor: '', planOrder: rec.planOrder, updatedAt: now() })
+            markLocalId(ref)
+            send(RPC_UPDATE, { item: entry })
+        },
+        reorderPlanDay(dayRecords, fromIndex, toIndex) {
+            const { updates } = computePlanReorder(dayRecords, fromIndex, toIndex)
+            if (!updates.length) return
+            const ts = now()
+            for (const u of updates) {
+                const rec = dayRecords.find((r) => r.ref === u.ref)
+                if (!rec) continue
+                const entry = buildPlanItem({ id: rec.ref, kind: rec.kind, refListId: rec.refListId, refItemId: rec.refItemId, refType: rec.refType, plannedFor: rec.plannedFor, planOrder: u.planOrder, updatedAt: ts })
+                markLocalId(rec.ref)
+                send(RPC_UPDATE, { item: entry })
+            }
+        },
+        setOverviewView(view) {
+            store.setPreferences({ overviewView: view === 'planner' ? 'planner' : 'focus' })
+        },
         toggleItem(item) {
             markLocalId(item.id)
             send(RPC_UPDATE, {
@@ -1142,10 +1223,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         onclick: () => { ui.view = 'peers'; renderAll() },
     })
     const railHost = h('nav', { class: 'rail' })
+    // The cross-list Overview (day plan) is pinned at the top of the rail, above
+    // the list groups. Its active state is driven by ui.view === 'overview'.
+    const railPinned = h('nav', { class: 'rail-pinned' },
+        navButton({ key: 'overview', icon: 'layout-dashboard', label: (t) => t('desktop.nav.overview') }),
+    )
     const sidebar = h('aside', { class: 'sidebar' },
         h('div', { class: 'brand' },
             h('span', { class: 'brand-wordmark' }, 'Listam'),
         ),
+        railPinned,
         railHost,
         h('div', { class: 'sidebar-bottom' },
             statusStrip,
@@ -1454,6 +1541,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
         renderRail(state, ensureActiveList(state))
 
+        // Pinned Overview entry (above the rail). Badge = items planned for today.
+        const overviewBtn = navButtons.overview
+        if (overviewBtn) {
+            const plannedToday = [...reducePlan(state.items).values()].filter((rec) => rec.plannedFor === toDateKey(now())).length
+            overviewBtn.replaceChildren(
+                tablerIcon('layout-dashboard', { size: 15 }),
+                h('span', { class: 'nav-label' }, t('desktop.nav.overview')),
+                h('span', { class: `badge${plannedToday === 0 ? ' zero' : ''}` }, String(plannedToday)),
+            )
+            overviewBtn.classList.toggle('active', ui.view === 'overview')
+        }
+
         for (const def of SYSTEM_DEFS) {
             const btn = navButtons[def.key]
             btn.replaceChildren(
@@ -1490,6 +1589,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             main.classList.add('pane-enter')
         }
         if (ui.ticketDocId) return renderTicketFull(state)
+        if (ui.view === 'overview') return renderOverviewPane(state)
         // A list surface ('lists' | 'board' | 'todo') needs an active list; with
         // none selected (launch, or the active list was just deleted) show the
         // "pick or create a list" placeholder instead.
@@ -1604,6 +1704,260 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
+    // --- Overview (the cross-list day plan) ---------------------------------
+    // A read-only aggregation: items/lists flagged into a day (the synced plan
+    // channel) joined back to their live source items. Marking done / editing a
+    // row writes through to the SOURCE item; list-cards open their list and clear
+    // from the plan when checked. Two layouts: Focus (spotlight + today) and
+    // Planner (today agenda + a week rail). Calendar events are out of v1.
+    function openSurfaceById(listId, type) {
+        selectSurface(store.getState(), { listId, type })
+    }
+    function parsePlanKey(key) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || '')
+        return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(now())
+    }
+    function planSurfaceName(listId, type, registry, surfaceLabels) {
+        if (listId === DEFAULT_LIST_ID) return builtinDisplayName(type, surfaceLabels)
+        return registry.lists.find((l) => l.id === listId)?.name || listId
+    }
+    function renderOverviewPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const reduced = reducePlan(state.items)
+        const byDate = groupPlanByDate(reduced)
+        const registry = reduceRegistry(state.items)
+        const surfaceLabels = reduceSurfaceLabels(state.items)
+        const byKey = new Map()
+        for (const it of state.items) byKey.set(`${it.listId}::${it.id}`, it)
+
+        const today = toDateKey(now())
+        const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
+        const selected = (ui.planDate && week.includes(ui.planDate)) ? ui.planDate : today
+        const view = state.preferences.overviewView === 'planner' ? 'planner' : 'focus'
+
+        // Resolve a plan record to a renderable row, dropping dangling item refs.
+        const resolve = (rec) => {
+            if (rec.kind === 'list') {
+                const scoped = state.items.filter((it) => it.listId === rec.refListId && typePredicate(rec.refType)(it))
+                return {
+                    rec,
+                    kind: 'list',
+                    listId: rec.refListId,
+                    listType: rec.refType,
+                    label: planSurfaceName(rec.refListId, rec.refType, registry, surfaceLabels),
+                    count: selectSummary(scoped).remaining,
+                }
+            }
+            const src = byKey.get(`${rec.refListId}::${rec.refItemId}`)
+            if (!src) return null
+            return {
+                rec,
+                kind: 'item',
+                item: src,
+                done: !!src.isDone,
+                label: src.text,
+                chip: planSurfaceName(rec.refListId, src.listType, registry, surfaceLabels),
+            }
+        }
+        const resolveDay = (dateKey) => (byDate.get(dateKey) || []).map(resolve).filter(Boolean)
+
+        // Drag within a day reorders; drop onto a day pill re-plans to that day.
+        const planDnd = (rec, dayRecords, index) => ({
+            draggable: 'true',
+            ondragstart: (event) => {
+                ui.planDrag = { ref: rec.ref, fromDate: rec.plannedFor }
+                event.dataTransfer.effectAllowed = 'move'
+                try { event.dataTransfer.setData('text/plain', rec.ref) } catch { /* some platforms reject */ }
+                event.currentTarget.classList.add('dragging')
+                event.stopPropagation()
+            },
+            ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
+            ondragover: (event) => {
+                const d = ui.planDrag
+                if (!d || d.ref === rec.ref || d.fromDate !== rec.plannedFor) return
+                event.preventDefault(); event.stopPropagation()
+                const before = dropBefore(event, 'y')
+                event.currentTarget.classList.toggle('drop-before', before)
+                event.currentTarget.classList.toggle('drop-after', !before)
+            },
+            ondragleave: (event) => { event.currentTarget.classList.remove('drop-before', 'drop-after') },
+            ondrop: (event) => {
+                const d = ui.planDrag
+                event.currentTarget.classList.remove('drop-before', 'drop-after')
+                if (!d || d.fromDate !== rec.plannedFor) return
+                event.preventDefault(); event.stopPropagation()
+                ui.planDrag = null
+                const before = dropBefore(event, 'y')
+                const fromIndex = dayRecords.findIndex((r) => r.ref === d.ref)
+                if (fromIndex < 0) return
+                const insertAt = before ? index : index + 1
+                actions.reorderPlanDay(dayRecords, fromIndex, insertAt > fromIndex ? insertAt - 1 : insertAt)
+            },
+        })
+
+        const planRow = (resolved, dayRecords, index, opts = {}) => {
+            const dnd = (dayRecords && dayRecords.length > 1) ? planDnd(resolved.rec, dayRecords, index) : {}
+            if (resolved.kind === 'list') {
+                return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
+                    h('button', {
+                        class: 'plan-check',
+                        'aria-label': t('plan.clearFromPlan'),
+                        title: t('plan.clearFromPlan'),
+                        onclick: () => actions.clearFromPlan(resolved.rec.ref),
+                    }, tablerIcon('square', { size: opts.spotlight ? 22 : 18 })),
+                    h('span', { class: 'glyph' }, tablerIcon(iconForType(resolved.listType), { size: 16 })),
+                    h('span', { class: 'plan-text', onclick: () => openSurfaceById(resolved.listId, resolved.listType) }, resolved.label),
+                    h('span', { class: 'plan-chip' }, t('plan.listItems', { count: resolved.count })),
+                    h('button', {
+                        class: 'plan-open',
+                        'aria-label': t('plan.openList'),
+                        onclick: () => openSurfaceById(resolved.listId, resolved.listType),
+                    }, tablerIcon('chevron-right', { size: 16 })),
+                )
+            }
+            const item = resolved.item
+            if (ui.editingItemId === item.id) {
+                const editInput = h('input', {
+                    class: 'input',
+                    value: item.text,
+                    onkeydown: (event) => {
+                        if (event.key === 'Enter') { actions.editItem(item, editInput.value); ui.editingItemId = null; renderAll() }
+                        else if (event.key === 'Escape') { ui.editingItemId = null; renderAll() }
+                    },
+                    onblur: () => { ui.editingItemId = null; renderAll() },
+                })
+                queueMicrotask(() => editInput.focus())
+                return h('div', { class: 'plan-row' }, editInput)
+            }
+            return h('div', { class: `plan-row${item.isDone ? ' done' : ''}${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
+                h('button', {
+                    class: 'plan-check',
+                    'aria-pressed': item.isDone ? 'true' : 'false',
+                    'aria-label': t('main.item.toggle'),
+                    onclick: () => actions.toggleItem(item),
+                }, tablerIcon(item.isDone ? 'square-check' : 'square', { size: opts.spotlight ? 22 : 18 })),
+                h('span', { class: 'plan-text', ondblclick: () => { ui.editingItemId = item.id; renderAll() } }, item.text),
+                h('span', { class: 'plan-chip' }, resolved.chip),
+                h('button', {
+                    class: 'plan-remove',
+                    'aria-label': t('plan.remove'),
+                    title: t('plan.remove'),
+                    onclick: () => actions.clearFromPlan(resolved.rec.ref),
+                }, tablerIcon('x', { size: 14 })),
+            )
+        }
+
+        // One day's agenda: spotlight (first pending) + next-up + a done tray.
+        const dayAgenda = (dateKey) => {
+            const rows = resolveDay(dateKey)
+            const pending = rows.filter((r) => !r.done)
+            const done = rows.filter((r) => r.done)
+            const pendingRecords = pending.map((r) => r.rec)
+            if (rows.length === 0) {
+                return h('div', { class: 'plan-empty' },
+                    h('p', { class: 'plan-empty-title' }, t('plan.empty.title')),
+                    h('p', { class: 'label-md' }, t('plan.empty.hint')),
+                )
+            }
+            const parts = []
+            if (pending.length > 0) {
+                parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.now')))
+                parts.push(h('div', { class: 'plan-spotlight-wrap' }, planRow(pending[0], pendingRecords, 0, { spotlight: true })))
+                if (pending.length > 1) {
+                    parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.nextUp')))
+                    parts.push(h('div', { class: 'plan-rows' }, ...pending.slice(1).map((r, i) => planRow(r, pendingRecords, i + 1))))
+                }
+            }
+            if (done.length > 0) {
+                parts.push(h('div', { class: 'plan-done-tray' },
+                    h('span', { class: 'glyph done' }, tablerIcon('square-check', { size: 14 })),
+                    h('span', { class: 'label-sm' }, t('plan.doneToday', { count: done.length })),
+                ))
+                parts.push(h('div', { class: 'plan-rows plan-done-rows' }, ...done.map((r) => planRow(r, [], 0))))
+            }
+            return h('div', {}, ...parts)
+        }
+
+        // The clickable + droppable 7-day strip.
+        const strip = h('div', { class: 'plan-strip' }, ...week.map((dk) => {
+            const count = resolveDay(dk).length
+            return h('button', {
+                class: `plan-pill${dk === selected ? ' selected' : ''}${dk === today ? ' today' : ''}`,
+                onclick: () => { ui.planDate = dk; renderAll() },
+                ondragover: (event) => { if (ui.planDrag) { event.preventDefault(); event.currentTarget.classList.add('drop') } },
+                ondragleave: (event) => { event.currentTarget.classList.remove('drop') },
+                ondrop: (event) => {
+                    event.preventDefault(); event.currentTarget.classList.remove('drop')
+                    const d = ui.planDrag; ui.planDrag = null
+                    if (d) actions.movePlanToDay(d.ref, dk)
+                },
+            },
+                h('span', { class: 'pill-dow label-sm' }, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short' })),
+                h('span', { class: 'pill-day' }, String(parsePlanKey(dk).getDate())),
+                h('span', { class: `pill-count label-sm${count === 0 ? ' zero' : ''}` }, count > 0 ? String(count) : '·'),
+            )
+        }))
+
+        const header = h('header', { class: 'page-header' },
+            h('div', {},
+                h('h1', { class: 'page-title title-lg' }, t('desktop.nav.overview')),
+                h('div', { class: 'summary-bar label-md plan-subhead' },
+                    h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                    h('span', {}, parsePlanKey(today).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })),
+                ),
+            ),
+            h('div', { class: 'header-actions' },
+                h('span', { class: 'plan-viewtoggle' },
+                    h('button', { class: `seg${view === 'focus' ? ' active' : ''}`, onclick: () => actions.setOverviewView('focus') }, t('plan.focus')),
+                    h('button', { class: `seg${view === 'planner' ? ' active' : ''}`, onclick: () => actions.setOverviewView('planner') }, t('plan.planner')),
+                ),
+            ),
+        )
+
+        if (view === 'planner') {
+            const rail = h('div', { class: 'plan-week-rail' }, ...week.map((dk) => {
+                const rows = resolveDay(dk)
+                return h('section', {
+                    class: `plan-week-day${dk === selected ? ' selected' : ''}${dk === today ? ' today' : ''}`,
+                    onclick: () => { ui.planDate = dk; renderAll() },
+                    ondragover: (event) => { if (ui.planDrag) { event.preventDefault(); event.currentTarget.classList.add('drop') } },
+                    ondragleave: (event) => { event.currentTarget.classList.remove('drop') },
+                    ondrop: (event) => { event.preventDefault(); event.currentTarget.classList.remove('drop'); const d = ui.planDrag; ui.planDrag = null; if (d) actions.movePlanToDay(d.ref, dk) },
+                },
+                    h('div', { class: 'plan-week-head' },
+                        h('span', {}, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })),
+                        h('span', { class: `pill-count label-sm${rows.length === 0 ? ' zero' : ''}` }, rows.length > 0 ? String(rows.length) : '·'),
+                    ),
+                    rows.length === 0
+                        ? h('div', { class: 'plan-week-empty label-sm' }, t('plan.empty.none'))
+                        : h('div', { class: 'plan-week-rows' }, ...rows.map((r) => h('div', { class: `plan-week-row${r.done ? ' done' : ''}` },
+                            tablerIcon(r.kind === 'list' ? iconForType(r.listType) : (r.done ? 'square-check' : 'square'), { size: 13 }),
+                            h('span', {}, r.label),
+                        ))),
+                )
+            }))
+            return replaceChildren(main, header, strip,
+                h('div', { class: 'plan-planner' },
+                    h('div', { class: 'plan-agenda' }, dayAgenda(selected)),
+                    rail,
+                ),
+            )
+        }
+
+        // Focus layout: selected-day agenda, plus a receded Tomorrow when on today.
+        const parts = [header, strip, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
+        if (selected === today) {
+            const tomorrow = resolveDay(week[1]).filter((r) => !r.done)
+            if (tomorrow.length > 0) {
+                parts.push(h('div', { class: 'plan-tomorrow' },
+                    h('div', { class: 'plan-section-label label-sm' }, t('plan.tomorrow')),
+                    h('div', { class: 'plan-rows' }, ...tomorrow.map((r) => planRow(r, [], 0))),
+                ))
+            }
+        }
+        return replaceChildren(main, ...parts)
+    }
+
     function renderListsPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { preferences } = state
@@ -1631,6 +1985,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: `${preferences.isGridView ? t('header.action.listView') : t('header.action.gridView')} (G)`,
                         onclick: () => { preferencesToggle('isGridView') },
                     }, tablerIcon(preferences.isGridView ? 'list' : 'layout-grid', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${plannedRefs.has(planListKey(ui.activeListId, ui.activeType)) ? ' active' : ''}`,
+                        'aria-label': t('plan.flagList'),
+                        title: t('plan.flagList'),
+                        onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
+                    }, tablerIcon('flag', { size: 16 })),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
@@ -1672,6 +2032,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: `${t('desktop.header.addItem')} (N)`,
                         onclick: actions.summonAddBar,
                     }, tablerIcon('plus', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${plannedRefs.has(planListKey(ui.activeListId, ui.activeType)) ? ' active' : ''}`,
+                        'aria-label': t('plan.flagList'),
+                        title: t('plan.flagList'),
+                        onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
+                    }, tablerIcon('flag', { size: 16 })),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
@@ -1789,26 +2155,47 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             onfocus: () => { ui.focusedItemId = item.id },
         }
         if (group.length > 1) Object.assign(props, reorderDnd(item, group, index, 'y'))
+        const planned = plannedRefs.has(planItemKey(item.listId, item.id))
         return h('div', props,
             h('span', { class: 'glyph' }, glyph),
             h('span', { class: 'item-text' }, item.text),
-            h('button', {
-                class: 'row-delete',
-                'aria-label': t('main.item.move'),
-                title: t('main.item.move'),
-                onclick: (event) => {
-                    event.stopPropagation()
-                    openDialog({ kind: 'item-move', item })
-                },
-            }, tablerIcon('switch-horizontal', { size: 14 })),
-            h('button', {
-                class: 'row-delete',
-                'aria-label': t('main.item.delete'),
-                onclick: (event) => {
-                    event.stopPropagation()
-                    actions.deleteItem(item)
-                },
-            }, tablerIcon('x', { size: 14 })),
+            h('div', { class: 'row-actions' },
+                h('button', {
+                    class: `row-flag${planned ? ' flagged' : ''}`,
+                    'aria-label': planned ? t('plan.inPlan') : t('plan.flag'),
+                    title: planned ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
+                    onclick: (event) => {
+                        event.stopPropagation()
+                        actions.toggleItemPlan(item)
+                    },
+                }, tablerIcon('flag', { size: 14 })),
+                h('button', {
+                    class: 'row-flag row-flag-more',
+                    'aria-label': t('plan.planFor'),
+                    title: t('plan.planFor'),
+                    onclick: (event) => {
+                        event.stopPropagation()
+                        openDialog({ kind: 'plan-day', item })
+                    },
+                }, tablerIcon('chevron-down', { size: 13 })),
+                h('button', {
+                    class: 'row-delete',
+                    'aria-label': t('main.item.move'),
+                    title: t('main.item.move'),
+                    onclick: (event) => {
+                        event.stopPropagation()
+                        openDialog({ kind: 'item-move', item })
+                    },
+                }, tablerIcon('switch-horizontal', { size: 14 })),
+                h('button', {
+                    class: 'row-delete',
+                    'aria-label': t('main.item.delete'),
+                    onclick: (event) => {
+                        event.stopPropagation()
+                        actions.deleteItem(item)
+                    },
+                }, tablerIcon('x', { size: 14 })),
+            ),
         )
     }
 
@@ -3192,7 +3579,36 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const { kind } = ui.dialog
         let content = null
 
-        if (kind === 'share') {
+        if (kind === 'plan-day') {
+            const item = ui.dialog.item
+            const today = toDateKey(now())
+            const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
+            const pick = (dateKey) => { actions.flagItemForDay(item, dateKey); closeDialog() }
+            const dayBtn = (dk, label) => h('button', { class: 'btn btn-secondary plan-day-opt', onclick: () => pick(dk) },
+                h('span', {}, label),
+                h('span', { class: 'label-sm', style: 'color: var(--secondary)' }, String(parsePlanKey(dk).getDate())),
+            )
+            const dateInput = h('input', {
+                class: 'input', type: 'date', value: today, min: today,
+                onchange: () => { if (dateInput.value) pick(dateInput.value) },
+            })
+            content = dialogFrame(t('plan.planFor'), [
+                h('div', { class: 'plan-day-grid' },
+                    dayBtn(today, t('plan.today')),
+                    dayBtn(week[1], t('plan.tomorrow')),
+                    ...week.slice(2).map((dk) => dayBtn(dk, parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'long' }))),
+                ),
+                h('label', { class: 'plan-day-custom' },
+                    h('span', { class: 'label-sm' }, t('plan.pickDate')),
+                    dateInput,
+                ),
+            ], [
+                plannedRefs.has(planItemKey(item.listId, item.id))
+                    ? h('button', { class: 'btn btn-secondary', onclick: () => { actions.clearFromPlan(planItemKey(item.listId, item.id)); closeDialog() } }, t('plan.clearFromPlan'))
+                    : null,
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+        } else if (kind === 'share') {
             content = dialogFrame(t('invite.share.title'), [
                 h('p', { class: 'dialog-body' }, t('invite.share.message')),
                 state.inviteKey
@@ -3737,8 +4153,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     })
 
     // --- render loop ----------------------------------------------------------
+    // Set of plan refs ('i:listId::itemId' / 'l:listId::type') with a live day,
+    // recomputed once per render so item rows can show their flag state cheaply.
+    let plannedRefs = new Set()
     function renderAll() {
         const state = store.getState()
+        plannedRefs = new Set(reducePlan(state.items).keys())
         // Advertise this device's name once its writer key is known (roster).
         maybeAssertDeviceName()
         // Materialize the mandated default "general" group once we're writable.

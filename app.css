@@ -1102,3 +1102,166 @@ kbd {
     .ticket-doc { grid-template-columns: 1fr; grid-template-areas: "summary" "rail" "body"; }
     .ticket-doc-rail { position: static; }
 }
+
+/* ---- Overview (the cross-list day plan) -------------------------------- */
+/* Pinned Overview entry sits above the list rail. */
+.rail-pinned { padding: 0 0.5rem 0.25rem; }
+
+/* Row action cluster (flag + day-picker + move + delete) — one grid cell so the
+   item-row stays a clean 3-column grid. */
+.row-actions { display: inline-flex; align-items: center; gap: 0.125rem; justify-self: end; }
+.item-row .row-flag {
+    opacity: 0;
+    color: inherit;
+    background: none;
+    border: none;
+    padding: 0 0.25rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.item-row:hover .row-flag, .item-row:focus-within .row-flag { opacity: 0.7; }
+.item-row .row-flag:hover { opacity: 1; transform: scale(1.15); }
+.item-row .row-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); border-radius: var(--r-field); }
+.row-flag-more { margin-left: -0.125rem; }
+/* List-flag header button in the active state. */
+.btn-icon.active { background: var(--signal); color: var(--on-signal); border-color: var(--signal); }
+
+/* Header sub-line + Focus/Planner segmented toggle. */
+.plan-subhead { margin-top: 0.35rem; }
+.plan-viewtoggle { display: inline-flex; background: var(--surface-2); border-radius: var(--r-pill); padding: 2px; }
+.plan-viewtoggle .seg {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    border: none;
+    background: none;
+    color: var(--ink-mute);
+    padding: 0.3rem 0.8rem;
+    border-radius: var(--r-pill);
+    cursor: pointer;
+}
+.plan-viewtoggle .seg.active { background: var(--ink-block); color: var(--signal); }
+
+/* The 7-day strip: Today + Tomorrow + the next five days. */
+.plan-strip { display: flex; gap: 0.4rem; margin: 0 0 var(--section-gap); }
+.plan-pill {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0.5rem 0.25rem;
+    background: var(--surface-2);
+    border: 1px solid transparent;
+    border-radius: var(--r-row);
+    cursor: pointer;
+    transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.plan-pill:hover { background: var(--surface-3); }
+.plan-pill .pill-dow { color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.08em; }
+.plan-pill .pill-day { font-size: 1.05rem; font-weight: 600; color: var(--ink); }
+.plan-pill .pill-count { color: var(--ink-faint); }
+.plan-pill .pill-count.zero { opacity: 0.6; }
+.plan-pill.selected { background: var(--ink-block); }
+.plan-pill.selected .pill-dow { color: var(--signal); }
+.plan-pill.selected .pill-day, .plan-pill.selected .pill-count { color: var(--inverse-ink); }
+.plan-pill.drop { border-color: var(--signal); background: var(--surface-3); }
+
+/* Plan rows + spotlight. */
+.plan-section-label { color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 0.6rem; }
+.plan-rows { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: var(--section-gap); }
+.plan-row {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.6rem 0.85rem;
+    background: var(--card);
+    border-radius: var(--r-row);
+    transition: background-color var(--t-fast) var(--ease);
+}
+.plan-row:hover { background: var(--surface-2); }
+.plan-row .plan-check { background: none; border: none; cursor: pointer; color: var(--ink); display: inline-flex; align-items: center; padding: 0; }
+.plan-row .glyph { color: var(--ink-mute); display: inline-flex; }
+.plan-row .plan-text { flex: 1; min-width: 0; cursor: text; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-row .plan-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    background: var(--surface-2);
+    padding: 0.1rem 0.5rem;
+    border-radius: var(--r-pill);
+    flex: none;
+}
+.plan-row .plan-remove, .plan-row .plan-open {
+    opacity: 0; background: none; border: none; cursor: pointer; color: var(--ink-faint);
+    display: inline-flex; align-items: center; padding: 0 0.15rem;
+    transition: opacity var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.plan-row:hover .plan-remove, .plan-row:hover .plan-open, .plan-row:focus-within .plan-remove { opacity: 0.7; }
+.plan-row .plan-remove:hover, .plan-row .plan-open:hover { opacity: 1; color: var(--ink); }
+.plan-row.done { background: var(--surface-2); color: var(--ink-faint); }
+.plan-row.done .plan-text { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--ink-faint); }
+.plan-row.done .plan-check { color: var(--ink-faint); }
+.plan-row[draggable="true"] { cursor: grab; }
+.plan-row.dragging { opacity: 0.4; }
+.plan-row.drop-before { box-shadow: inset 0 2px 0 0 var(--signal); }
+.plan-row.drop-after { box-shadow: inset 0 -2px 0 0 var(--signal); }
+
+.plan-spotlight-wrap { margin-bottom: var(--section-gap); }
+.plan-row.spotlight {
+    padding: 0.95rem 1rem 0.95rem 0.85rem;
+    border-left: 3px solid var(--signal);
+    border-radius: 0 var(--r-row) var(--r-row) 0;
+    background: var(--card);
+}
+.plan-row.spotlight .plan-text { font-size: 1.1rem; font-weight: 600; white-space: normal; }
+
+/* List-card: a flagged whole list (open-only, not editable). */
+.plan-list-card { background: var(--surface-1); }
+.plan-list-card .plan-text { font-weight: 500; cursor: pointer; }
+
+/* Done tray. */
+.plan-done-tray { display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0; color: var(--ink-mute); }
+.plan-done-tray .glyph.done { color: var(--on-signal); background: var(--signal); border-radius: var(--r-field); padding: 1px; display: inline-flex; }
+.plan-done-rows { opacity: 0.75; }
+
+/* Receded Tomorrow preview (Focus layout). */
+.plan-tomorrow { opacity: 0.62; }
+.plan-tomorrow .plan-row { background: transparent; padding: 0.4rem 0.85rem; }
+
+/* Empty + all-clear. */
+.plan-empty { padding: 2rem 0; color: var(--ink-mute); }
+.plan-empty-title { font-size: 1.1rem; color: var(--ink); margin-bottom: 0.4rem; }
+
+/* Planner layout: today agenda on the left, the week rail on the right. */
+.plan-planner { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: var(--section-gap); align-items: start; }
+.plan-week-rail { display: flex; flex-direction: column; gap: 0.5rem; }
+.plan-week-day {
+    background: var(--card);
+    border: 1px solid transparent;
+    border-radius: var(--r-row);
+    padding: 0.6rem 0.75rem;
+    cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.plan-week-day:hover { background: var(--surface-2); }
+.plan-week-day.selected { box-shadow: inset 0 0 0 1px var(--ink-faint); }
+.plan-week-day.today .plan-week-head { color: var(--ink); }
+.plan-week-day.drop { border-color: var(--signal); background: var(--surface-2); }
+.plan-week-head { display: flex; justify-content: space-between; align-items: baseline; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.35rem; }
+.plan-week-empty { color: var(--ink-faint); }
+.plan-week-rows { display: flex; flex-direction: column; gap: 0.3rem; }
+.plan-week-row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.85rem; color: var(--ink-mute); }
+.plan-week-row .ti { color: var(--ink-faint); flex: none; }
+.plan-week-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-week-row.done span { text-decoration: line-through; color: var(--ink-faint); }
+
+/* Day-picker dialog. */
+.plan-day-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; margin-bottom: 0.75rem; }
+.plan-day-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem; }
+.plan-day-custom { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+
+@media (max-width: 920px) {
+    .plan-planner { grid-template-columns: 1fr; }
+}

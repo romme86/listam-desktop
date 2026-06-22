@@ -10,6 +10,7 @@
 // group / order / view unless the patch overrides them.
 import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
 import { isLabelItem } from '@listam/domain/labels'
+import { isPlanItem } from '@listam/domain/plan'
 import { BOARD_WRITE_TYPE, isBoardType } from '@listam/domain/board'
 
 // Board lists travel under the legacy wire type for mesh dual-read;
@@ -93,9 +94,9 @@ export function detectExtraLists(items, registry, nameFor = (id) => id) {
     const known = new Set((registry?.lists ?? []).map((entry) => entry.id))
     const seen = new Map()
     for (const item of Array.isArray(items) ? items : []) {
-        // Registry + label meta-items live in reserved buckets — never surface
-        // them as stray "Unknown" lists.
-        if (!item || isRegistryItem(item) || isLabelItem(item)) continue
+        // Registry + label + plan meta-items live in reserved buckets — never
+        // surface them as stray "Unknown" lists.
+        if (!item || isRegistryItem(item) || isLabelItem(item) || isPlanItem(item)) continue
         const id = item.listId == null ? '' : String(item.listId)
         if (!id || known.has(id) || seen.has(id)) continue
         seen.set(id, { id, type: typeof item.listType === 'string' ? item.listType : '', name: nameFor(id, item.listType) })

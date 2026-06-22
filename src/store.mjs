@@ -49,6 +49,9 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // replicated (prefs are device-local). Hides board *creation*, not existing
     // boards synced from other peers.
     boardEnabled: false,
+    // Overview (day plan) layout: 'focus' (spotlight + today) or 'planner'
+    // (today agenda + week rail). Device-local, never replicated.
+    overviewView: 'focus',
     // Legacy launch-default prefs. The desktop now always opens with NO list
     // selected, so these are no longer applied; kept only so older persisted
     // preference blobs round-trip cleanly through prefs.mjs.
