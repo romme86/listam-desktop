@@ -7,6 +7,7 @@ import {
     RPC_ADD,
     RPC_UPDATE,
     RPC_DELETE,
+    RPC_MOVE,
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
     RPC_REQUEST_SYNC,
@@ -18,6 +19,7 @@ import {
 } from '@listam/protocol'
 import { normalizeListItem } from '@listam/domain/list-reducer'
 import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-registry'
+import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
 import { reductionFromItems } from './store.mjs'
@@ -188,6 +190,28 @@ export function createMockBackend() {
                 reduction.applyOperation({ type: 'delete', value: item })
                 items = reduction.allItems()
                 emit({ type: 'delete-from-backend', item, raw: JSON.stringify(item) })
+            } else if (command === RPC_MOVE) {
+                // Mirror the backend: same listId -> single in-place update;
+                // different listId -> add destination then delete source.
+                const source = payload?.item
+                if (!source) return null
+                const dest = normalizeListItem(buildMovedItem(source, payload?.targetListId, payload?.targetListType, {
+                    fields: payload?.fields ?? null,
+                    now: Date.now(),
+                    writerKey: A,
+                }))
+                if (!dest) return null
+                if (isSameSurfaceMove(source, payload?.targetListId)) {
+                    reduction.applyOperation({ type: 'update', value: dest })
+                    items = reduction.allItems()
+                    emit({ type: 'update-from-backend', item: dest, raw: JSON.stringify(dest) })
+                } else {
+                    reduction.applyOperation({ type: 'add', value: dest })
+                    emit({ type: 'add-from-backend', item: dest, raw: JSON.stringify(dest) })
+                    reduction.applyOperation({ type: 'delete', value: source })
+                    items = reduction.allItems()
+                    emit({ type: 'delete-from-backend', item: source, raw: JSON.stringify(source) })
+                }
             } else if (command === RPC_CREATE_INVITE) {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
             } else if (command === RPC_REQUEST_SYNC) {

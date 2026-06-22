@@ -161,3 +161,47 @@ test('desktop contract: two instances pair via invite on a private testnet and c
         assert.equal(hostDone.items.filter((item) => item.id === guestEggs.id).length, 1)
     }
 })
+
+// RPC_MOVE decomposes a move into ordinary add/delete (different listId) or a
+// single in-place update (same listId) so apply() and old peers need no new op.
+// A solo backend exercises the full append -> apply -> echo round-trip; the
+// driver keys items by (listId, id) exactly like the real reducers.
+test('desktop contract: a cross-list move leaves exactly one copy (no duplicate)', { timeout: 120_000 }, async (t) => {
+    const testnet = await createTestnet(1)
+    const dir = mkdtempSync(join(tmpdir(), 'listam-desk-move-'))
+    const drv = new Driver(dir, testnet.bootstrap)
+    t.after(async () => { await drv.stop(); await testnet.destroy(); rmSync(dir, { recursive: true, force: true }) })
+    await drv.ready()
+
+    await drv.request('add', { text: 'Milk', listId: 'list-a', listType: 'shopping' })
+    const seeded = await drv.waitFor((d) => d.items.some((i) => i.text === 'Milk' && i.listId === 'list-a'), { timeoutMs: 30_000 })
+    const item = seeded.items.find((i) => i.text === 'Milk' && i.listId === 'list-a')
+
+    await drv.request('move', { item, targetListId: 'list-b', targetListType: 'shopping' })
+    const moved = await drv.waitFor((d) => d.items.some((i) => i.id === item.id && i.listId === 'list-b'), { timeoutMs: 30_000 })
+
+    const copies = moved.items.filter((i) => i.id === item.id)
+    assert.equal(copies.length, 1, 'exactly one copy after a cross-list move (no duplicate)')
+    assert.equal(copies[0].listId, 'list-b', 'item lives on the destination list')
+    assert.equal(copies[0].text, 'Milk', 'text preserved across the move')
+})
+
+test('desktop contract: a same-list type flip changes type in place, one copy', { timeout: 120_000 }, async (t) => {
+    const testnet = await createTestnet(1)
+    const dir = mkdtempSync(join(tmpdir(), 'listam-desk-flip-'))
+    const drv = new Driver(dir, testnet.bootstrap)
+    t.after(async () => { await drv.stop(); await testnet.destroy(); rmSync(dir, { recursive: true, force: true }) })
+    await drv.ready()
+
+    await drv.request('add', { text: 'Buy stamps', listId: 'default', listType: 'shopping' })
+    const seeded = await drv.waitFor((d) => d.items.some((i) => i.text === 'Buy stamps'), { timeoutMs: 30_000 })
+    const item = seeded.items.find((i) => i.text === 'Buy stamps')
+
+    await drv.request('move', { item, targetListId: 'default', targetListType: 'todo' })
+    const flipped = await drv.waitFor((d) => d.items.some((i) => i.id === item.id && i.listType === 'todo'), { timeoutMs: 30_000 })
+
+    const copies = flipped.items.filter((i) => i.id === item.id)
+    assert.equal(copies.length, 1, 'still exactly one copy after a same-list type flip')
+    assert.equal(copies[0].listType, 'todo', 'type flipped to todo')
+    assert.equal(copies[0].listId, 'default', 'stays in the same bucket')
+})

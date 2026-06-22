@@ -13,11 +13,13 @@ import {
     RPC_ADD,
     RPC_UPDATE,
     RPC_DELETE,
+    RPC_MOVE,
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
     RPC_REQUEST_SYNC,
     RPC_GET_MEMBERS,
 } from '@listam/protocol'
+import { identityKey } from '@listam/domain/identity'
 
 const [storageDir, bootstrapJson] = process.argv.slice(2)
 const bootstrap = bootstrapJson ? JSON.parse(bootstrapJson) : null
@@ -42,10 +44,28 @@ channel.client.onEvent((event) => {
         event.reply(JSON.stringify({ stored: false, mode: 'driver-memory' }))
         return
     }
+    // Items are keyed by (listId, id) — the real desktop/mobile reduction key —
+    // so a cross-list move (add to the destination bucket + delete from the
+    // source bucket) is tracked correctly and a relocated item is not dropped by
+    // the source delete.
     if (event.type === 'sync-list') state.items = Array.isArray(event.items) ? event.items : []
-    if (event.type === 'add-from-backend') state.items = [event.item, ...state.items.filter((i) => i.id !== event.item.id)]
-    if (event.type === 'update-from-backend') state.items = state.items.map((i) => (i.id === event.item.id ? event.item : i))
-    if (event.type === 'delete-from-backend') state.items = state.items.filter((i) => i.id !== event.item.id)
+    if (event.type === 'add-from-backend') {
+        const key = identityKey(event.item)
+        state.items = [event.item, ...state.items.filter((i) => identityKey(i) !== key)]
+    }
+    if (event.type === 'update-from-backend') {
+        const key = identityKey(event.item)
+        state.items = state.items.some((i) => identityKey(i) === key)
+            ? state.items.map((i) => (identityKey(i) === key ? event.item : i))
+            : [event.item, ...state.items]
+    }
+    if (event.type === 'delete-from-backend') {
+        const key = identityKey(event.item)
+        state.items = state.items.filter((i) => identityKey(i) !== key)
+    }
+    if (event.type === 'message' && event.payload?.type === 'move-rigor-missing') {
+        state.lastMoveRigorMissing = event.payload.missing ?? []
+    }
     if (event.type === 'invite-key' && event.key) state.inviteKey = event.key
     if (event.type === 'message') {
         const payload = event.payload
@@ -85,7 +105,7 @@ rl.on('line', async (line) => {
                 out({ id, ok: true })
                 break
             case 'add':
-                await channel.client.send(RPC_ADD, { text: request.text })
+                await channel.client.send(RPC_ADD, { text: request.text, listId: request.listId, listType: request.listType })
                 out({ id, ok: true })
                 break
             case 'update':
@@ -94,6 +114,15 @@ rl.on('line', async (line) => {
                 break
             case 'delete':
                 await channel.client.send(RPC_DELETE, { item: request.item })
+                out({ id, ok: true })
+                break
+            case 'move':
+                await channel.client.send(RPC_MOVE, {
+                    item: request.item,
+                    targetListId: request.targetListId,
+                    targetListType: request.targetListType,
+                    fields: request.fields,
+                })
                 out({ id, ok: true })
                 break
             case 'sync':
@@ -105,7 +134,7 @@ rl.on('line', async (line) => {
                 out({ id, ok: true, roster: state.roster })
                 break
             case 'dump':
-                out({ id, ok: true, items: state.items, peerCount: state.peerCount, joined: state.joined, inviteKey: state.inviteKey, roster: state.roster })
+                out({ id, ok: true, items: state.items, peerCount: state.peerCount, joined: state.joined, inviteKey: state.inviteKey, roster: state.roster, lastMoveRigorMissing: state.lastMoveRigorMissing ?? null })
                 break
             case 'shutdown':
                 out({ id, ok: true })

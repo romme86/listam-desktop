@@ -489,6 +489,16 @@ button {
 .item-row:hover .row-delete, .item-row:focus-within .row-delete { opacity: 0.7; }
 .item-row .row-delete:hover { opacity: 1; transform: scale(1.15); }
 
+/* Manual reordering (drag-and-drop / Alt+↑↓): grab cursor, a faded ghost while
+   dragging, and a drop line marking whether the item will land before (above /
+   left) or after (below / right) the row under the cursor. */
+.item-row[draggable="true"], .grid-card[draggable="true"] { cursor: grab; }
+.item-row.dragging, .grid-card.dragging { opacity: 0.4; }
+.item-row.drop-before, .ticket-card.drop-before { box-shadow: inset 0 2px 0 0 var(--signal); }
+.item-row.drop-after, .ticket-card.drop-after { box-shadow: inset 0 -2px 0 0 var(--signal); }
+.grid-card.drop-before { box-shadow: inset 2px 0 0 0 var(--signal); }
+.grid-card.drop-after { box-shadow: inset -2px 0 0 0 var(--signal); }
+
 /* Row choreography: enter, remote arrival, completion reward, exit */
 .row-enter { animation: row-enter var(--t-base) var(--ease) backwards; }
 @keyframes row-enter {

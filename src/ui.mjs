@@ -7,6 +7,7 @@ import {
     RPC_ADD,
     RPC_UPDATE,
     RPC_DELETE,
+    RPC_MOVE,
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
     RPC_REQUEST_SYNC,
@@ -28,6 +29,7 @@ import {
     provisionLeaf,
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
+import { computeReorder, sortByOrder } from '@listam/domain/ordering'
 import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
 import {
     isLabelItem,
@@ -428,6 +430,80 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             || (recentLocal.texts.get(item.text.trim().toLowerCase()) ?? 0) >= cutoff
     }
 
+    // --- manual reordering ---------------------------------------------------
+    // A reorder is one or more LWW writes of the moved item's `order` field
+    // (computeReorder picks midpoints / renormalizes). Every write is marked
+    // local so the motion diff doesn't flash it as a remote change.
+    function sendReorder(updates) {
+        if (!updates.length) return
+        const ts = now()
+        for (const update of updates) {
+            markLocalId(update.id)
+            send(RPC_UPDATE, { item: { ...update, updatedAt: ts } })
+        }
+    }
+    // Drop `movedId` next to the row at `targetIndex` (before/after its midpoint)
+    // within `group` — the surface's current display-ordered sibling array.
+    function reorderItemTo(group, movedId, targetIndex, before) {
+        const fromIndex = group.findIndex((entry) => entry && entry.id === movedId)
+        if (fromIndex < 0) return
+        const insertAt = before ? targetIndex : targetIndex + 1
+        const dest = insertAt > fromIndex ? insertAt - 1 : insertAt
+        sendReorder(computeReorder(group, fromIndex, dest).updates)
+    }
+    // Nudge `item` one slot up (delta -1) or down (delta +1) within `group`.
+    function reorderItemByStep(group, item, delta) {
+        const index = group.findIndex((entry) => entry && entry.id === item.id)
+        if (index < 0) return
+        sendReorder(computeReorder(group, index, index + delta).updates)
+    }
+    function dropBefore(event, axis = 'y') {
+        const rect = event.currentTarget.getBoundingClientRect()
+        return axis === 'x'
+            ? (event.clientX - rect.left) < rect.width / 2
+            : (event.clientY - rect.top) < rect.height / 2
+    }
+    // Drag props shared by every reorderable row/card. `group` is the sibling
+    // array; reordering is constrained to within that group (a drop whose moved
+    // item isn't a member is ignored, so e.g. board cards never reorder across
+    // columns this way — that path stays the column status-change drop).
+    function reorderDnd(item, group, index, axis = 'y') {
+        const inGroup = (drag) => drag && group.some((entry) => entry && entry.id === drag.id)
+        return {
+            draggable: 'true',
+            ondragstart: (event) => {
+                ui.itemDrag = { id: item.id }
+                event.dataTransfer.effectAllowed = 'move'
+                try { event.dataTransfer.setData('text/plain', item.id) } catch { /* some platforms reject */ }
+                event.currentTarget.classList.add('dragging')
+                event.stopPropagation()
+            },
+            ondragend: (event) => {
+                event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after')
+                ui.itemDrag = null
+            },
+            ondragover: (event) => {
+                const drag = ui.itemDrag
+                if (!inGroup(drag) || drag.id === item.id) return
+                event.preventDefault()
+                event.stopPropagation()
+                const before = dropBefore(event, axis)
+                event.currentTarget.classList.toggle('drop-before', before)
+                event.currentTarget.classList.toggle('drop-after', !before)
+            },
+            ondragleave: (event) => { event.currentTarget.classList.remove('drop-before', 'drop-after') },
+            ondrop: (event) => {
+                const drag = ui.itemDrag
+                event.currentTarget.classList.remove('drop-before', 'drop-after')
+                if (!inGroup(drag)) return
+                event.preventDefault()
+                event.stopPropagation()
+                ui.itemDrag = null
+                reorderItemTo(group, drag.id, index, dropBefore(event, axis))
+            },
+        }
+    }
+
     function rowAnimationClass(item) {
         // Bulk loads (initial sync, join) adopt silently — only deltas animate.
         if (prevItems.size === 0 && store.getState().items.length > 1) return ''
@@ -736,6 +812,36 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             animateRowExit(item, () => send(RPC_DELETE, { item }))
         },
+        // Move an item to a different list and/or type, WITHIN this project. The
+        // backend decomposes it into add+delete (different listId) or a single
+        // in-place type flip (same listId). Promoting an item into a rigor board
+        // first collects the required ticket fields via the create form, so the
+        // backend's rigor gate never silently drops it.
+        moveItem(item, targetListId, targetType) {
+            if (!item) return
+            if (item.listId === targetListId && surfaceForType(item.listType) === surfaceForType(targetType)) return
+            if (isBoardType(targetType)) {
+                const config = selectBoardConfig(store.getState())
+                const candidate = { text: item.text, description: item.description, checklist: item.checklist, estimatedHours: item.estimatedHours, estimatedComplexity: item.estimatedComplexity }
+                if (config.rigorOn && validateRigorDraft(candidate, config).missing.length > 0) {
+                    const tasks = (Array.isArray(item.checklist) && item.checklist.length) ? item.checklist.map((task) => task.text) : ['']
+                    openDialog({
+                        kind: 'add-ticket',
+                        moveFrom: item,
+                        targetListId,
+                        draft: {
+                            description: item.description || item.text || '',
+                            tasks,
+                            hours: item.estimatedHours ? String(item.estimatedHours) : '',
+                            complexity: Number.isFinite(item.estimatedComplexity) ? item.estimatedComplexity : 50,
+                        },
+                    })
+                    return
+                }
+            }
+            markLocalId(item.id)
+            send(RPC_MOVE, { item, targetListId, targetListType: isBoardType(targetType) ? BOARD_WRITE_TYPE : targetType })
+        },
         clearDone() {
             const onSurface = ui.view === 'todo' ? isTodoItem : isGroceryItem
             selectDoneItems(store.getState().items.filter(onSurface)).forEach((item, index) => {
@@ -753,6 +859,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         moveTicket(item, status) {
             const payload = buildStatusChange(item, status, now())
             if (!payload) return
+            // Dropping into a different column clears the manual order so the
+            // ticket lands at the top (unordered) of its new column; within-
+            // column drops keep their order via reorderItemTo instead.
+            delete payload.order
             markLocalId(item.id)
             send(RPC_UPDATE, { item: payload })
         },
@@ -1545,7 +1655,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // deliberately omits the grid toggle and the category machinery.
     function renderTodoPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const items = itemsForActiveList(state)
+        const items = sortByOrder(itemsForActiveList(state))
         const summary = selectSummary(items)
         const title = activeSurface(state)?.name || t('desktop.rail.todo')
         const statusKey = !state.backendReady
@@ -1580,7 +1690,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             items.length === 0
                 ? renderEmptyState()
                 : h('div', { class: 'item-rows' },
-                    ...items.map((item) => renderItemRow(item, tablerIcon(item.isDone ? 'square-check' : 'square', { size: 18 }))),
+                    ...items.map((item, i) => renderItemRow(item, tablerIcon(item.isDone ? 'square-check' : 'square', { size: 18 }), items, i)),
                 ),
         )
     }
@@ -1612,22 +1722,31 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             : [{ canonicalKey: 'Others', category: '', items: items.map((entry, originalIndex) => ({ entry, originalIndex })) }]
 
         return h('div', {},
-            ...sections.map((section) => h('section', { class: 'category-section' },
-                preferences.categoriesEnabled && preferences.categoryHeaders
-                    ? h('h3', { class: 'category-heading label-sm' },
-                        getDisplayCategoryName(section.canonicalKey, locale.i18n.groceryLocale))
-                    : null,
-                preferences.isGridView
-                    ? h('div', { class: 'grid-cards' }, ...section.items.map(({ entry }) => renderGridCard(section, entry)))
-                    : h('div', { class: 'item-rows' }, ...section.items.map(({ entry }) => renderItemRow(entry, categoryIcon(section.canonicalKey, { size: 16 })))),
-            )),
+            ...sections.map((section) => {
+                // Reordering is scoped within a category section, so the sibling
+                // array passed to each row is that section's entries in order.
+                // groupByCategory imposes its own intra-category order, so apply
+                // the user's manual `order` on top of it here (sortByOrder keeps
+                // not-yet-ordered items in groupByCategory's order).
+                const groupItems = sortByOrder(section.items.map(({ entry }) => entry))
+                return h('section', { class: 'category-section' },
+                    preferences.categoriesEnabled && preferences.categoryHeaders
+                        ? h('h3', { class: 'category-heading label-sm' },
+                            getDisplayCategoryName(section.canonicalKey, locale.i18n.groceryLocale))
+                        : null,
+                    preferences.isGridView
+                        ? h('div', { class: 'grid-cards' }, ...groupItems.map((entry, i) => renderGridCard(section, entry, groupItems, i)))
+                        : h('div', { class: 'item-rows' }, ...groupItems.map((entry, i) => renderItemRow(entry, categoryIcon(section.canonicalKey, { size: 16 }), groupItems, i))),
+                )
+            }),
         )
     }
 
     // `glyph` is the leading icon node: a category icon on the grocery surface,
     // a checkbox on the to-do surface. The row's toggle/edit/delete behaviour is
-    // identical for both.
-    function renderItemRow(item, glyph) {
+    // identical for both. `group`/`index` are the row's display-ordered sibling
+    // array and position, enabling drag-and-drop and Alt+↑/↓ reordering.
+    function renderItemRow(item, glyph, group = [], index = 0) {
         const t = locale.i18n.t.bind(locale.i18n)
         if (ui.editingItemId === item.id) {
             const editInput = h('input', {
@@ -1654,7 +1773,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return row
         }
 
-        return h('div', {
+        const props = {
             class: `item-row body-md${item.isDone ? ' done' : ''}${rowAnimationClass(item)}`,
             tabindex: '0',
             role: 'button',
@@ -1666,11 +1785,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ui.editingItemId = item.id
                 renderAll()
             },
-            onkeydown: (event) => handleItemKeys(event, item),
+            onkeydown: (event) => handleItemKeys(event, item, group, index),
             onfocus: () => { ui.focusedItemId = item.id },
-        },
+        }
+        if (group.length > 1) Object.assign(props, reorderDnd(item, group, index, 'y'))
+        return h('div', props,
             h('span', { class: 'glyph' }, glyph),
             h('span', { class: 'item-text' }, item.text),
+            h('button', {
+                class: 'row-delete',
+                'aria-label': t('main.item.move'),
+                title: t('main.item.move'),
+                onclick: (event) => {
+                    event.stopPropagation()
+                    openDialog({ kind: 'item-move', item })
+                },
+            }, tablerIcon('switch-horizontal', { size: 14 })),
             h('button', {
                 class: 'row-delete',
                 'aria-label': t('main.item.delete'),
@@ -1682,24 +1812,46 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderGridCard(section, item) {
-        return h('div', {
+    function renderGridCard(section, item, group = [], index = 0) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const props = {
             class: `grid-card${item.isDone ? ' done' : ''}${rowAnimationClass(item)}`,
+            style: 'position: relative;',
             tabindex: '0',
             role: 'button',
             'aria-pressed': item.isDone ? 'true' : 'false',
             dataset: { itemId: item.id },
             onclick: () => actions.toggleItem(item),
-            onkeydown: (event) => handleItemKeys(event, item),
+            onkeydown: (event) => handleItemKeys(event, item, group, index),
             onfocus: () => { ui.focusedItemId = item.id },
-        },
+        }
+        if (group.length > 1) Object.assign(props, reorderDnd(item, group, index, 'x'))
+        return h('div', props,
             h('span', { class: 'glyph' }, categoryIcon(section.canonicalKey, { size: 24 })),
             h('span', { class: 'item-text label-md' }, item.text),
+            h('button', {
+                class: 'row-delete',
+                style: 'position: absolute; top: 4px; right: 4px;',
+                'aria-label': t('main.item.move'),
+                title: t('main.item.move'),
+                onclick: (event) => {
+                    event.stopPropagation()
+                    openDialog({ kind: 'item-move', item })
+                },
+            }, tablerIcon('switch-horizontal', { size: 14 })),
         )
     }
 
-    function handleItemKeys(event, item) {
-        if (event.key === ' ' || event.key === 'Enter' || event.key === 'x') {
+    // `group`/`index` (when present) enable Alt+↑/↓ to move the focused item
+    // within its display-ordered sibling array. stopPropagation keeps the plain
+    // ↑/↓ focus-mover (the document-level handler) from also firing.
+    function handleItemKeys(event, item, group = null, index = -1) {
+        if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+            if (!Array.isArray(group) || group.length < 2) return
+            event.preventDefault()
+            event.stopPropagation()
+            reorderItemByStep(group, item, event.key === 'ArrowDown' ? 1 : -1)
+        } else if (event.key === ' ' || event.key === 'Enter' || event.key === 'x') {
             event.preventDefault()
             actions.toggleItem(item)
         } else if (event.key === 'Delete' || event.key === 'Backspace' || event.key === 'd') {
@@ -1767,7 +1919,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderBoardColumn(col, nowMs) {
         const t = locale.i18n.t.bind(locale.i18n)
         const s = col.state
-        const count = s.wipLimit > 0 ? `${col.tickets.length}/${s.wipLimit}` : String(col.tickets.length)
+        // groupByStatus keeps arrival order within a column; layer the user's
+        // manual `order` on top so within-column drag/keyboard reordering sticks.
+        const tickets = sortByOrder(col.tickets)
+        const count = s.wipLimit > 0 ? `${tickets.length}/${s.wipLimit}` : String(tickets.length)
         return h('div', {
             class: 'board-column',
             dataset: { status: s.id },
@@ -1789,14 +1944,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'board-col-count label-sm' }, count),
             ),
             h('div', { class: 'board-col-body' },
-                ...col.tickets.map((ticket) => renderTicketCard(ticket, nowMs)),
+                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i)),
                 h('button', { class: 'board-add', onclick: () => actions.newTicket() },
                     tablerIcon('plus', { size: 14 }), t('board.add')),
             ),
         )
     }
 
-    function renderTicketCard(item, nowMs) {
+    function renderTicketCard(item, nowMs, group = [], index = 0) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, nowMs)
         const chips = []
@@ -1815,18 +1970,52 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'timer-dot' }),
                 `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
         }
+        // Cards carry the cross-column drag (ui.boardDrag → column drop changes
+        // status) AND within-column reorder: when the dragged card belongs to
+        // this column, the card itself becomes the drop target (midpoint =
+        // before/after); otherwise it stays inert so the event bubbles to the
+        // column's status-change drop.
+        const inColumn = (drag) => drag && group.some((ticket) => ticket && ticket.id === drag.id)
         return h('article', {
             class: `ticket-card${ui.selectedTicketId === item.id ? ' selected' : ''}`,
+            tabindex: '0',
             draggable: 'true',
             dataset: { itemId: item.id, status: item.status || 'todo' },
             onclick: () => actions.openTicket(item.id),
+            onkeydown: (event) => {
+                if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && group.length > 1) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    reorderItemByStep(group, item, event.key === 'ArrowDown' ? 1 : -1)
+                }
+            },
+            onfocus: () => { ui.focusedItemId = item.id },
             ondragstart: (event) => {
                 ui.boardDrag = { id: item.id, fromStatus: item.status || 'todo' }
                 event.dataTransfer.effectAllowed = 'move'
                 try { event.dataTransfer.setData('text/plain', item.id) } catch { /* some platforms reject */ }
                 event.currentTarget.classList.add('dragging')
             },
-            ondragend: (event) => { event.currentTarget.classList.remove('dragging'); ui.boardDrag = null },
+            ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.boardDrag = null },
+            ondragover: (event) => {
+                const drag = ui.boardDrag
+                if (!inColumn(drag) || drag.id === item.id) return
+                event.preventDefault()
+                event.stopPropagation()
+                const before = dropBefore(event, 'y')
+                event.currentTarget.classList.toggle('drop-before', before)
+                event.currentTarget.classList.toggle('drop-after', !before)
+            },
+            ondragleave: (event) => { event.currentTarget.classList.remove('drop-before', 'drop-after') },
+            ondrop: (event) => {
+                const drag = ui.boardDrag
+                event.currentTarget.classList.remove('drop-before', 'drop-after')
+                if (!inColumn(drag)) return
+                event.preventDefault()
+                event.stopPropagation()
+                ui.boardDrag = null
+                reorderItemTo(group, drag.id, index, dropBefore(event, 'y'))
+            },
         },
             h('div', { class: 'ticket-title' }, item.text),
             chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
@@ -2296,6 +2485,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('aside', { class: 'detail-split' },
             h('div', { class: 'detail-toolbar' },
                 h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
+                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('main.item.move'), title: t('main.item.move'), onclick: () => openDialog({ kind: 'item-move', item }) }, tablerIcon('switch-horizontal', { size: 15 })),
                 h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
             ),
             h('div', { class: 'detail-split-scroll' },
@@ -3364,6 +3554,30 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ], [
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
+        } else if (kind === 'item-move') {
+            const item = ui.dialog.item
+            const rail = buildRail(state)
+            const isCurrent = (s) => s.listId === item.listId && surfaceForType(s.type) === surfaceForType(item.listType)
+            const typeGlyph = (type) => tablerIcon(isBoardType(type) ? 'layout-columns' : isTodoType(type) ? 'checklist' : 'basket', { size: 16 })
+            const dests = rail.groups
+                .map((g) => ({ name: g.name, surfaces: g.surfaces.filter((s) => !isCurrent(s)) }))
+                .filter((g) => g.surfaces.length)
+            const destButton = (s) => h('button', {
+                class: 'btn btn-secondary move-dest',
+                style: 'display:flex; align-items:center; gap:8px; width:100%; justify-content:flex-start; margin:2px 0;',
+                onclick: () => { closeDialog(); actions.moveItem(item, s.listId, s.type) },
+            }, typeGlyph(s.type), h('span', {}, s.name))
+            const body = dests.length
+                ? dests.map((g) => h('div', { class: 'move-group', style: 'margin-bottom:10px;' },
+                    h('h3', { class: 'label-sm', style: 'color: var(--secondary); margin:6px 0;' }, g.name),
+                    ...g.surfaces.map(destButton)))
+                : [h('p', { class: 'dialog-body' }, t('move.empty'))]
+            content = dialogFrame(t('move.title'), [
+                h('p', { class: 'dialog-body', style: 'color: var(--secondary);' }, t('move.subtitle', { text: item.text })),
+                ...body,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+            ])
         } else if (kind === 'add-ticket') {
             const config = selectBoardConfig(state)
             const rigorOn = config.rigorOn
@@ -3395,8 +3609,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     if (missing.includes('hours')) shake(hoursInput)
                     return
                 }
-                markLocalText(desc)
-                send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                if (ui.dialog.moveFrom) {
+                    // Promote-into-board move: relocate the existing item (id
+                    // preserved) and supply the rigor fields the form collected.
+                    markLocalId(ui.dialog.moveFrom.id)
+                    send(RPC_MOVE, {
+                        item: ui.dialog.moveFrom,
+                        targetListId: ui.dialog.targetListId,
+                        targetListType: BOARD_WRITE_TYPE,
+                        fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity },
+                    })
+                } else {
+                    markLocalText(desc)
+                    send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                }
                 closeDialog()
             }
             content = dialogFrame(t('ticket.create.title'), [
