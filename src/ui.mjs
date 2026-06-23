@@ -19,6 +19,9 @@ import {
     RPC_EXPORT_DATA,
     RPC_EXPORT_SEED,
     RPC_IMPORT,
+    RPC_LIST_BACKUPS,
+    RPC_RESTORE_BACKUP,
+    RPC_SET_BACKUP_PASSWORD,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import {
@@ -661,6 +664,31 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         store.pushNotice(t('backup.imported', { count: res.applied?.items ?? 0 }), 'success')
         if (res.applied?.boardConfigSkipped) store.pushNotice(t('backup.boardConfigSkipped'), 'info')
     }
+    // --- automatic pre-join backups ---------------------------------------
+    async function loadAutoBackups() {
+        const res = await backupRequest(RPC_LIST_BACKUPS)
+        ui.backups = (res && Array.isArray(res.backups)) ? res.backups : []
+        ui.backupPasswordSet = !!(res && res.passwordSet)
+        renderAll()
+    }
+    async function runSetBackupPassword(current, next) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        closeDialog()
+        const res = await backupRequest(RPC_SET_BACKUP_PASSWORD, { current, next })
+        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
+        store.pushNotice(t('backup.auto.passwordSaved'), 'success')
+        loadAutoBackups()
+    }
+    async function runRestoreAutoBackup(file, password) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        closeDialog()
+        store.pushNotice(t('backup.working'), 'info')
+        const res = await backupRequest(RPC_RESTORE_BACKUP, { file, password })
+        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
+        store.pushNotice(t('backup.auto.restored', { count: res.applied?.items ?? 0 }), 'success')
+        if (res.applied?.boardConfigSkipped) store.pushNotice(t('backup.boardConfigSkipped'), 'info')
+        loadAutoBackups()
+    }
     const actions = {
         addItem(text) {
             const trimmed = text.trim()
@@ -1135,10 +1163,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             send(RPC_CREATE_INVITE)
             openDialog({ kind: 'share' })
         },
-        requestJoin(input) {
+        async requestJoin(input) {
             const value = input.trim().replace(/\s+/g, '')
             if (!value) {
                 store.pushNotice(locale.i18n.t('invite.notification.emptyManual'), 'error')
+                return
+            }
+            // Require a backup password so the current lists are backed up before
+            // joining replaces the local base. (A backend hiccup → don't block.)
+            const info = await backupRequest(RPC_LIST_BACKUPS)
+            ui.backupPasswordSet = !!(info && info.passwordSet)
+            if (info && info.passwordSet === false) {
+                store.pushNotice(locale.i18n.t('backup.auto.joinNeedsPassword'), 'error')
+                openDialog({ kind: 'settings' })
+                loadAutoBackups()
                 return
             }
             // H2 parity: a join NEVER fires without an explicit confirmation
@@ -1213,7 +1251,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // + Activity live in Settings → Analytics.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
-        { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => openDialog({ kind: 'settings' }) },
+        { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => { openDialog({ kind: 'settings' }); loadAutoBackups() } },
     ]
     // Map a list type to its pane/view key. System views sit outside this.
     const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
@@ -3807,6 +3845,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-seed' }) }, t('backup.exportSeed')),
                 ),
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.exportSeed.desc')),
+                h('h3', { class: 'category-heading label-sm' }, t('backup.auto.section')),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.auto.desc')),
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'set-password' }) },
+                        ui.backupPasswordSet ? t('backup.auto.changePassword') : t('backup.auto.setPassword')),
+                ),
+                ui.backupPasswordSet === false
+                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.auto.required'))
+                    : (ui.backups && ui.backups.length)
+                        ? h('div', {}, ...ui.backups.map((b) => h('div', { class: 'choice-row' },
+                            h('span', { class: 'label-md', style: 'flex:1; color: var(--secondary);' }, new Date(b.createdAt).toLocaleString()),
+                            h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'restore', file: b.file }) }, t('backup.auto.restore')),
+                        )))
+                        : h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.auto.empty')),
                 // Analytics: congruency calibration + recent backend activity,
                 // relocated here from their former top-level nav views.
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.analytics.title')),
@@ -3821,29 +3873,43 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         } else if (kind === 'backup') {
             const mode = ui.dialog.mode
             const isImport = mode === 'import'
+            const isRestore = mode === 'restore'
+            const isSetPassword = mode === 'set-password'
             const isSeedExport = mode === 'export-seed'
             const isSeedRestore = isImport && ui.dialog.fileKind === 'seed'
-            const title = isImport ? t('backup.import') : isSeedExport ? t('backup.exportSeed') : t('backup.exportData')
+            // password-only entry (import + restore); set-password also confirms,
+            // and a CHANGE additionally asks for the current password.
+            const passwordOnly = isImport || isRestore
+            const needsCurrent = isSetPassword && ui.backupPasswordSet === true
+            const title = isRestore ? t('backup.auto.restore')
+                : isSetPassword ? (ui.backupPasswordSet ? t('backup.auto.changePassword') : t('backup.auto.setPassword'))
+                    : isImport ? t('backup.import')
+                        : isSeedExport ? t('backup.exportSeed') : t('backup.exportData')
+            const currentInput = needsCurrent ? h('input', { class: 'input', type: 'password', placeholder: t('backup.auto.currentPassword'), autocomplete: 'current-password' }) : null
             const passwordInput = h('input', { class: 'input', type: 'password', placeholder: t('backup.password.placeholder'), autocomplete: 'new-password' })
-            const confirmInput = isImport ? null : h('input', { class: 'input', type: 'password', placeholder: t('backup.password.confirm'), autocomplete: 'new-password' })
+            const confirmInput = passwordOnly ? null : h('input', { class: 'input', type: 'password', placeholder: t('backup.password.confirm'), autocomplete: 'new-password' })
             const submit = () => {
                 const password = passwordInput.value
-                if (isImport) {
+                if (passwordOnly) {
                     if (!password) { store.pushNotice(t('backup.password.tooShort'), 'error'); return }
-                    runBackupImport(ui.dialog.fileText, password)
+                    if (isRestore) runRestoreAutoBackup(ui.dialog.file, password)
+                    else runBackupImport(ui.dialog.fileText, password)
                     return
                 }
                 if (password.length < 8) { store.pushNotice(t('backup.password.tooShort'), 'error'); return }
                 if (password !== confirmInput.value) { store.pushNotice(t('backup.password.mismatch'), 'error'); return }
-                runBackupExport(mode, password)
+                if (isSetPassword) runSetBackupPassword(needsCurrent ? currentInput.value : undefined, password)
+                else runBackupExport(mode, password)
             }
             const onkeydown = (event) => { if (event.key === 'Enter') submit() }
+            if (currentInput) currentInput.addEventListener('keydown', onkeydown)
             passwordInput.addEventListener('keydown', onkeydown)
             if (confirmInput) confirmInput.addEventListener('keydown', onkeydown)
             content = dialogFrame(title, [
                 isSeedExport ? h('p', { class: 'warning' }, t('backup.seed.warn')) : null,
                 isSeedRestore ? h('p', { class: 'warning' }, t('backup.seed.restoreWarn')) : null,
-                h('p', { class: 'dialog-body' }, isImport ? t('backup.password.enter') : t('backup.password.create')),
+                h('p', { class: 'dialog-body' }, passwordOnly ? t('backup.password.enter') : t('backup.password.create')),
+                currentInput,
                 passwordInput,
                 confirmInput,
             ], [
@@ -3851,9 +3917,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('button', {
                     class: `btn ${isSeedRestore ? 'btn-danger' : 'btn-primary'}`,
                     onclick: submit,
-                }, isImport ? t('backup.unlockImport') : t('backup.encryptExport')),
+                }, isSetPassword ? t('common.save') : passwordOnly ? t('backup.unlockImport') : t('backup.encryptExport')),
             ])
-            queueMicrotask(() => passwordInput.focus())
+            queueMicrotask(() => (currentInput || passwordInput).focus())
         } else if (kind === 'list-create') {
             const registry = reduceRegistry(state.items)
             const createType = ui.dialog.createType || 'shopping'
