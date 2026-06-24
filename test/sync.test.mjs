@@ -205,3 +205,76 @@ test('desktop contract: a same-list type flip changes type in place, one copy', 
     assert.equal(copies[0].listType, 'todo', 'type flipped to todo')
     assert.equal(copies[0].listId, 'default', 'stays in the same bucket')
 })
+
+// Single-list sharing end to end over the RPC contract: the host promotes ONE
+// named list into its own base (RPC_SHARE_LIST) and the guest joins ONLY that
+// list (RPC_JOIN_LIST) as a writer, without the destructive whole-project join.
+// The host's personal copies are tombstoned; the shared items carry their base
+// key so the UI buckets them separately. The full guest->host co-edit direction
+// (flaky cross-process main-swarm reconnection, like the test above) is behind
+// LISTAM_SYNC_FULL=1; the in-process engine test owns deterministic co-edit.
+test('desktop contract: share one list to its own base, peer joins and co-edits', { timeout: 300_000 }, async (t) => {
+    const testnet = await createTestnet(3)
+    const dirs = [mkdtempSync(join(tmpdir(), 'listam-share-a-')), mkdtempSync(join(tmpdir(), 'listam-share-b-'))]
+    const bootstrap = testnet.bootstrap
+
+    const host = new Driver(dirs[0], bootstrap)
+    const guest = new Driver(dirs[1], bootstrap)
+    t.after(async () => {
+        await host.stop()
+        await guest.stop()
+        await testnet.destroy()
+        for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    })
+
+    await host.ready()
+    await guest.ready()
+
+    // Host builds a named list and shares ONLY it.
+    await host.request('add', { text: 'Milk', listId: 'groceries', listType: 'shopping' })
+    await host.request('add', { text: 'Bread', listId: 'groceries', listType: 'shopping' })
+    await host.waitFor((d) => d.items.filter((i) => i.listId === 'groceries' && !i.baseKey).length >= 2, { timeoutMs: 30_000 })
+
+    const shared = await host.request('share-list', { listId: 'groceries' })
+    assert.ok(shared.ok, `share-list succeeded: ${JSON.stringify(shared)}`)
+    assert.ok(shared.invite && shared.invite.length > 0, 'host produced a shared-list invite')
+    const baseKey = shared.baseKey
+
+    // The list now lives in its own base (items tagged with the base key) and the
+    // personal copies were tombstoned. (The shared base also carries its own
+    // self-describing registry meta-item — listType 'registry' — which syncs too;
+    // filter it out to assert on the actual list items.)
+    const sharedContent = (items) => items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry')
+    const afterShare = await host.waitFor(
+        (d) => sharedContent(d.items).length >= 2 &&
+               d.items.filter((i) => i.listId === 'groceries' && !i.baseKey).length === 0,
+        { timeoutMs: 30_000 },
+    )
+    assert.deepEqual(
+        sharedContent(afterShare.items).map((i) => i.text).sort(),
+        ['Bread', 'Milk'],
+        'shared base holds the seeded items',
+    )
+
+    // Guest joins ONLY that list (additive) and becomes a writer.
+    const joined = await guest.request('join-list', { invite: shared.invite })
+    assert.ok(joined.ok, `join-list succeeded: ${JSON.stringify(joined)}`)
+    assert.equal(joined.baseKey, baseKey, 'guest joined the same shared base')
+    assert.equal(joined.writable, true, 'guest became a writer on the shared base')
+
+    // Guest replicated the seeded items (tagged with the shared base key), and
+    // adopted the canonical listId from the shared base's self-describing entry.
+    const guestSynced = await guest.waitFor((d) => sharedContent(d.items).length >= 2, { timeoutMs: 60_000 })
+    assert.deepEqual(
+        sharedContent(guestSynced.items).map((i) => i.text).sort(),
+        ['Bread', 'Milk'],
+        'guest sees the shared list',
+    )
+    assert.equal(joined.listId, 'groceries', 'guest adopted the canonical shared listId')
+
+    if (process.env.LISTAM_SYNC_FULL === '1') {
+        await guest.request('add', { text: 'Eggs', listId: joined.listId, listType: 'shopping', baseKey })
+        const hostConverged = await host.waitFor((d) => d.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'))
+        assert.ok(hostConverged.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), 'host converged on the guest co-edit')
+    }
+})
