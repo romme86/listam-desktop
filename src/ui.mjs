@@ -605,6 +605,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             case 'invalid-file': return t('backup.error.invalidFile')
             case 'seed-incomplete': return t('backup.error.seedIncomplete')
             case 'not-writable': return t('backup.error.notWritable')
+            case 'sync-stalled': return t('backup.error.syncStalled')
             default: return t('backup.error.generic')
         }
     }
