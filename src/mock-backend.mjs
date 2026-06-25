@@ -16,6 +16,8 @@ import {
     RPC_EXPORT_DATA,
     RPC_EXPORT_SEED,
     RPC_IMPORT,
+    RPC_SHARE_LIST,
+    RPC_JOIN_LIST,
 } from '@listam/protocol'
 import { normalizeListItem } from '@listam/domain/list-reducer'
 import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-registry'
@@ -214,6 +216,37 @@ export function createMockBackend() {
                 }
             } else if (command === RPC_CREATE_INVITE) {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
+            } else if (command === RPC_SHARE_LIST) {
+                // Simulate promoting a list to its own base: stamp the registry
+                // meta-item with a baseKey (drives the shared badge) and return an
+                // invite. No real P2P — the real flow is proven by backend tests.
+                const listId = payload?.listId
+                if (!listId) return JSON.stringify({ ok: false, reason: 'bad-list' })
+                const baseKey = `mockbase${listId}`.padEnd(64, '0').slice(0, 64)
+                const existing = items.find((i) => i.listType === 'registry' && i.id === listId)
+                const meta = buildListMetaItem({
+                    id: listId,
+                    name: existing?.regName || existing?.text || listId,
+                    type: existing?.regType || 'shopping',
+                    groupId: existing?.regGroupId ?? null,
+                    order: existing?.regOrder ?? 0,
+                    baseKey,
+                    updatedAt: Date.now(),
+                })
+                reduction.applyOperation({ type: 'update', value: meta })
+                items = reduction.allItems()
+                emit({ type: 'update-from-backend', item: meta, raw: JSON.stringify(meta) })
+                return JSON.stringify({ ok: true, invite: `mockShareInvite${listId}`.padEnd(52, 'x'), baseKey })
+            } else if (command === RPC_JOIN_LIST) {
+                const invite = payload?.invite
+                if (!invite) return JSON.stringify({ ok: false, reason: 'bad-invite' })
+                const listId = `joined-${invite.replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'list'}`
+                const baseKey = `mockjoined${listId}`.padEnd(64, '0').slice(0, 64)
+                const meta = buildListMetaItem({ id: listId, name: 'Shared list', type: 'shopping', baseKey, updatedAt: Date.now() })
+                reduction.applyOperation({ type: 'add', value: meta })
+                items = reduction.allItems()
+                emit({ type: 'add-from-backend', item: meta, raw: JSON.stringify(meta) })
+                return JSON.stringify({ ok: true, baseKey, listId, writable: true })
             } else if (command === RPC_REQUEST_SYNC) {
                 syncList()
             } else if (command === RPC_GET_BOARD_CONFIG) {

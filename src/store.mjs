@@ -177,6 +177,14 @@ export function createDesktopStore(initial = {}) {
             case 'add-from-backend':
             case 'update-from-backend':
             case 'delete-from-backend': {
+                // A SHARED single-list base seeds its OWN self-describing registry
+                // meta-item, which the backend pushes here tagged with `baseKey`.
+                // The personal base's registry is authoritative for the nav, so
+                // dropping it prevents a collision (same __registry__ id) from
+                // clobbering the personal entry's regBaseKey (→ writes mis-route).
+                if (event.item && event.item.listType === 'registry' && event.item.baseKey) {
+                    return event.type
+                }
                 const type = event.type.split('-')[0]
                 reduction.applyOperation({ type, value: event.item })
                 setState({

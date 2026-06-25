@@ -255,6 +255,14 @@ button {
 }
 .nav-item.soon { opacity: 0.5; cursor: default; }
 .nav-item.soon:hover { background: transparent; color: var(--ink-mute); }
+/* Marks a list that lives in its own SHARED base (co-edited with others). */
+.nav-item .nav-shared {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ink-mute);
+    flex: none;
+}
+.nav-item.active .nav-shared { color: inherit; }
 .soon-chip { text-transform: lowercase; }
 /* Dynamic list rail: group headers separate runs of list rows; the implicit
    Ungrouped group only prints a header when named groups sit above it. */

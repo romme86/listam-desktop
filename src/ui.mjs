@@ -22,6 +22,8 @@ import {
     RPC_LIST_BACKUPS,
     RPC_RESTORE_BACKUP,
     RPC_SET_BACKUP_PASSWORD,
+    RPC_SHARE_LIST,
+    RPC_JOIN_LIST,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import {
@@ -353,6 +355,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Plan row drag (reorder within a day / drop onto a day pill): { ref, fromDate }.
         planDrag: null,
         activeListId: null,
+        // Hex base key of the active list when it lives in its own SHARED base
+        // (null = personal base). Routes the list's writes to that base.
+        activeBaseKey: null,
         editingListId: null,
         // Inline rename target for a BUILT-IN surface (Groceries/Board/Todo).
         // Keyed by surfaceLabelKey since built-ins share one listId, so
@@ -707,7 +712,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 return false
             }
             markLocalText(trimmed)
-            send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined })
+            // A shared list's writes carry its baseKey so the backend routes them
+            // to that base (UPDATE/DELETE/MOVE already carry it on the item).
+            send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined, baseKey: ui.activeBaseKey || undefined })
             return true
         },
         // --- list registry (groups, lists) --------------------------------
@@ -1163,6 +1170,41 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             send(RPC_CREATE_INVITE)
             openDialog({ kind: 'share' })
         },
+        // Promote ONE list to its own shared base and show its co-edit invite.
+        // Distinct from share() (the whole-project invite): others who join this
+        // invite get only this list, not the rest.
+        async shareList(listId) {
+            if (!listId) return
+            let result = null
+            try {
+                const reply = await send(RPC_SHARE_LIST, { listId })
+                result = reply ? JSON.parse(reply) : null
+            } catch { result = null }
+            if (result && result.ok && result.invite) {
+                openDialog({ kind: 'share-list', invite: result.invite })
+            } else {
+                store.pushNotice(locale.i18n.t('shareList.failed'), 'error')
+            }
+        },
+        // Additively join ONE shared list via its invite (NOT the destructive
+        // whole-project join). The rest of your lists stay private.
+        async joinList(input) {
+            const value = (input || '').trim().replace(/\s+/g, '')
+            if (!value) {
+                store.pushNotice(locale.i18n.t('invite.notification.emptyManual'), 'error')
+                return
+            }
+            closeDialog()
+            let result = null
+            try {
+                const reply = await send(RPC_JOIN_LIST, { invite: value })
+                result = reply ? JSON.parse(reply) : null
+            } catch { result = null }
+            store.pushNotice(
+                result && result.ok ? locale.i18n.t('joinList.joined') : locale.i18n.t('joinList.failed'),
+                result && result.ok ? 'success' : 'error',
+            )
+        },
         async requestJoin(input) {
             const value = input.trim().replace(/\s+/g, '')
             if (!value) {
@@ -1389,10 +1431,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         for (const l of registry.lists) {
             if (l.id === DEFAULT_LIST_ID) continue
-            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false }, l.groupId)
+            // `baseKey` (from the registry's regBaseKey) marks a list that lives in
+            // its own shared base; it drives the shared badge and routes the list's
+            // writes to that base (selectSurface → ui.activeBaseKey).
+            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false, baseKey: l.baseKey ?? null }, l.groupId)
         }
         for (const l of extras) {
-            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false }, null)
+            fileSurface({ listId: l.id, type: l.type || GROCERY_TYPE, name: l.name || l.id, builtin: false, baseKey: null }, null)
         }
 
         const generalName = registry.groups.find((g) => g.id === GENERAL_GROUP_ID)?.name || t('desktop.group.general')
@@ -1415,6 +1460,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (ui.activeListId != null && !allSurfaces(rail).some(surfaceActive)) {
             ui.activeListId = null
             ui.activeType = null
+            ui.activeBaseKey = null
             if (ui.view === 'board' || ui.view === 'todo') ui.view = 'lists'
         }
         return rail
@@ -1436,6 +1482,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         ui.activeListId = surface.listId
         ui.activeType = surface.type
+        ui.activeBaseKey = surface.baseKey ?? null
         ui.view = surfaceForType(surface.type)
         ui.selectedTicketId = null
         ui.ticketDocId = null
@@ -1537,6 +1584,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             },
                 tablerIcon(iconForType(type), { size: 15 }),
                 h('span', { class: 'nav-label' }, name),
+                surface.baseKey ? h('span', { class: 'nav-shared', title: t('shareList.shared') }, tablerIcon('users', { size: 12 })) : null,
                 surfaceBadge(state, surface),
             ),
             rowMenuButton(t('desktop.list.settings'), () => openDialog(
@@ -3078,6 +3126,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('header', { class: 'page-header' },
                 h('h1', { class: 'page-title title-lg' }, t('desktop.peers.title')),
                 h('div', { class: 'header-actions' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'join-list' }) }, t('joinList.button')),
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'join' }) }, t('desktop.header.join')),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
@@ -3722,6 +3771,34 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 state.inviteKey ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy')) : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
+        } else if (kind === 'share-list') {
+            const invite = ui.dialog.invite || ''
+            const copyShareInvite = async () => {
+                if (!invite) return
+                try { await navigator.clipboard.writeText(invite); store.pushNotice(t('desktop.peers.copied'), 'success') }
+                catch { store.pushNotice(t('invite.share.failed'), 'error') }
+            }
+            content = dialogFrame(t('shareList.title'), [
+                h('p', { class: 'dialog-body' }, t('shareList.message')),
+                h('div', { class: 'invite-code' }, invite),
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: copyShareInvite }, t('desktop.peers.copy')),
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+        } else if (kind === 'join-list') {
+            const joinListInput = h('input', {
+                class: 'input',
+                placeholder: t('invite.dialog.placeholder'),
+                onkeydown: (event) => { if (event.key === 'Enter') actions.joinList(joinListInput.value) },
+            })
+            content = dialogFrame(t('joinList.title'), [
+                h('p', { class: 'dialog-body' }, t('joinList.subtitle')),
+                joinListInput,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-primary', onclick: () => actions.joinList(joinListInput.value) }, t('common.join')),
+            ])
+            queueMicrotask(() => joinListInput.focus())
         } else if (kind === 'join') {
             const joinInput = h('input', {
                 class: 'input',
@@ -4019,6 +4096,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 nameInput,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
+                h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
+                entry.baseKey
+                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.shared'))
+                    : h('button', {
+                        class: 'btn btn-secondary',
+                        onclick: () => { closeDialog(); actions.shareList(listId) },
+                    }, t('shareList.button')),
             ], [
                 h('button', {
                     class: 'btn btn-danger',
