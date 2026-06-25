@@ -278,3 +278,63 @@ test('desktop contract: share one list to its own base, peer joins and co-edits'
         assert.ok(hostConverged.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), 'host converged on the guest co-edit')
     }
 })
+
+// Cross-device auto-join: your TWO devices share one personal base (B joins A's
+// whole project). When A shares a list into its own base, A propagates that
+// base's read credentials through the personal base, so B AUTO-OPENS the shared
+// list with NO invite. (The write half — B becoming a writer via A authorizing
+// its request — is behind LISTAM_SYNC_FULL, like the co-edit tests above; the
+// in-process backend tests own deterministic co-edit.)
+test('desktop contract: a paired device auto-joins your shared list (no invite)', { timeout: 300_000 }, async (t) => {
+    const testnet = await createTestnet(3)
+    const dirs = [mkdtempSync(join(tmpdir(), 'listam-auto-a-')), mkdtempSync(join(tmpdir(), 'listam-auto-b-'))]
+    const bootstrap = testnet.bootstrap
+
+    const a = new Driver(dirs[0], bootstrap) // your phone
+    const b = new Driver(dirs[1], bootstrap) // your laptop
+    t.after(async () => {
+        await a.stop()
+        await b.stop()
+        await testnet.destroy()
+        for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    })
+
+    await a.ready()
+    await b.ready()
+
+    // A builds a list and shares it into its own base (creds get propagated).
+    await a.request('add', { text: 'Milk', listId: 'groceries', listType: 'shopping' })
+    await a.request('add', { text: 'Bread', listId: 'groceries', listType: 'shopping' })
+    await a.waitFor((d) => d.items.filter((i) => i.listId === 'groceries' && !i.baseKey).length >= 2, { timeoutMs: 30_000 })
+    const shared = await a.request('share-list', { listId: 'groceries' })
+    assert.ok(shared.ok, `share-list: ${JSON.stringify(shared)}`)
+    const baseKey = shared.baseKey
+
+    // B pairs to A's WHOLE personal base (your second device) — it now replicates
+    // A's registry + the propagated shared-base credentials.
+    const invite = (await a.request('invite')).inviteKey
+    assert.ok(invite.length > 0)
+    await b.request('join', { invite })
+    await b.waitFor((d) => d.joined, { timeoutMs: JOIN_TIMEOUT_MS })
+
+    // With no invite for the SHARED list, B auto-opens it from the propagated
+    // creds and replicates its items (tagged with the shared base key).
+    const bAuto = await b.waitFor(
+        (d) => d.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').length >= 2,
+        { timeoutMs: 90_000 },
+    )
+    assert.deepEqual(
+        bAuto.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').map((i) => i.text).sort(),
+        ['Bread', 'Milk'],
+        'paired device auto-opened the shared list without an invite',
+    )
+
+    if (process.env.LISTAM_SYNC_FULL === '1') {
+        // The write half: B requested write access, A authorized it, B is now a
+        // writer and its edit converges back to A.
+        await b.waitFor((d) => d.items.some((i) => i.baseKey === baseKey), { timeoutMs: 30_000 })
+        await b.request('add', { text: 'Eggs', listId: 'groceries', listType: 'shopping', baseKey })
+        const aConverged = await a.waitFor((d) => d.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), { timeoutMs: 120_000 })
+        assert.ok(aConverged.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), 'A converged on the auto-joined device co-edit')
+    }
+})
