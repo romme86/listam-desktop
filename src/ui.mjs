@@ -1182,6 +1182,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             } catch { result = null }
             if (result && result.ok && result.invite) {
                 openDialog({ kind: 'share-list', invite: result.invite })
+            } else if (result && result.reason === 'cannot-share-builtin') {
+                // The built-in Groceries/Board/Todo surfaces multiplex listId
+                // 'default'; sharing it would strand all three. Explain why.
+                store.pushNotice(locale.i18n.t('shareList.builtinBlocked'), 'error')
             } else {
                 store.pushNotice(locale.i18n.t('shareList.failed'), 'error')
             }
@@ -4097,12 +4101,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
                 h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
-                entry.baseKey
-                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.shared'))
-                    : h('button', {
-                        class: 'btn btn-secondary',
-                        onclick: () => { closeDialog(); actions.shareList(listId) },
-                    }, t('shareList.button')),
+                // The built-in surfaces multiplex listId 'default' and cannot be
+                // shared on their own (the backend refuses it) — show why instead
+                // of a share button that would only error.
+                listId === DEFAULT_LIST_ID
+                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.builtinBlocked'))
+                    : entry.baseKey
+                        ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.shared'))
+                        : h('button', {
+                            class: 'btn btn-secondary',
+                            onclick: () => { closeDialog(); actions.shareList(listId) },
+                        }, t('shareList.button')),
             ], [
                 h('button', {
                     class: 'btn btn-danger',
