@@ -62,10 +62,15 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // 'default' listId and so have no registry meta-item to tombstone, deleting
     // one records its surfaceKey here (device-local) to hide it from this rail.
     hiddenBuiltins: [],
-    // Built-ins have no synced meta-item, so their group is tracked per-device:
-    // surfaceKey -> groupId. Absent / 'general' means the default home. Lets a
-    // built-in be dragged into another group like any registry list.
+    // A built-in's group placement now syncs via the BUILTIN-GROUP label channel
+    // (@listam/domain/labels). This map stays as a device-local cache + fallback
+    // for the synced value: surfaceKey -> groupId. Absent / 'general' = default
+    // home. Lets a built-in be dragged into another group like any registry list.
     builtinGroups: {},
+    // One-time guard: republish any pre-sync `builtinGroups` (which only ever
+    // lived in localStorage) to the synced channel so existing placements reach
+    // other devices. Flipped true after the migration runs once.
+    builtinGroupsMigrated: false,
     // Collapsed rail groups, device-local: groupId -> true. Absent means
     // expanded. When collapsed, the group's surface rows are hidden and its
     // header shows a single badge summing the surfaces' counts.

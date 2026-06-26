@@ -41,8 +41,10 @@ import {
     surfaceLabelKey,
     buildSurfaceLabelItem,
     buildPeerLabelItem,
+    buildBuiltinGroupItem,
     reduceSurfaceLabels,
     reducePeerLabels,
+    reduceBuiltinGroups,
 } from '@listam/domain/labels'
 import {
     isPlanItem,
@@ -591,6 +593,36 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (name) assertDeviceName(name)
     }
 
+    // Built-in group placement used to live only in device-local localStorage
+    // (preferences.builtinGroups), so a freshly joined device never saw it. Once,
+    // republish any such placement to the synced BUILTIN-GROUP channel so it
+    // reaches other devices. Deferred until the base is writable (a self writer
+    // key exists, like the peer label), guarded by a session flag + the persisted
+    // `builtinGroupsMigrated`, and skips any key already present synced (so a
+    // newer assignment from another device always wins via LWW).
+    let builtinGroupsMigrated = false
+    function migrateBuiltinGroups() {
+        if (builtinGroupsMigrated) return
+        if (store.getState().preferences.builtinGroupsMigrated) { builtinGroupsMigrated = true; return }
+        if (!selfWriterKey()) return
+        const local = store.getState().preferences.builtinGroups
+        const localMap = local && typeof local === 'object' ? local : {}
+        const synced = reduceBuiltinGroups(store.getState().items)
+        for (const [key, groupId] of Object.entries(localMap)) {
+            if (!groupId || synced.has(key)) continue
+            const idx = key.indexOf(':')
+            if (idx <= 0) continue
+            const listId = key.slice(0, idx)
+            const type = key.slice(idx + 1)
+            if (!type) continue
+            const item = buildBuiltinGroupItem({ listId, type, groupId, updatedAt: now() })
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
+        }
+        builtinGroupsMigrated = true
+        store.setPreferences({ builtinGroupsMigrated: true })
+    }
+
     // --- encrypted backup / restore ---------------------------------------
     // Unlike `send`, these need the worker's reply (the encrypted file or the
     // import outcome), so they call client.send directly and parse the JSON.
@@ -829,8 +861,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ui.view = 'lists'
             }
         },
-        // Drag-assign a built-in to a group (device-local — they have no synced
-        // meta-item). 'general' is stored as absence so the map stays minimal.
+        // Drag-assign a built-in to a group. Writes the device-local cache AND a
+        // synced BUILTIN-GROUP item so other devices file the surface into the
+        // same group. 'general' is stored as absence locally and as an empty
+        // (cleared) synced value, so a move back to general propagates too.
         setBuiltinGroup(listId, type, groupId) {
             const dest = groupId || GENERAL_GROUP_ID
             const key = surfaceLabelKey(listId, type)
@@ -839,6 +873,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             if (dest === GENERAL_GROUP_ID) delete next[key]
             else next[key] = dest
             store.setPreferences({ builtinGroups: next })
+            const item = buildBuiltinGroupItem({ listId, type, groupId: dest === GENERAL_GROUP_ID ? '' : dest, updatedAt: now() })
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
         },
         // Collapse/expand a rail group (device-local). Stored as presence so the
         // map only carries collapsed groups; absence means expanded.
@@ -1398,6 +1435,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const hasOnDefault = (pred) => items.some((item) => item.listId === DEFAULT_LIST_ID && pred(item))
         // Synced rename overrides for the built-in surfaces (reduced once).
         const surfaceLabels = reduceSurfaceLabels(items)
+        // Synced group placement for the built-in surfaces (surfaceKey -> groupId).
+        const syncedBuiltinGroups = reduceBuiltinGroups(items)
         // Built-ins the user has deleted on THIS device are hidden (device-local).
         const hidden = new Set(Array.isArray(state.preferences.hiddenBuiltins) ? state.preferences.hiddenBuiltins : [])
         const builtinVisible = (type) => !hidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type))
@@ -1428,11 +1467,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             if (dest === GENERAL_GROUP_ID) generalSurfaces.push(surface)
             else buckets.get(dest).push(surface)
         }
-        // Built-ins first (preserving their fixed order), filed into their
-        // device-local group assignment (defaulting to general).
-        const builtinGroups = (state.preferences.builtinGroups && typeof state.preferences.builtinGroups === 'object') ? state.preferences.builtinGroups : {}
+        // Built-ins first (preserving their fixed order), filed into their group:
+        // the synced placement wins when present (its own LWW already resolved),
+        // else the device-local cache. fileSurface clamps an unknown/missing group
+        // to general, so a stale or not-yet-synced group never strands a surface.
+        const localBuiltinGroups = (state.preferences.builtinGroups && typeof state.preferences.builtinGroups === 'object') ? state.preferences.builtinGroups : {}
         for (const b of builtins) {
-            fileSurface(b, builtinGroups[surfaceLabelKey(DEFAULT_LIST_ID, b.type)])
+            const sk = surfaceLabelKey(DEFAULT_LIST_ID, b.type)
+            fileSurface(b, syncedBuiltinGroups.has(sk) ? syncedBuiltinGroups.get(sk) : localBuiltinGroups[sk])
         }
         for (const l of registry.lists) {
             if (l.id === DEFAULT_LIST_ID) continue
@@ -4395,6 +4437,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         plannedRefs = new Set(reducePlan(state.items).keys())
         // Advertise this device's name once its writer key is known (roster).
         maybeAssertDeviceName()
+        // Republish any localStorage-only built-in group placement to the synced
+        // channel, once, after the base is writable.
+        migrateBuiltinGroups()
         // Materialize the mandated default "general" group once we're writable.
         maybeEnsureGeneralGroup()
         renderNav(state)
