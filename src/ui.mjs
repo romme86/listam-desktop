@@ -2493,7 +2493,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const config = selectBoardConfig(state)
         const columns = groupByStatus(itemsForActiveList(state), config)
         const nowMs = now()
-        const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs)))
+        const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs, config.rigorOn)))
         const selected = selectedTicket(state)
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -2520,7 +2520,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderBoardColumn(col, nowMs) {
+    function renderBoardColumn(col, nowMs, rigorOn = false) {
         const t = locale.i18n.t.bind(locale.i18n)
         const s = col.state
         // groupByStatus keeps arrival order within a column; layer the user's
@@ -2548,14 +2548,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'board-col-count label-sm' }, count),
             ),
             h('div', { class: 'board-col-body' },
-                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i)),
+                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i, rigorOn)),
                 h('button', { class: 'board-add', onclick: () => actions.newTicket() },
                     tablerIcon('plus', { size: 14 }), t('board.add')),
             ),
         )
     }
 
-    function renderTicketCard(item, nowMs, group = [], index = 0) {
+    function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, nowMs)
         const chips = []
@@ -2565,14 +2565,29 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (b.checklistTotal > 0) {
             meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
         }
+        // Rigor mode surfaces the two planning estimates (time + complexity) on
+        // every card so the board is scannable without opening each ticket.
+        if (rigorOn) {
+            if (b.estimatedHours) {
+                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.estimate') },
+                    tablerIcon('clock', { size: 13 }), `${b.estimatedHours}h`))
+            }
+            if (b.estimatedComplexity) {
+                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.complexity') },
+                    tablerIcon('activity', { size: 13 }), `${b.estimatedComplexity}`))
+            }
+        }
         if (b.isDone && b.timeliness) {
             const delta = deltaPercent(b.inProgressHours, b.estimatedHours)
             const suffix = delta != null ? ` ${delta > 0 ? '+' : ''}${delta}%` : ''
             meta.push(h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + suffix))
         } else if (b.running) {
+            // The estimate is already shown by the clock chip in rigor mode, so
+            // only the non-rigor timer appends the "/ Xh" pace suffix.
+            const pace = !rigorOn && b.estimatedHours ? ` / ${b.estimatedHours}h` : ''
             meta.push(h('span', { class: 'ticket-timer' },
                 h('span', { class: 'timer-dot' }),
-                `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
+                `${formatDuration(b.inProgressMs)}${pace}`))
         }
         // Cards carry the cross-column drag (ui.boardDrag → column drop changes
         // status) AND within-column reorder: when the dragged card belongs to
