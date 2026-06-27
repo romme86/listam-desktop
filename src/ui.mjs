@@ -22,6 +22,7 @@ import {
     RPC_LIST_BACKUPS,
     RPC_RESTORE_BACKUP,
     RPC_SET_BACKUP_PASSWORD,
+    RPC_SET_BACKUP_SCHEDULE,
     RPC_SHARE_LIST,
     RPC_JOIN_LIST,
 } from '@listam/protocol'
@@ -707,7 +708,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const res = await backupRequest(RPC_LIST_BACKUPS)
         ui.backups = (res && Array.isArray(res.backups)) ? res.backups : []
         ui.backupPasswordSet = !!(res && res.passwordSet)
+        // The rolling scheduled-backup tiers (15m / 1d / 1w) ride along on the
+        // same reply; null means the backend didn't report one yet.
+        ui.backupSchedule = (res && res.schedule) ? res.schedule : null
         renderAll()
+    }
+    async function runSetBackupSchedule(enabled) {
+        const res = await backupRequest(RPC_SET_BACKUP_SCHEDULE, { enabled })
+        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
+        // Reuse the returned schedule when present; otherwise re-fetch so the
+        // tier rows and toggle reflect the persisted on/off choice.
+        if (res.schedule) { ui.backupSchedule = res.schedule; renderAll() }
+        else loadAutoBackups()
     }
     async function runSetBackupPassword(current, next) {
         const t = locale.i18n.t.bind(locale.i18n)
@@ -3983,6 +3995,47 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                             h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'restore', file: b.file }) }, t('backup.auto.restore')),
                         )))
                         : h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.auto.empty')),
+                // Rolling scheduled backups (15-min / daily / weekly). The
+                // backend runs these automatically once a backup password is
+                // set; here we only surface the on/off toggle + last-run times.
+                h('h3', { class: 'category-heading label-sm' }, t('backup.schedule.section')),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.schedule.desc')),
+                ui.backupPasswordSet === false
+                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('backup.schedule.required'))
+                    : (() => {
+                        const schedule = ui.backupSchedule
+                        const enabled = schedule ? schedule.enabled !== false : true
+                        const tiers = (schedule && Array.isArray(schedule.tiers)) ? schedule.tiers : []
+                        const at = now()
+                        // Localise each cadence by its stable reason; fall back to
+                        // the backend-supplied label if a new reason ever appears.
+                        const tierLabel = (tier) => {
+                            const key = `backup.schedule.tier.${String(tier.reason || '').replace('scheduled-', '')}`
+                            const localised = t(key)
+                            return localised === key ? (tier.label || key) : localised
+                        }
+                        return h('div', {},
+                            h('div', { class: 'choice-row' },
+                                h('button', {
+                                    class: `btn ${enabled ? 'btn-primary' : 'btn-secondary'}`,
+                                    'aria-pressed': enabled ? 'true' : 'false',
+                                    onclick: () => { if (!enabled) runSetBackupSchedule(true) },
+                                }, t('backup.schedule.on')),
+                                h('button', {
+                                    class: `btn ${!enabled ? 'btn-primary' : 'btn-secondary'}`,
+                                    'aria-pressed': !enabled ? 'true' : 'false',
+                                    onclick: () => { if (enabled) runSetBackupSchedule(false) },
+                                }, t('backup.schedule.off')),
+                            ),
+                            ...tiers.map((tier) => h('div', { class: 'choice-row' },
+                                h('span', { class: 'label-md', style: 'flex:1; color: var(--secondary);' }, tierLabel(tier)),
+                                h('span', { class: 'label-md', style: 'color: var(--secondary);' },
+                                    tier.lastAt
+                                        ? t('backup.schedule.tier.last', { time: formatAgo(at - tier.lastAt) })
+                                        : t('backup.schedule.tier.never')),
+                            )),
+                        )
+                    })(),
                 // Analytics: congruency calibration + recent backend activity,
                 // relocated here from their former top-level nav views.
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.analytics.title')),
