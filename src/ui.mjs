@@ -4453,7 +4453,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     // --- keyboard-first actions ----------------------------------------------
     function isTypingTarget(target) {
-        return target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')
+        if (!(target instanceof HTMLElement)) return false
+        // contentEditable surfaces (the WYSIWYG markdown/callout block editors)
+        // are typing targets too — without this the global single-key shortcuts
+        // (t→theme, ?→help, [ ]→switch list, n/g/… ) fire while the user is
+        // typing into a block, flipping the theme or navigating away from the
+        // ticket mid-edit. isContentEditable is also true for any node nested
+        // inside an editable host, so a click into a child element still counts.
+        return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
     }
 
     root.ownerDocument.addEventListener('keydown', (event) => {
