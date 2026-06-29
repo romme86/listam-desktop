@@ -397,6 +397,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
+    // Rigor-task ids follow the same session-unique scheme as block ids so a
+    // task added post-creation never collides with a creation-time `task-N-…` id.
+    let taskIdSeq = 0
+    const nextTaskId = () => `task-${now()}-${taskIdSeq++}`
     // List/group ids double as the registry meta-item's id; clock + counter keeps
     // them unique across a session without coordinating with peers.
     let registryIdSeq = 0
@@ -1051,7 +1055,25 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
         },
-        // Card click -> right-hand split panel (board stays on the left).
+        // Append a task to the rigor checklist after the ticket already exists
+        // (creation seeds it; this lets the checklist grow as work is scoped).
+        addTicketTask(item, text) {
+            const nv = (text || '').trim()
+            if (!nv) return false
+            const existing = Array.isArray(item.checklist) ? item.checklist : []
+            const checklist = [...existing, { id: nextTaskId(), text: nv, done: false }]
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
+            return true
+        },
+        removeTicketTask(item, taskId) {
+            const checklist = (Array.isArray(item.checklist) ? item.checklist : [])
+                .filter((task) => task.id !== taskId)
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
+        },
+        // Card click -> right drawer that slides in over the right half of the
+        // screen (the board stays full-width and visible underneath).
         openTicket(id) {
             ui.selectedTicketId = id
             ui.ticketDocId = null
@@ -2514,9 +2536,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
-            selected
-                ? h('div', { class: 'board-split' }, board, renderTicketSplitPanel(selected, state))
-                : board,
+            board,
+            selected ? renderTicketDrawer(selected, state) : null,
         )
     }
 
@@ -2675,11 +2696,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }),
         })
         el.value = value
-        if (prev) {
+        // Only carry the previous element's text across a re-render when it was
+        // focused — that's the half-typed draft we must not eat. An unfocused
+        // field has no uncommitted draft (blur commits), so it shows the canonical
+        // value; otherwise switching tickets would inherit the prior ticket's title.
+        if (prev && main.ownerDocument.activeElement === prev) {
             el.value = prev.value
-            if (main.ownerDocument.activeElement === prev) {
-                queueMicrotask(() => { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p) } catch { /* number/date inputs reject */ } })
-            }
+            queueMicrotask(() => { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p) } catch { /* number/date inputs reject */ } })
         }
         return el
     }
@@ -2722,13 +2745,54 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 onCommit: (v) => { if (v !== (item.description || '')) actions.updateTicket(item, { description: v }) },
             }),
             meta.length ? h('div', { class: 'ticket-summary-meta label-sm' }, ...meta) : null,
-            checklist.length ? h('div', { class: 'ticket-summary-tasks' },
+            h('div', { class: 'ticket-summary-tasks' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
-                h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('label', { class: `detail-task${task.done ? ' done' : ''}` },
-                    h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
-                    h('span', {}, task.text),
-                ))),
-            ) : null,
+                checklist.length
+                    ? h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
+                        h('label', { class: 'detail-task-main' },
+                            h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
+                            h('span', {}, task.text),
+                        ),
+                        h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
+                    )))
+                    : null,
+                renderTaskAddBar(item, t),
+            ),
+        )
+    }
+
+    // Inline "add task" field for the rigor checklist. Mirrors the grocery
+    // add-bar's survive-the-rerender contract: the typed draft and focus are
+    // restored from the prior same-id input so a background re-render (peer
+    // update, the task we just added echoing back) never eats what's half-typed.
+    function renderTaskAddBar(item, t) {
+        const prev = root.querySelector('#ticket-task-add')
+        const input = h('input', {
+            class: 'input detail-task-add',
+            id: 'ticket-task-add',
+            placeholder: t('ticket.detail.addTask'),
+            onkeydown: (event) => {
+                if (event.key === 'Escape') {
+                    // Keep Escape local — the global handler would otherwise close
+                    // the whole drawer mid-entry.
+                    event.stopPropagation()
+                    input.blur()
+                    return
+                }
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                const text = input.value
+                input.value = ''
+                actions.addTicketTask(item, text)
+            },
+        })
+        if (prev) {
+            input.value = prev.value
+            if (root.ownerDocument.activeElement === prev) queueMicrotask(() => input.focus())
+        }
+        return h('div', { class: 'detail-task-addrow' },
+            tablerIcon('plus', { size: 14 }),
+            input,
         )
     }
 
@@ -3105,9 +3169,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
-    function renderTicketSplitPanel(item, state) {
+    function renderTicketDrawer(item, state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        return h('aside', { class: 'detail-split' },
+        return h('aside', { class: 'detail-drawer' },
             h('div', { class: 'detail-toolbar' },
                 h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
                 h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('main.item.move'), title: t('main.item.move'), onclick: () => openDialog({ kind: 'item-move', item }) }, tablerIcon('switch-horizontal', { size: 15 })),
