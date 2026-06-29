@@ -1441,10 +1441,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function valueReturnToggleRow (listId, type) {
         if (!(isBoardType(type) || isTodoType(type))) return null
         const t = locale.i18n.t.bind(locale.i18n)
-        const cb = h('input', { type: 'checkbox', checked: isValueSurface(listId, type) ? '' : null, onchange: (event) => actions.setValueReturn(listId, type, event.target.checked) })
+        const on = isValueSurface(listId, type)
+        const cb = h('input', { type: 'checkbox', class: 'switch-input', checked: on ? '' : null, onchange: (event) => actions.setValueReturn(listId, type, event.target.checked) })
         return h('div', { class: 'value-toggle' },
-            h('h3', { class: 'category-heading label-sm' }, tablerIcon('coins', { size: 13 }), h('span', {}, t('value.enable'))),
-            h('label', { class: 'value-toggle-row' }, cb, h('span', { class: 'label-md' }, t('value.enableHint'))),
+            h('label', { class: 'switch-row' },
+                h('span', { class: 'switch-text' },
+                    h('span', { class: 'switch-title label-sm' }, tablerIcon('coins', { size: 14 }), h('span', {}, t('value.enable'))),
+                    h('span', { class: 'switch-hint label-md' }, t('value.enableHint')),
+                ),
+                h('span', { class: `switch${on ? ' on' : ''}` }, cb, h('span', { class: 'switch-knob' })),
+            ),
         )
     }
 
@@ -1487,7 +1493,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const hintsHost = h('div', {})
     const noticesHost = h('div', { class: 'notices' })
     const dialogHost = h('div', {})
-    root.append(titlebar, shell, hintsHost, noticesHost, dialogHost)
+    // The ticket detail drawer lives here, a sibling of .shell (NOT inside .main),
+    // so its position:fixed resolves against the viewport regardless of any
+    // ancestor transform on .main.
+    const drawerHost = h('div', {})
+    root.append(titlebar, shell, hintsHost, noticesHost, drawerHost, dialogHost)
 
     function openDialog(dialog) {
         ui.dialog = dialog
@@ -1865,10 +1875,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Expose the active view so panes can scope layout rules without a
         // wrapper element (children render directly into `main`).
         main.dataset.view = ui.ticketDocId ? 'doc' : ui.view
-        // Background scroll-lock for the board drawer: cleared on every render so
-        // it can't linger when leaving the board view; renderBoardPane re-adds it
-        // when a ticket drawer is open (see there).
-        document.documentElement.classList.remove('board-drawer-open')
         if (ui.ticketDocId) return renderTicketFull(state)
         if (ui.view === 'overview') return renderOverviewPane(state)
         // A list surface ('lists' | 'board' | 'todo') needs an active list; with
@@ -2687,10 +2693,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const columns = groupByStatus(itemsForActiveList(state), config)
         const nowMs = now()
         const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs, config.rigorOn)))
-        const selected = selectedTicket(state)
-        // Lock the page (html) scroll while the drawer is open so wheel/trackpad
-        // input over the drawer never chains through to the board behind it.
-        document.documentElement.classList.toggle('board-drawer-open', !!selected)
+        // The ticket detail drawer is rendered into a top-level host (renderDrawerHost)
+        // OUTSIDE .main, so its position:fixed is always viewport-relative and never
+        // re-anchored by .main's pane-enter transform (which pushed it off-screen).
         replaceChildren(main,
             h('header', { class: 'page-header' },
                 h('h1', { class: 'page-title title-lg' }, activeSurface(state)?.name || t('board.title')),
@@ -2711,7 +2716,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ),
             ),
             board,
-            selected ? renderTicketDrawer(selected, state) : null,
+        )
+    }
+
+    // Renders the ticket detail drawer (and its click-away scrim) into the
+    // top-level drawerHost — outside .main so the fixed drawer can never be
+    // re-anchored by an ancestor transform. Also owns the page scroll-lock.
+    function renderDrawerHost(state) {
+        const show = ui.view === 'board' && !ui.ticketDocId && ui.activeListId != null
+        const item = show ? selectedTicket(state) : null
+        document.documentElement.classList.toggle('board-drawer-open', !!item)
+        if (!item) { drawerHost.replaceChildren(); return }
+        replaceChildren(drawerHost,
+            h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
+            renderTicketDrawer(item, state),
         )
     }
 
@@ -3037,18 +3055,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.priority'), prioritySel),
             propRow(tablerIcon('user', { size: 14 }), t('ticket.detail.assignee'), assigneeSel),
             propRow(tablerIcon('calendar', { size: 14 }), t('ticket.detail.due'), dueInput),
-            propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.estimate'), estInput),
-            propRow(tablerIcon('activity', { size: 14 }), t('ticket.detail.complexity'), cxInput),
             propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.timeSpent'), h('span', { class: 'prop-readonly' }, formatDuration(b.inProgressMs))),
         ]
-        if (isValueSurface(item.listId, item.listType)) {
-            const valInput = h('input', { type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), class: 'prop-input', onchange: (event) => actions.updateTicket(item, { valueRate: clampRate(event.target.value) }) })
-            valInput.value = clampRate(item.valueRate) != null ? String(clampRate(item.valueRate)) : ''
-            const delInput = h('input', { type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), class: 'prop-input', onchange: (event) => actions.updateTicket(item, { delayRate: clampRate(event.target.value) }) })
-            delInput.value = clampRate(item.delayRate) != null ? String(clampRate(item.delayRate)) : ''
-            rows.push(propRow(tablerIcon('coins', { size: 14 }), t('value.value'), valInput))
-            rows.push(propRow(tablerIcon('hourglass', { size: 14 }), t('value.delay'), delInput))
-        }
         if (b.isDone && b.timeliness) {
             const d = deltaPercent(b.inProgressHours, b.estimatedHours)
             rows.push(propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.timeliness'),
@@ -3059,12 +3067,43 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'ticket-avatar', title: item.createdBy }, ticketInitials(item.createdBy))))
         }
 
+        // Congruency box: the two planning estimates side by side (their gap is
+        // what the congruency analytics measures).
+        const congruencyBox = h('div', { class: 'prop-box' },
+            h('h3', { class: 'category-heading label-sm' }, tablerIcon('activity', { size: 13 }), h('span', {}, t('congruency.title'))),
+            h('div', { class: 'prop-pair' },
+                h('label', { class: 'prop-field' }, h('span', { class: 'prop-field-label label-sm' }, t('ticket.detail.estimate')), estInput),
+                h('label', { class: 'prop-field' }, h('span', { class: 'prop-field-label label-sm' }, t('ticket.detail.complexity')), cxInput),
+            ),
+        )
+
+        // Value Return box: value + delay as minimalist 1-10 sliders.
+        const rateSlider = (icon, labelText, current, onCommit) => {
+            const readout = h('span', { class: 'rate-readout label-sm' }, current != null ? String(current) : '—')
+            const slider = h('input', {
+                type: 'range', min: String(VALUE_MIN), max: String(VALUE_MAX), step: '1', class: 'rate-slider',
+                value: current != null ? String(current) : String(VALUE_MIN),
+                oninput: (event) => { readout.textContent = event.target.value },
+                onchange: (event) => onCommit(clampRate(event.target.value)),
+            })
+            return h('div', { class: 'rate-row' }, tablerIcon(icon, { size: 14 }), h('span', { class: 'rate-label label-sm' }, labelText), slider, readout)
+        }
+        const valueBox = isValueSurface(item.listId, item.listType)
+            ? h('div', { class: 'prop-box' },
+                h('h3', { class: 'category-heading label-sm' }, tablerIcon('coins', { size: 13 }), h('span', {}, t('value.enable'))),
+                rateSlider('coins', t('value.value'), clampRate(item.valueRate), (v) => actions.updateTicket(item, { valueRate: v })),
+                rateSlider('hourglass', t('value.delay'), clampRate(item.delayRate), (v) => actions.updateTicket(item, { delayRate: v })),
+            )
+            : null
+
         return h('div', { class: 'prop-rail-inner' },
             shared,
             h('div', { class: 'prop-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.properties')),
                 h('div', { class: 'prop-rows' }, ...rows),
             ),
+            congruencyBox,
+            valueBox,
         )
     }
 
@@ -4834,6 +4873,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         maybeEnsureGeneralGroup()
         renderNav(state)
         renderMain(state)
+        renderDrawerHost(state)
         renderHints(state)
         renderDialog(state)
         renderNotices(state)
