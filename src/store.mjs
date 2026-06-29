@@ -80,6 +80,9 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // for the Settings input and for re-asserting the label once this device's
     // writer key is known. '' = not named yet.
     deviceName: '',
+    // One-time guard: a friendly default device name is seeded on first run so
+    // peers aren't nameless. Set true after seeding so a cleared name isn't re-seeded.
+    deviceNameSeeded: false,
     leafBridgeEnabled: false,
     leafBridgePort: DEFAULT_LEAF_BRIDGE_PORT,
     // Desktop-hosted voice (leaf streams audio here, the worker transcribes with

@@ -609,6 +609,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const name = store.getState().preferences.deviceName
         if (name) assertDeviceName(name)
     }
+    // A friendly default so devices aren't nameless (peers otherwise fall back to
+    // raw hex). Derived from the platform; the user can rename in Settings.
+    function defaultDeviceName() {
+        try {
+            const nav = globalThis.navigator
+            const p = (nav && (nav.userAgentData?.platform || nav.platform || nav.userAgent)) || ''
+            if (/mac|darwin|iphone|ipad/i.test(p)) return 'Mac'
+            if (/win/i.test(p)) return 'Windows PC'
+            if (/linux|x11|cros/i.test(p)) return 'Linux'
+        } catch { /* no navigator (headless) */ }
+        return 'My device'
+    }
+    // Seed the default ONCE (guarded by deviceNameSeeded so a user who clears the
+    // name is never re-seeded). Run at boot, before subscribe, so it doesn't
+    // re-enter render.
+    function maybeSeedDeviceName() {
+        const prefs = store.getState().preferences
+        if (prefs.deviceName || prefs.deviceNameSeeded) return
+        store.setPreferences({ deviceName: defaultDeviceName(), deviceNameSeeded: true })
+    }
 
     // Built-in group placement used to live only in device-local localStorage
     // (preferences.builtinGroups), so a freshly joined device never saw it. Once,
@@ -2670,6 +2690,58 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return (s.slice(0, 2) || '?').toUpperCase()
     }
 
+    // Initials from a human name: first letters of the first two words, else the
+    // first two alphanumerics. ('cassandrina-node' -> 'CN', 'Alessia' -> 'AL')
+    function nameInitials(name) {
+        const parts = String(name || '').trim().split(/[\s._-]+/).filter(Boolean)
+        if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+        return ticketInitials(name)
+    }
+    // Short, copy-friendly fingerprint for a 64-char writer key: first8…last4.
+    function shortKey(key) {
+        const s = String(key || '')
+        return s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s
+    }
+    // Memoize the synced peer-label Map per render pass: store.getState().items is
+    // a stable reference until the next state update, so we only re-reduce when it
+    // actually changes (the board renders many cards, each resolving names).
+    let _peerLabelItems = null
+    let _peerLabelMap = null
+    function peerLabelMap() {
+        const items = store.getState().items
+        if (items !== _peerLabelItems) { _peerLabelItems = items; _peerLabelMap = reducePeerLabels(items) }
+        return _peerLabelMap
+    }
+    // Resolve a writer/device key to a human display. Synced device name when
+    // present (initials from the name); otherwise the self label or a short
+    // fingerprint. Used everywhere an assignee/author/member key is shown so the
+    // collaborative read of the app is people, not hex. No new sync — reads the
+    // same label channel the Members pane already trusts.
+    function peerDisplay(key) {
+        const k = String(key || '')
+        const name = peerLabelMap().get(k) || ''
+        const writers = store.getState().roster?.writers ?? []
+        const w = writers.find((x) => x.writerKey === k)
+        const isSelf = !!(w && w.isSelf)
+        const isOwner = !!(w && w.isOwner)
+        const selfLabel = locale.i18n.t('members.role.self')
+        const display = name || (isSelf ? selfLabel : shortKey(k))
+        const initials = name ? nameInitials(name) : ticketInitials(k)
+        const title = name ? `${name} · ${shortKey(k)}` : (isSelf ? `${selfLabel} · ${shortKey(k)}` : k)
+        return { key: k, name, display, initials, isSelf, isOwner, short: shortKey(k), title }
+    }
+    // A compact, copyable fingerprint of a writer key (first8…last4, mono). Click
+    // copies the FULL key. Reuses the existing copyText helper + peers copy strings.
+    function fingerprintChip(keyHex) {
+        const k = String(keyHex || '')
+        return h('button', {
+            class: 'fingerprint-chip',
+            type: 'button',
+            title: locale.i18n.t('desktop.peers.copy'),
+            onclick: (event) => { event.stopPropagation(); copyText(k, 'desktop.peers.copied') },
+        }, h('span', {}, shortKey(k)), tablerIcon('copy', { size: 12 }))
+    }
+
     // The ticket selected for the split panel / full doc, or null. Filters by
     // listType so a stale id can never surface a grocery row in the detail view.
     function selectedTicket(state) {
@@ -2774,7 +2846,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const chips = []
         if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
         const meta = []
-        if (b.assignee) meta.push(h('span', { class: 'ticket-avatar' }, ticketInitials(b.assignee)))
+        if (b.assignee) { const pd = peerDisplay(b.assignee); meta.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials)) }
         if (b.checklistTotal > 0) {
             meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
         }
@@ -2857,7 +2929,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 title: plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
                 onclick: (event) => { event.stopPropagation(); actions.toggleItemPlan(item) },
             }, tablerIcon('flag', { size: 13 })),
-            h('div', { class: 'ticket-title' }, item.text),
+            h('div', { class: 'ticket-title', title: item.text }, item.text),
             chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
             meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
         )
@@ -3026,7 +3098,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('h3', { class: 'category-heading label-sm' }, tablerIcon('share', { size: 13 }), h('span', {}, t('ticket.detail.sharedWith'))),
             writers.length === 0
                 ? h('p', { class: 'label-sm prop-empty' }, t('ticket.detail.you'))
-                : h('div', { class: 'prop-avatars' }, ...writers.map((w) => h('span', { class: 'ticket-avatar', title: w.writerKey }, ticketInitials(w.writerKey)))),
+                : h('div', { class: 'prop-avatars' }, ...writers.map((w) => {
+                    const pd = peerDisplay(w.writerKey)
+                    return h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials)
+                })),
         )
 
         const statusSel = h('select', { class: 'prop-select', onchange: (event) => actions.moveTicket(item, event.target.value) },
@@ -3040,7 +3115,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
         const assigneeSel = h('select', { class: 'prop-select', onchange: (event) => actions.updateTicket(item, { assignee: event.target.value }) },
             h('option', { value: '' }, t('ticket.detail.none')),
-            ...writers.map((w) => h('option', { value: w.writerKey }, w.writerKey.slice(0, 8))))
+            ...writers.map((w) => h('option', { value: w.writerKey }, peerDisplay(w.writerKey).display)))
         assigneeSel.value = item.assignee || ''
 
         const dueInput = h('input', { type: 'date', class: 'prop-input', onchange: (event) => actions.updateTicket(item, { dueAt: fromDateInputValue(event.target.value) }) })
@@ -3063,8 +3138,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + (d != null ? ` ${d > 0 ? '+' : ''}${d}%` : ''))))
         }
         if (item.createdBy) {
+            const pd = peerDisplay(item.createdBy)
             rows.push(propRow(tablerIcon('user', { size: 14 }), t('ticket.detail.createdBy'),
-                h('span', { class: 'ticket-avatar', title: item.createdBy }, ticketInitials(item.createdBy))))
+                h('span', { class: 'prop-person' },
+                    h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials),
+                    h('span', {}, pd.display))))
         }
 
         // Congruency box: the two planning estimates side by side (their gap is
@@ -3358,6 +3436,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     class: 'block-plus',
                     type: 'button',
                     'aria-label': t('ticket.block.insert'),
+                    title: t('ticket.block.insert'),
                     onclick: () => actions.openBlockMenu({ mode: 'after', blockId: block.id }),
                 }, tablerIcon('plus', { size: 15 })),
             ),
@@ -3380,7 +3459,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('section', { class: 'ticket-body' },
             h('div', { class: 'ticket-body-head' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.body')),
-                blocks.length ? h('span', { class: 'block-hint label-sm' }, t('ticket.block.editHint')) : null,
+                blocks.length ? h('span', { class: 'block-hint label-sm' }, `${t('ticket.block.editHint')} · ${t('ticket.block.slashHint')}`) : null,
             ),
             blocks.length === 0
                 ? h('button', { class: 'block-empty', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 16 }), t('ticket.block.empty'))
@@ -3396,9 +3475,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         return h('aside', { class: 'detail-drawer' },
             h('div', { class: 'detail-toolbar' },
-                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
-                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('main.item.move'), title: t('main.item.move'), onclick: () => openDialog({ kind: 'item-move', item }) }, tablerIcon('switch-horizontal', { size: 15 })),
-                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
+                h('span', { class: 'detail-toolbar-title', title: item.text }, item.text),
+                h('div', { class: 'detail-toolbar-actions' },
+                    h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
+                    h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('main.item.move'), title: t('main.item.move'), onclick: () => openDialog({ kind: 'item-move', item }) }, tablerIcon('switch-horizontal', { size: 15 })),
+                    h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
+                ),
             ),
             h('div', { class: 'detail-split-scroll' },
                 renderTicketSummary(item, state, { full: false }),
@@ -3455,10 +3537,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function renderCongruencyCard(stat) {
         const t = locale.i18n.t.bind(locale.i18n)
         const total = Math.max(1, stat.count)
-        const name = stat.user === 'unassigned' ? '—' : stat.user.slice(0, 8)
+        const pd = stat.user === 'unassigned' ? null : peerDisplay(stat.user)
+        const name = pd ? pd.display : '—'
         return h('div', { class: 'congruency-card' },
             h('div', { class: 'congruency-user' },
-                h('span', { class: 'ticket-avatar' }, ticketInitials(stat.user)),
+                h('span', { class: `ticket-avatar${pd && (pd.isSelf || pd.isOwner) ? ' is-self' : ''}`, title: pd ? pd.title : '' }, pd ? pd.initials : '—'),
                 h('div', {},
                     h('div', { class: 'body-md' }, name),
                     h('div', { class: 'label-sm', style: 'color: var(--secondary);' }, t('congruency.completed', { count: stat.count })),
@@ -3497,6 +3580,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', {}, state.peerCount === 0
                     ? t('desktop.peers.none')
                     : t('desktop.peers.connected', { count: state.peerCount })),
+                (() => {
+                    const selfKey = (members.find((w) => w.isSelf) || {}).writerKey
+                    return selfKey
+                        ? h('span', { class: 'self-id' }, h('span', {}, t('members.role.self')), fingerprintChip(selfKey))
+                        : null
+                })(),
             ),
             h('section', { class: 'pane-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('members.title')),
@@ -3999,16 +4088,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return [h('p', { class: 'body-md', style: 'color: var(--secondary); padding: 0 1rem;' }, t('members.subtitle.none'))]
         }
         const canAdminister = store.getState().roster?.canAdminister
-        // Synced device names; fall back to the raw writer key when unnamed.
-        const peerNames = reducePeerLabels(store.getState().items)
-        return members.map((member) => h('div', { class: 'member-row' },
-            h('span', { class: 'who', title: member.writerKey }, peerNames.get(member.writerKey) || member.writerKey),
-            h('span', { class: `role-chip${member.isOwner ? ' owner' : ''}` },
-                member.isOwner ? t('members.role.owner') : member.isSelf ? t('members.role.self') : t('members.role.member')),
-            canAdminister && !member.isSelf && !member.isOwner
-                ? h('button', { class: 'btn btn-danger', onclick: () => actions.removeMember(member) }, t('common.remove'))
-                : h('span', {}),
-        ))
+        // Synced device name on line 1, copyable fingerprint on line 2 — every
+        // member is legible (name or self label) AND its key is grabbable.
+        return members.map((member) => {
+            const pd = peerDisplay(member.writerKey)
+            return h('div', { class: 'member-row' },
+                h('div', { class: 'who' },
+                    h('span', { class: 'who-name', title: pd.title }, pd.name || (member.isSelf ? t('members.role.self') : pd.short)),
+                    fingerprintChip(member.writerKey),
+                ),
+                h('span', { class: `role-chip${member.isOwner ? ' owner' : ''}` },
+                    member.isOwner ? t('members.role.owner') : member.isSelf ? t('members.role.self') : t('members.role.member')),
+                canAdminister && !member.isSelf && !member.isOwner
+                    ? h('button', { class: 'btn btn-danger', onclick: () => actions.removeMember(member) }, t('common.remove'))
+                    : h('span', {}),
+            )
+        })
     }
 
     // Activity analytics body (used inside Settings → Analytics): a health
@@ -4204,39 +4299,40 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
             deviceNameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitDeviceName(); deviceNameInput.blur() } })
             deviceNameInput.addEventListener('blur', commitDeviceName)
-            const themeRow = h('div', { class: 'choice-row' },
+            const themeRow = h('div', { class: 'segmented', role: 'group', 'aria-label': t('desktop.theme.label') },
                 ...THEME_CHOICES.map((choice) => h('button', {
-                    class: `btn ${state.preferences.theme === choice ? 'btn-primary' : 'btn-secondary'}`,
+                    class: `seg ${state.preferences.theme === choice ? 'active' : ''}`,
+                    'aria-pressed': state.preferences.theme === choice ? 'true' : 'false',
                     onclick: () => store.setPreferences({ theme: choice }),
                 }, t(`desktop.theme.${choice}`))),
             )
-            const hintsRow = h('div', { class: 'choice-row' },
-                h('button', {
-                    class: `btn ${state.preferences.showKeyHints ? 'btn-primary' : 'btn-secondary'}`,
-                    'aria-pressed': state.preferences.showKeyHints ? 'true' : 'false',
-                    onclick: () => actions.toggleHints(),
-                },
-                    state.preferences.showKeyHints ? t('desktop.settings.shown') : t('desktop.settings.hidden'),
-                    h('kbd', {}, 'H'),
+            const hintsOn = state.preferences.showKeyHints
+            const hintsRow = h('label', { class: 'switch-row' },
+                h('span', { class: 'switch-hint label-md' },
+                    hintsOn ? t('desktop.settings.shown') : t('desktop.settings.hidden'), ' ', h('kbd', {}, 'H')),
+                h('span', { class: `switch${hintsOn ? ' on' : ''}` },
+                    h('input', { type: 'checkbox', class: 'switch-input', role: 'switch', 'aria-checked': hintsOn ? 'true' : 'false', checked: hintsOn ? '' : null, onchange: () => actions.toggleHints() }),
+                    h('span', { class: 'switch-knob' }),
                 ),
             )
-            const languageRow = h('div', { class: 'choice-row' },
+            const languageRow = h('div', { class: 'segmented', role: 'group', 'aria-label': t('header.section.language') },
                 ...LOCALE_CHOICES.map((choice) => h('button', {
-                    class: `btn ${locale.choice === choice ? 'btn-primary' : 'btn-secondary'}`,
+                    class: `seg ${locale.choice === choice ? 'active' : ''}`,
+                    'aria-pressed': locale.choice === choice ? 'true' : 'false',
                     onclick: () => locale.setChoice(choice),
                 }, localeChoiceLabel(locale.i18n, choice))),
             )
             const boardCfg = selectBoardConfig(state)
             const canEditRigor = !!(state.boardConfigCanAdminister || state.roster?.canAdminister)
             const rigorRow = canEditRigor
-                ? h('div', { class: 'choice-row' },
+                ? h('div', { class: 'segmented', role: 'group', 'aria-label': t('settings.rigor.label') },
                     h('button', {
-                        class: `btn ${boardCfg.rigorOn ? 'btn-primary' : 'btn-secondary'}`,
+                        class: `seg ${boardCfg.rigorOn ? 'active' : ''}`,
                         'aria-pressed': boardCfg.rigorOn ? 'true' : 'false',
                         onclick: () => actions.setRigor(true),
                     }, t('settings.rigor.on')),
                     h('button', {
-                        class: `btn ${!boardCfg.rigorOn ? 'btn-primary' : 'btn-secondary'}`,
+                        class: `seg ${!boardCfg.rigorOn ? 'active' : ''}`,
                         'aria-pressed': !boardCfg.rigorOn ? 'true' : 'false',
                         onclick: () => actions.setRigor(false),
                     }, t('settings.rigor.off')),
@@ -4245,14 +4341,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     `${boardCfg.rigorOn ? t('settings.rigor.on') : t('settings.rigor.off')} — ${t('settings.rigor.readonlyHelp')}`)
             // Per-device gate for offering board creation. Always lets existing
             // boards stay visible; only the "New board" option is hidden when off.
-            const boardRow = h('div', { class: 'choice-row' },
+            const boardRow = h('div', { class: 'segmented', role: 'group', 'aria-label': t('settings.board.label') },
                 h('button', {
-                    class: `btn ${state.preferences.boardEnabled ? 'btn-primary' : 'btn-secondary'}`,
+                    class: `seg ${state.preferences.boardEnabled ? 'active' : ''}`,
                     'aria-pressed': state.preferences.boardEnabled ? 'true' : 'false',
                     onclick: () => store.setPreferences({ boardEnabled: true }),
                 }, t('settings.board.on')),
                 h('button', {
-                    class: `btn ${!state.preferences.boardEnabled ? 'btn-primary' : 'btn-secondary'}`,
+                    class: `seg ${!state.preferences.boardEnabled ? 'active' : ''}`,
                     'aria-pressed': !state.preferences.boardEnabled ? 'true' : 'false',
                     onclick: () => store.setPreferences({ boardEnabled: false }),
                 }, t('settings.board.off')),
@@ -4641,13 +4737,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const valueOn = isValueSurface(vListId, vType)
             if (draft.valueRate === undefined) draft.valueRate = null
             if (draft.delayRate === undefined) draft.delayRate = null
-            const rateInput = (key) => {
-                const inp = h('input', { class: 'input', type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), style: 'max-width: 130px;', placeholder: `${VALUE_MIN}–${VALUE_MAX}`, oninput: (event) => { draft[key] = event.target.value === '' ? null : clampRate(Number(event.target.value)) } })
-                inp.value = draft[key] != null ? String(draft[key]) : ''
-                return inp
+            // Value + delay capture as sliders (1–10), mirroring the detail-drawer
+            // rate sliders and the creation complexity slider. The readout shows
+            // "—" until the user moves the thumb, so an untouched rate stays null
+            // and validateValueDraft still enforces a conscious choice.
+            const rateSliderField = (key) => {
+                const readout = h('span', { class: 'complexity-readout label-md' }, draft[key] != null ? String(draft[key]) : '—')
+                const slider = h('input', {
+                    type: 'range', min: String(VALUE_MIN), max: String(VALUE_MAX), step: '1', class: 'rate-slider',
+                    value: draft[key] != null ? String(draft[key]) : String(VALUE_MIN),
+                    oninput: (event) => { draft[key] = clampRate(Number(event.target.value)); readout.textContent = String(draft[key]) },
+                })
+                return { slider, readout }
             }
-            const valInput = rateInput('valueRate')
-            const delInput = rateInput('delayRate')
+            const valField = rateSliderField('valueRate')
+            const delField = rateSliderField('delayRate')
             const taskRows = draft.tasks.map((val, index) => h('div', { class: 'rigor-task-row' },
                 h('input', { class: 'input', value: val, placeholder: t('ticket.field.taskPlaceholder'), oninput: (event) => { draft.tasks[index] = event.target.value } }),
                 h('button', { class: 'btn btn-secondary btn-icon', 'aria-label': t('common.remove'), onclick: () => { draft.tasks.splice(index, 1); if (!draft.tasks.length) draft.tasks.push(''); renderAll() } }, tablerIcon('x', { size: 14 })),
@@ -4674,8 +4778,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     store.pushNotice(t('ticket.create.missing'), 'error')
                     if (missing.includes('description')) shake(descInput)
                     if (missing.includes('hours')) shake(hoursInput)
-                    if (missing.includes('value')) shake(valInput)
-                    if (missing.includes('delay')) shake(delInput)
+                    if (missing.includes('value')) shake(valField.slider)
+                    if (missing.includes('delay')) shake(delField.slider)
                     return
                 }
                 const valueFields = valueOn ? { valueRate: draft.valueRate, delayRate: draft.delayRate } : {}
@@ -4708,8 +4812,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('div', {}, fieldLabel(t('ticket.field.complexity'), rigorOn), h('div', { class: 'complexity-row' }, cxInput, cxReadout)),
                 ),
                 valueOn ? h('div', { class: 'rigor-2col' },
-                    h('div', {}, fieldLabel(t('value.value'), true), h('div', { class: 'value-input-row' }, tablerIcon('coins', { size: 14 }), valInput)),
-                    h('div', {}, fieldLabel(t('value.delay'), true), h('div', { class: 'value-input-row' }, tablerIcon('hourglass', { size: 14 }), delInput)),
+                    h('div', {}, fieldLabel(t('value.value'), true), h('div', { class: 'value-input-row' }, tablerIcon('coins', { size: 14 }), valField.slider, valField.readout)),
+                    h('div', {}, fieldLabel(t('value.delay'), true), h('div', { class: 'value-input-row' }, tablerIcon('hourglass', { size: 14 }), delField.slider, delField.readout)),
                 ) : null,
                 rigorOn ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('ticket.rigor.ownerNote')) : null,
             ], [
@@ -4884,6 +4988,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         prevItems = new Map(state.items.map((item) => [item.id, { isDone: !!item.isDone, text: item.text }]))
     }
 
+    maybeSeedDeviceName()
     store.subscribe(renderAll)
     renderAll()
 
