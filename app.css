@@ -31,6 +31,10 @@
     --on-danger: #ffffff;
     --danger-container: #ffdad6;
     --on-danger-container: #93000a;
+    /* Danger accent that reads on the inverse surface. The inverse surface is
+       dark in the light theme (needs a bright red) and light in the dark theme
+       (needs a deep red), so this token is the opposite polarity of --danger. */
+    --danger-on-inverse: #ffb4ab;
 
     /* Legacy aliases (inline styles in ui.mjs) */
     --secondary: var(--ink-mute);
@@ -77,6 +81,7 @@
     --on-danger: #690005;
     --danger-container: #93000a;
     --on-danger-container: #ffdad6;
+    --danger-on-inverse: #ba1a1a;
 }
 
 /* Pre-JS fallback: follow the OS until main.mjs sets an explicit data-theme. */
@@ -99,6 +104,7 @@
         --on-danger: #690005;
         --danger-container: #93000a;
         --on-danger-container: #ffdad6;
+        --danger-on-inverse: #ba1a1a;
     }
 }
 
@@ -740,6 +746,23 @@ button {
    overflow-y actually engages; title + actions stay pinned outside it. */
 .dialog .dialog-body { color: var(--ink-mute); margin-bottom: 1.5rem; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
+/* Trust register: irreversible surfaces feel like a mode (inverse surface +
+   danger square marker). One variant, reused per destructive dialog kind. */
+.trust-dialog { background: var(--inverse-surface); }
+.trust-dialog h2 { color: var(--inverse-ink); }
+.trust-dialog .dialog-body { color: var(--inverse-ink); }
+.trust-marker {
+    display: flex; align-items: center; gap: 0.5rem;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--danger-on-inverse); margin-bottom: 0.75rem;
+}
+.trust-square { width: 9px; height: 9px; flex-shrink: 0; background: var(--danger-on-inverse); border-radius: var(--r-field); }
+.trust-reassure { display: flex; align-items: center; gap: 0.45rem; margin: 0.75rem 0 0; color: var(--inverse-ink); }
+.trust-reassure svg { color: var(--signal); flex-shrink: 0; }
+.trust-dialog .btn-secondary {
+    background: transparent; color: var(--inverse-ink);
+    border: 1px solid color-mix(in srgb, var(--inverse-ink) 25%, transparent);
+}
 .invite-code {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -1164,6 +1187,20 @@ html.board-drawer-open { overflow: hidden; }
 .block-md h1 { font-size: 1.4em; }
 .block-md h2 { font-size: 1.2em; }
 .block-md h3 { font-size: 1.05em; }
+/* First-class heading + divider blocks. */
+.block-heading { margin: 0; font-weight: 700; line-height: 1.25; cursor: text; word-break: break-word; color: var(--ink); }
+.block-heading-l2 { font-size: 1.2em; }
+.block-heading-l3 { font-size: 1.05em; }
+.block-divider { border: none; border-top: 1px solid var(--line); margin: 0.6rem 0; width: 100%; }
+.block-heading-wrap { display: flex; align-items: center; gap: 0.6rem; }
+.block-heading-input {
+    flex: 1; min-width: 0; border: none; background: var(--surface-1);
+    border-radius: var(--r-field); padding: 0.2rem 0.4rem;
+    font-family: var(--font-sans); font-weight: 700; color: var(--ink);
+}
+.block-heading-input:focus { outline: none; }
+.heading-level { flex-shrink: 0; }
+.heading-level .seg { padding: 0.2rem 0.55rem; }
 .block-callout { display: flex; gap: 0.6rem; background: var(--surface-2); border-left: 3px solid var(--signal); border-radius: var(--r-field); padding: 0.6rem 0.8rem; cursor: text; }
 .block-callout > svg { color: var(--ink-mute); flex-shrink: 0; margin-top: 2px; }
 .block-code { font-family: var(--font-mono); font-size: 0.82rem; background: var(--surface-2); border-radius: var(--r-field); padding: 0.7rem 0.9rem; overflow-x: auto; white-space: pre; cursor: text; margin: 0; }
@@ -1362,8 +1399,20 @@ html.board-drawer-open { overflow: hidden; }
 .plan-tomorrow .plan-row { background: transparent; padding: 0.4rem 0.85rem; }
 
 /* Empty + all-clear. */
-.plan-empty { padding: 2rem 0; color: var(--ink-mute); }
+.plan-empty { padding: 2.5rem 0; color: var(--ink-mute); max-width: 32rem; }
+.plan-empty-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; border-radius: var(--r-row);
+    background: var(--surface-2); color: var(--ink-faint); margin-bottom: 0.9rem;
+}
 .plan-empty-title { font-size: 1.1rem; color: var(--ink); margin-bottom: 0.4rem; }
+.plan-empty-tip {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    margin-top: 1rem; padding: 0.4rem 0.7rem;
+    background: var(--surface-2); border-radius: var(--r-pill); color: var(--ink-mute);
+}
+.plan-empty-tip svg { color: var(--ink-faint); }
+.plan-empty-tip-or { color: var(--ink-faint); }
 
 /* Planner layout: today agenda on the left, the week rail on the right. */
 .plan-planner { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: var(--section-gap); align-items: start; }

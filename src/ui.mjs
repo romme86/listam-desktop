@@ -1221,9 +1221,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 next = idx < 0 ? [...blocks, block] : [...blocks.slice(0, idx + 1), block, ...blocks.slice(idx + 1)]
             }
             ui.blockMenu = null
-            ui.blockEditingId = block.id
-            ui.blockDraft = blockToText(block)
-            ui.blockCaret = null
+            // A divider has nothing to edit, so it lands placed (not in edit mode).
+            if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
+                ui.blockEditingId = block.id
+                ui.blockDraft = blockToText(block)
+                ui.blockCaret = null
+            }
             actions.commitBlocks(item, next)
             renderAll()
         },
@@ -1231,9 +1234,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const block = createBlock(type, blockId)
             const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId ? block : b))
             ui.blockMenu = null
-            ui.blockEditingId = blockId
-            ui.blockDraft = blockToText(block)
-            ui.blockCaret = null
+            if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
+                ui.blockEditingId = blockId
+                ui.blockDraft = blockToText(block)
+                ui.blockCaret = null
+            }
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        // Switch a heading block between H2 and H3 without leaving the editor.
+        setBlockLevel(item, blockId, level) {
+            const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId && b.type === 'heading' ? { ...b, level } : b))
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -1936,6 +1947,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ['G', t('desktop.hints.view')],
             ['[ ]', t('desktop.hints.list')],
             ['Space', t('desktop.hints.done')],
+            ['F', t('desktop.hints.flag')],
             ['Del', t('desktop.hints.delete')],
             ['T', t('desktop.hints.theme')],
             ['?', t('desktop.hints.help')],
@@ -2193,8 +2205,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const pendingRecords = pending.map((r) => r.rec)
             if (rows.length === 0) {
                 return h('div', { class: 'plan-empty' },
+                    h('div', { class: 'plan-empty-icon' }, tablerIcon('flag', { size: 22 })),
                     h('p', { class: 'plan-empty-title' }, t('plan.empty.title')),
                     h('p', { class: 'label-md' }, t('plan.empty.hint')),
+                    h('div', { class: 'plan-empty-tip label-sm' },
+                        tablerIcon('flag', { size: 14 }),
+                        h('span', {}, t('plan.flag')),
+                        h('span', { class: 'plan-empty-tip-or' }, '·'),
+                        h('kbd', {}, 'F'),
+                    ),
                 )
             }
             const parts = []
@@ -3197,6 +3216,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const t = locale.i18n.t.bind(locale.i18n)
         const edit = () => actions.startBlockEdit(item, block)
         switch (block.type) {
+            case 'heading': {
+                const level = block.level === 3 ? 3 : 2
+                if (!(block.text || '').trim()) return blockMutedView(t('ticket.block.placeholder.heading'), edit)
+                const node = h(level === 3 ? 'h3' : 'h2', { class: `block-heading block-heading-l${level}`, onclick: edit })
+                node.innerHTML = renderInlineMarkdown(block.text || '')
+                return node
+            }
+            case 'divider':
+                // Non-editable structural rule; the gutter + delete still apply.
+                return h('hr', { class: 'block-divider', 'aria-hidden': 'true' })
             case 'callout': {
                 const body = h('div', { class: 'block-md' })
                 body.innerHTML = renderInlineMarkdown(block.text || '')
@@ -3361,8 +3390,49 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('div', { class: 'block-editor-wrap' }, ed, menu)
     }
 
+    // Heading editor: a single-line field + an H2/H3 level toggle. The text
+    // round-trips through blockFromText('heading') (= {text}); the level is a
+    // dedicated field set via setBlockLevel so it survives the text channel.
+    function renderHeadingEditor(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const level = block.level === 3 ? 3 : 2
+        const input = h('input', {
+            class: `block-heading-input block-heading-l${level}`,
+            value: ui.blockDraft,
+            placeholder: t('ticket.block.placeholder.heading'),
+            oninput: (event) => { ui.blockDraft = event.target.value },
+            onkeydown: (event) => {
+                if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
+                if (event.key === 'Enter') { event.preventDefault(); actions.commitBlockEdit(item) }
+            },
+            onblur: () => queueMicrotask(() => {
+                const live = root.querySelector('.block-editor, .block-heading-input')
+                if (live && live !== input && main.ownerDocument.activeElement === live) return
+                if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
+            }),
+        })
+        queueMicrotask(() => {
+            if (main.ownerDocument.activeElement === input) return
+            input.focus()
+            const p = input.value.length
+            try { input.setSelectionRange(p, p) } catch { /* ignore */ }
+        })
+        const levelToggle = h('div', { class: 'segmented heading-level' },
+            ...[2, 3].map((lv) => h('button', {
+                class: `seg ${level === lv ? 'active' : ''}`,
+                type: 'button',
+                // mousedown would blur the input and commit before the click lands.
+                onmousedown: (event) => event.preventDefault(),
+                onclick: () => actions.setBlockLevel(item, block.id, lv),
+            }, `H${lv}`)),
+        )
+        return h('div', { class: 'block-editor-wrap block-heading-wrap' }, input, levelToggle)
+    }
+
     function renderBlockEditor(item, block) {
         if (block.type === 'markdown' || block.type === 'callout') return renderRichBlockEditor(item, block)
+        if (block.type === 'heading') return renderHeadingEditor(item, block)
+        if (block.type === 'divider') return h('hr', { class: 'block-divider', 'aria-hidden': 'true' })
         const t = locale.i18n.t.bind(locale.i18n)
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
         // Markdown blocks get an inline "/" command menu, toggled purely via
@@ -4279,10 +4349,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     sourceText: t('invite.confirm.sourceManual'),
                     trustWarning: '',
                 })),
+                h('p', { class: 'trust-reassure label-md' }, tablerIcon('check', { size: 14 }), h('span', {}, t('invite.confirm.backupNote'))),
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
-                h('button', { class: 'btn btn-primary', onclick: () => actions.confirmJoin(ui.dialog.invite) }, t('common.join')),
-            ])
+                h('button', { class: 'btn btn-danger', onclick: () => actions.confirmJoin(ui.dialog.invite) }, t('invite.confirm.replace')),
+            ], { trust: true })
         } else if (kind === 'settings') {
             // This device's name, advertised to peers (synced peer label). Commit
             // on Enter/blur; setDeviceName stores the local copy and writes the
@@ -4655,14 +4726,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => actions.confirmRemoveMember(ui.dialog.member) }, t('common.remove')),
-            ])
+            ], { trust: true })
         } else if (kind === 'server-shutdown') {
             content = dialogFrame(t('desktop.servers.shutdown'), [
                 h('p', { class: 'dialog-body warning' }, t('desktop.servers.shutdownConfirm', { name: ui.dialog.serverName })),
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => shutdownServer(ui.dialog.serverKey) }, t('desktop.servers.shutdown')),
-            ])
+            ], { trust: true })
         } else if (kind === 'recovery') {
             content = dialogFrame(t('backend.recovery.title'), [
                 h('p', { class: 'dialog-body' }, t('backend.recovery.message')),
@@ -4677,7 +4748,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => actions.recover('reset') }, t('backend.recovery.confirmReset')),
-            ])
+            ], { trust: true })
         } else if (kind === 'shortcuts') {
             const rows = [
                 ['N', t('desktop.shortcuts.addItem')],
@@ -4685,6 +4756,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ['[ ]', t('desktop.shortcuts.switchList')],
                 ['↑ ↓', t('desktop.shortcuts.navigate')],
                 ['Space', t('desktop.shortcuts.toggleDone')],
+                ['F', t('desktop.shortcuts.flag')],
+                ['⇧ F', t('desktop.shortcuts.flagFor')],
                 ['Delete', t('desktop.shortcuts.deleteItem')],
                 ['T', t('desktop.shortcuts.cycleTheme')],
                 ['H', t('desktop.shortcuts.toggleHints')],
@@ -4874,8 +4947,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         el.classList.add('shake')
     }
 
-    function dialogFrame(title, body, dialogActions) {
-        return h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true' },
+    function dialogFrame(title, body, dialogActions, opts = {}) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        // The trust register (opts.trust): irreversible surfaces — join (replaces
+        // your base), member-remove, storage-reset, server-shutdown — render on
+        // the inverse surface with a danger square marker, so they feel like a
+        // mode, not an ordinary dialog. One pattern, reused per kind.
+        return h('div', { class: `dialog${opts.trust ? ' trust-dialog' : ''}`, role: 'dialog', 'aria-modal': 'true' },
+            opts.trust
+                ? h('div', { class: 'trust-marker' }, h('span', { class: 'trust-square', 'aria-hidden': 'true' }), h('span', { class: 'label-sm' }, t('trust.irreversible')))
+                : null,
             h('h2', { class: 'headline-sm' }, title),
             h('div', { class: 'dialog-body body-md' }, ...body),
             h('div', { class: 'dialog-actions' }, ...dialogActions.filter(Boolean)),
@@ -4953,6 +5034,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ? rows[Math.min(rows.length - 1, index + 1)]
                 : rows[Math.max(0, index <= 0 ? 0 : index - 1)]
             next?.focus()
+        } else if (event.key === 'f' || event.key === 'F') {
+            // Flag the focused item into the day-plan. Arrows only move DOM focus,
+            // so resolve the item object from the store. Plain F = today, Shift+F =
+            // pick a day. Same handlers as the row flag / flag-more buttons.
+            const item = store.getState().items.find((it) => it.id === ui.focusedItemId)
+            if (!item) return
+            event.preventDefault()
+            if (event.shiftKey) openDialog({ kind: 'plan-day', item })
+            else actions.toggleItemPlan(item)
         }
     })
 
