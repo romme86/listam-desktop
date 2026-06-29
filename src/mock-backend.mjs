@@ -24,6 +24,7 @@ import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-regis
 import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
+import { buildValueReturnItem } from '@listam/domain/labels'
 import { reductionFromItems } from './store.mjs'
 
 // Grocery, board and to-do all live on the default list (the legacy desktop
@@ -66,9 +67,11 @@ export function createMockBackend() {
     const A = 'a1'.repeat(32)
     const B = 'b2'.repeat(32)
     const HOUR = 3600000
+    const DAY = 86400000
+    const NOWMS = Date.now()
     let boardConfig = normalizeBoardConfig(null) // rigor ON by default
     const boardFixtures = [
-        { text: 'Plan Tokyo itinerary', status: 'in_progress', priority: 'high', assignee: A, createdBy: A, estimatedHours: 6, estimatedComplexity: 45, inProgressMs: 4.2 * HOUR, inProgressSince: null, checklist: [{ id: 'k1', text: 'Confirm dates', done: true }, { id: 'k2', text: 'Compare flights', done: false }], blocks: [
+        { text: 'Plan Tokyo itinerary', status: 'in_progress', priority: 'high', assignee: A, createdBy: A, estimatedHours: 6, estimatedComplexity: 45, valueRate: 7, delayRate: 5, inProgressMs: 4.2 * HOUR, inProgressSince: null, checklist: [{ id: 'k1', text: 'Confirm dates', done: true }, { id: 'k2', text: 'Compare flights', done: false }], blocks: [
             { id: 'blk-1', type: 'markdown', text: '# Trip overview\nTwo weeks across **Tokyo**, *Kyoto* and Osaka.\n## Getting around\nAnchor the trip around the [JR Pass](https://japanrailpass.net) and `book early`.' },
             { id: 'blk-2', type: 'callout', text: 'Reserve the ryokan before March — they fill fast.', tone: 'info' },
             { id: 'blk-3', type: 'checklist', items: [{ text: 'Pick travel dates', done: true }, { text: 'Compare flights', done: false }, { text: 'Reserve ryokan', done: false }] },
@@ -78,12 +81,14 @@ export function createMockBackend() {
             { id: 'blk-7', type: 'image', url: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="160" height="70"><rect width="160" height="70" fill="%23378ADD"/><text x="12" y="42" fill="white" font-family="sans-serif" font-size="16">Tokyo</text></svg>', alt: 'Tokyo' },
             { id: 'blk-8', type: 'code', text: 'itinerary --export pdf --days 12', lang: 'sh' },
         ] },
-        { text: 'Book flights', status: 'todo', priority: 'medium', assignee: A, createdBy: A, estimatedHours: 3, estimatedComplexity: 30 },
+        { text: 'Book flights', status: 'todo', priority: 'medium', assignee: A, createdBy: A, estimatedHours: 3, estimatedComplexity: 30, valueRate: 4, delayRate: 2 },
         { text: 'Reserve ryokan', status: 'todo', priority: 'low', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 20 },
         { text: 'Travel insurance', status: 'in_progress', priority: 'medium', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 35, inProgressMs: 1 * HOUR, inProgressSince: null },
-        { text: 'Renew passport', status: 'done', isDone: true, priority: 'high', assignee: A, createdBy: A, completedBy: A, estimatedHours: 4, estimatedComplexity: 50, inProgressMs: 3.9 * HOUR, actualInProgressHours: 3.9, timeliness: 'on_time' },
-        { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime' },
-        { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime' },
+        { text: 'Renew passport', status: 'done', isDone: true, priority: 'high', assignee: A, createdBy: A, completedBy: A, estimatedHours: 4, estimatedComplexity: 50, inProgressMs: 3.9 * HOUR, actualInProgressHours: 3.9, timeliness: 'on_time', valueRate: 8, delayRate: 3, timeOfCompletion: NOWMS - 1 * DAY },
+        { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime', valueRate: 5, delayRate: 6, timeOfCompletion: NOWMS - 3 * DAY },
+        { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime', valueRate: 9, delayRate: 2, timeOfCompletion: NOWMS - 3 * DAY },
+        { text: 'Compare lounges', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 1, estimatedComplexity: 15, inProgressMs: 1 * HOUR, valueRate: 3, delayRate: 8, timeOfCompletion: NOWMS - 7 * DAY },
+        { text: 'Pocket wifi order', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 1, estimatedComplexity: 20, inProgressMs: 1.2 * HOUR, valueRate: 6, delayRate: 4, timeOfCompletion: NOWMS - 14 * DAY },
     ].map((tk) => normalizeListItem({
         listId: DEFAULT_LIST,
         listType: BOARD_WRITE_TYPE,
@@ -134,9 +139,16 @@ export function createMockBackend() {
         buildListMetaItem({ id: HARDWARE_LIST, name: 'Hardware', type: 'shopping', groupId: PROJECTS_GROUP, order: 0, updatedAt: 1 }),
     ]
 
+    // Value-return enabled on the built-in Board + Todo so ?mock=1 exercises the
+    // rating badges, the mandatory add-gate and the Overview "Value" tab.
+    const valueFixtures = [
+        buildValueReturnItem({ listId: DEFAULT_LIST, type: 'board', enabled: true, updatedAt: 1 }),
+        buildValueReturnItem({ listId: DEFAULT_LIST, type: 'todo', enabled: true, updatedAt: 1 }),
+    ]
+
     // Keep the mock's own items multi-list (the single-list applyOperationToList
     // would drop registry meta-items and the non-default named list).
-    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures])
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures])
     items = reduction.allItems()
 
     function emit(event) {

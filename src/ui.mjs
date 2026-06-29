@@ -43,10 +43,22 @@ import {
     buildSurfaceLabelItem,
     buildPeerLabelItem,
     buildBuiltinGroupItem,
+    buildValueReturnItem,
     reduceSurfaceLabels,
     reducePeerLabels,
     reduceBuiltinGroups,
+    reduceValueReturn,
 } from '@listam/domain/labels'
+import {
+    VALUE_MIN,
+    VALUE_MAX,
+    clampRate,
+    hasValueRating,
+    validateValueDraft,
+    summarizeValue,
+    aggregateCompletedValuePerDay,
+    valueStatsForPeriod,
+} from '@listam/domain/value'
 import {
     isPlanItem,
     reducePlan,
@@ -744,7 +756,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         loadAutoBackups()
     }
     const actions = {
-        addItem(text) {
+        // The add-bar entry point. On a value-return todo surface, ratings are
+        // mandatory, so defer to a small rating dialog that collects value+delay
+        // and then calls addItem with them; otherwise add straight away.
+        addItemGated(text) {
+            const trimmed = text.trim()
+            if (!trimmed) return false
+            if (ui.view === 'todo' && isValueSurface(ui.activeListId, ui.activeType)) {
+                openDialog({ kind: 'value-rate', mode: 'todo-add', text: trimmed, valueRate: null, delayRate: null })
+                return true // consumed; the dialog finishes the add
+            }
+            return actions.addItem(trimmed)
+        },
+        addItem(text, extra = null) {
             const trimmed = text.trim()
             if (!trimmed) return false
             // The add bar serves whichever simple-list surface is showing, filed
@@ -761,9 +785,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 return false
             }
             markLocalText(trimmed)
+            // Carry the value/delay rates when present (value-return surfaces).
+            const rates = hasValueRating(extra) ? { valueRate: clampRate(extra.valueRate), delayRate: clampRate(extra.delayRate) } : {}
             // A shared list's writes carry its baseKey so the backend routes them
             // to that base (UPDATE/DELETE/MOVE already carry it on the item).
-            send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined, baseKey: ui.activeBaseKey || undefined })
+            send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined, baseKey: ui.activeBaseKey || undefined, ...rates })
             return true
         },
         // --- list registry (groups, lists) --------------------------------
@@ -972,7 +998,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
         },
         setOverviewView(view) {
-            store.setPreferences({ overviewView: view === 'planner' ? 'planner' : 'focus' })
+            const allowed = view === 'planner' || view === 'value' ? view : 'focus'
+            store.setPreferences({ overviewView: allowed })
+        },
+        // Toggle the value-return property for a surface (synced per-surface flag,
+        // keyed by the canonical type so built-in + named lists behave the same).
+        setValueReturn(listId, type, enabled) {
+            const item = buildValueReturnItem({ listId, type: canonicalSurfaceType(type), enabled: !!enabled, updatedAt: now() })
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
         },
         toggleItem(item) {
             markLocalId(item.id)
@@ -1107,6 +1141,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         updateTicket(item, patch) {
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
+        },
+        // Open a plan-row item from the Overview: navigate to its source surface
+        // and, for a board ticket, open its detail drawer.
+        openPlanItem(item) {
+            if (!item) return
+            selectSurface(store.getState(), { listId: item.listId, type: canonicalSurfaceType(item.listType) })
+            if (isBoardType(item.listType)) {
+                ui.selectedTicketId = item.id
+                ui.ticketDocId = null
+            }
+            renderAll()
         },
         // --- block-based body --------------------------------------------
         commitBlocks(item, blocks) {
@@ -1374,6 +1419,34 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // Map a list type to its pane/view key. System views sit outside this.
     const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
     const iconForType = (type) => (isBoardType(type) ? 'layout-grid' : isTodoType(type) ? 'checklist' : 'shopping-cart')
+
+    // --- Value Return -------------------------------------------------------
+    // The value-return enable flag is keyed by the canonical surface type, so a
+    // board item (whose listType is the legacy wire 'kanban') must be folded to
+    // BOARD_LIST_TYPE before keying. Todo/shopping are already canonical.
+    const canonicalSurfaceType = (type) => (isBoardType(type) ? BOARD_LIST_TYPE : type)
+    const valueSurfaceKey = (listId, type) => surfaceLabelKey(listId, canonicalSurfaceType(type))
+    const isValueSurface = (listId, type) => valueSurfaces.has(valueSurfaceKey(listId, type))
+    const isValueItem = (item) => !!item && isValueSurface(item.listId, item.listType)
+    // The two badges shown on any rated item (card / drawer / todo row / plan row).
+    function valueBadges (item) {
+        if (!hasValueRating(item)) return []
+        const t = locale.i18n.t.bind(locale.i18n)
+        return [
+            h('span', { class: 'value-badge', title: t('value.value') }, tablerIcon('coins', { size: 13 }), String(clampRate(item.valueRate))),
+            h('span', { class: 'value-badge delay', title: t('value.delay') }, tablerIcon('hourglass', { size: 13 }), String(clampRate(item.delayRate))),
+        ]
+    }
+    // The per-surface enable toggle shown in list settings, board/todo only.
+    function valueReturnToggleRow (listId, type) {
+        if (!(isBoardType(type) || isTodoType(type))) return null
+        const t = locale.i18n.t.bind(locale.i18n)
+        const cb = h('input', { type: 'checkbox', checked: isValueSurface(listId, type) ? '' : null, onchange: (event) => actions.setValueReturn(listId, type, event.target.checked) })
+        return h('div', { class: 'value-toggle' },
+            h('h3', { class: 'category-heading label-sm' }, tablerIcon('coins', { size: 13 }), h('span', {}, t('value.enable'))),
+            h('label', { class: 'value-toggle-row' }, cb, h('span', { class: 'label-md' }, t('value.enableHint'))),
+        )
+    }
 
     const navButtons = {}
     function navButton(def) {
@@ -1875,7 +1948,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 if (event.key !== 'Enter') return
                 const text = addInput.value
                 addInput.value = ''
-                if (!actions.addItem(text)) {
+                if (!actions.addItemGated(text)) {
                     // The rejection notice re-rendered the pane; restore the
                     // draft on the live input and shake it alongside the notice.
                     const live = root.querySelector('#add-item-input') ?? addInput
@@ -1950,7 +2023,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const today = toDateKey(now())
         const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
         const selected = (ui.planDate && week.includes(ui.planDate)) ? ui.planDate : today
-        const view = state.preferences.overviewView === 'planner' ? 'planner' : 'focus'
+        const view = ['planner', 'value'].includes(state.preferences.overviewView) ? state.preferences.overviewView : 'focus'
 
         // Resolve a plan record to a renderable row, dropping dangling item refs.
         const resolve = (rec) => {
@@ -1977,6 +2050,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
         }
         const resolveDay = (dateKey) => (byDate.get(dateKey) || []).map(resolve).filter(Boolean)
+
+        // Value rollups for the plan strip / rail: sum value + average delay over
+        // the rated single items planned into a day (list-cards have no rate).
+        const dayValueItems = (dateKey) => resolveDay(dateKey).filter((r) => r.kind === 'item').map((r) => r.item)
+        const fmtAvg = (n) => String(Math.round(n * 10) / 10)
+        const valueRollup = (summary) => summary.count === 0 ? null : h('span', { class: 'value-rollup label-sm', title: `${t('value.value')} · ${t('value.delay')}` },
+            tablerIcon('coins', { size: 12 }), String(summary.totalValue),
+            tablerIcon('hourglass', { size: 12 }), fmtAvg(summary.avgDelay))
+        const weekValueBar = (() => {
+            const roll = valueRollup(summarizeValue(week.flatMap(dayValueItems)))
+            return roll ? h('div', { class: 'plan-weekbar' }, roll) : null
+        })()
 
         // Drag within a day reorders; drop onto a day pill re-plans to that day.
         const planDnd = (rec, dayRecords, index) => ({
@@ -2062,7 +2147,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     'aria-label': t('main.item.toggle'),
                     onclick: () => toggleItemDone(item),
                 }, tablerIcon(done ? 'square-check' : 'square', { size: opts.spotlight ? 22 : 18 })),
-                h('span', { class: 'plan-text', ondblclick: () => { ui.editingItemId = item.id; renderAll() } }, item.text),
+                h('span', { class: 'plan-text plan-text-open', title: t('plan.openList'), onclick: () => actions.openPlanItem(item) }, item.text),
+                ...valueBadges(item),
                 h('span', { class: 'plan-chip' }, resolved.chip),
                 h('button', {
                     class: 'plan-remove',
@@ -2121,6 +2207,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'pill-dow label-sm' }, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short' })),
                 h('span', { class: 'pill-day' }, String(parsePlanKey(dk).getDate())),
                 h('span', { class: `pill-count label-sm${count === 0 ? ' zero' : ''}` }, count > 0 ? String(count) : '·'),
+                valueRollup(summarizeValue(dayValueItems(dk))),
             )
         }))
 
@@ -2136,9 +2223,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'plan-viewtoggle' },
                     h('button', { class: `seg${view === 'focus' ? ' active' : ''}`, onclick: () => actions.setOverviewView('focus') }, t('plan.focus')),
                     h('button', { class: `seg${view === 'planner' ? ' active' : ''}`, onclick: () => actions.setOverviewView('planner') }, t('plan.planner')),
+                    h('button', { class: `seg${view === 'value' ? ' active' : ''}`, onclick: () => actions.setOverviewView('value') }, t('value.tab')),
                 ),
             ),
         )
+
+        if (view === 'value') {
+            return replaceChildren(main, header, renderValuePane(state))
+        }
 
         if (view === 'planner') {
             const rail = h('div', { class: 'plan-week-rail' }, ...week.map((dk) => {
@@ -2152,7 +2244,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 },
                     h('div', { class: 'plan-week-head' },
                         h('span', {}, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })),
-                        h('span', { class: `pill-count label-sm${rows.length === 0 ? ' zero' : ''}` }, rows.length > 0 ? String(rows.length) : '·'),
+                        h('span', { class: 'plan-week-head-right' },
+                            valueRollup(summarizeValue(dayValueItems(dk))),
+                            h('span', { class: `pill-count label-sm${rows.length === 0 ? ' zero' : ''}` }, rows.length > 0 ? String(rows.length) : '·'),
+                        ),
                     ),
                     rows.length === 0
                         ? h('div', { class: 'plan-week-empty label-sm' }, t('plan.empty.none'))
@@ -2162,7 +2257,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         ))),
                 )
             }))
-            return replaceChildren(main, header, strip,
+            return replaceChildren(main, header, strip, weekValueBar,
                 h('div', { class: 'plan-planner' },
                     h('div', { class: 'plan-agenda' }, dayAgenda(selected)),
                     rail,
@@ -2171,7 +2266,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
 
         // Focus layout: selected-day agenda, plus a receded Tomorrow when on today.
-        const parts = [header, strip, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
+        const parts = [header, strip, weekValueBar, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
         if (selected === today) {
             const tomorrow = resolveDay(week[1]).filter((r) => !r.done)
             if (tomorrow.length > 0) {
@@ -2182,6 +2277,71 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
         }
         return replaceChildren(main, ...parts)
+    }
+
+    // The Overview "Value" tab: a two-series day chart (total completed value +
+    // average delay) over the last 30 days, plus daily/monthly/quarterly/yearly
+    // stat cards. Aggregates COMPLETED rated items across every surface.
+    function renderValuePane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const nowMs = now()
+        const fmt1 = (n) => String(Math.round(n * 10) / 10)
+        const series = aggregateCompletedValuePerDay(state.items, { daysBack: 30, nowMs })
+        const hasData = series.some((d) => d.count > 0)
+
+        const chart = buildValueChart(series)
+        const legend = h('div', { class: 'value-legend label-sm' },
+            h('span', { class: 'value-legend-item' }, h('span', { class: 'value-swatch value' }), tablerIcon('coins', { size: 13 }), t('value.chart.value')),
+            h('span', { class: 'value-legend-item' }, h('span', { class: 'value-swatch delay' }), tablerIcon('hourglass', { size: 13 }), t('value.chart.delay')),
+        )
+        const axis = h('div', { class: 'value-axis label-sm' },
+            h('span', {}, parsePlanKey(series[0].dateKey).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })),
+            h('span', {}, parsePlanKey(series[series.length - 1].dateKey).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })),
+        )
+
+        const periods = [['day', t('value.stats.daily')], ['month', t('value.stats.monthly')], ['quarter', t('value.stats.quarterly')], ['year', t('value.stats.yearly')]]
+        const cards = periods.map(([p, label]) => {
+            const s = valueStatsForPeriod(state.items, p, { nowMs })
+            return h('div', { class: 'value-stat-card' },
+                h('div', { class: 'value-stat-label label-sm' }, label),
+                h('div', { class: 'value-stat-num' }, tablerIcon('coins', { size: 16 }), s.count ? String(s.totalValue) : '—'),
+                h('div', { class: 'value-stat-sub label-sm' }, s.count
+                    ? h('span', {}, tablerIcon('hourglass', { size: 12 }), `${fmt1(s.avgDelay)} · ${t('congruency.completed', { count: s.count })}`)
+                    : h('span', {}, t('value.empty'))),
+            )
+        })
+
+        return h('div', { class: 'value-pane' },
+            h('div', { class: 'value-chart-card' },
+                legend,
+                hasData ? chart : h('div', { class: 'value-empty' }, t('value.empty')),
+                hasData ? axis : null,
+            ),
+            h('div', { class: 'value-stats' }, ...cards),
+        )
+    }
+
+    // Inline-SVG dual-line chart. Value uses its own max; delay is fixed 1..10.
+    // Built as an SVG string injected via innerHTML (the HTML parser creates the
+    // SVG-namespaced nodes), mirroring how tablerIcon builds its markup.
+    function buildValueChart(series) {
+        const W = 640, H = 200, padL = 6, padR = 6, padT = 14, padB = 10
+        const n = series.length
+        const innerW = W - padL - padR
+        const innerH = H - padT - padB
+        const maxValue = Math.max(1, ...series.map((d) => d.totalValue))
+        const xAt = (i) => padL + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW)
+        const yValue = (v) => padT + innerH - (v / maxValue) * innerH
+        const yDelay = (v) => padT + innerH - (v / VALUE_MAX) * innerH
+        const pts = (fn, key) => series.map((d, i) => `${xAt(i).toFixed(1)},${fn(d[key]).toFixed(1)}`).join(' ')
+        const svg = `<svg viewBox="0 0 ${W} ${H}" class="value-chart-svg" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">`
+            + `<line x1="${padL}" y1="${(padT + innerH).toFixed(1)}" x2="${W - padR}" y2="${(padT + innerH).toFixed(1)}" class="vc-axis" />`
+            + `<polyline points="${pts(yValue, 'totalValue')}" class="vc-line vc-value" />`
+            + `<polyline points="${pts(yDelay, 'avgDelay')}" class="vc-line vc-delay" />`
+            + '</svg>'
+        const wrap = h('div', { class: 'value-chart' })
+        wrap.innerHTML = svg
+        return wrap
     }
 
     function renderListsPane(state) {
@@ -2385,6 +2545,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('div', props,
             h('span', { class: 'glyph' }, glyph),
             h('span', { class: 'item-text' }, item.text),
+            hasValueRating(item)
+                ? h('div', {
+                    class: 'row-value',
+                    title: t('value.addRate'),
+                    onclick: (event) => { event.stopPropagation(); openDialog({ kind: 'value-rate', mode: 'edit', item, valueRate: clampRate(item.valueRate), delayRate: clampRate(item.delayRate) }) },
+                }, ...valueBadges(item))
+                : null,
             h('div', { class: 'row-actions' },
                 h('button', {
                     class: `row-flag${planned ? ' flagged' : ''}`,
@@ -2593,6 +2760,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (b.checklistTotal > 0) {
             meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
         }
+        // Value-return rates (only present when the surface has the feature on).
+        meta.push(...valueBadges(item))
         // Rigor mode surfaces the two planning estimates (time + complexity) on
         // every card so the board is scannable without opening each ticket.
         if (rigorOn) {
@@ -2872,6 +3041,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             propRow(tablerIcon('activity', { size: 14 }), t('ticket.detail.complexity'), cxInput),
             propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.timeSpent'), h('span', { class: 'prop-readonly' }, formatDuration(b.inProgressMs))),
         ]
+        if (isValueSurface(item.listId, item.listType)) {
+            const valInput = h('input', { type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), class: 'prop-input', onchange: (event) => actions.updateTicket(item, { valueRate: clampRate(event.target.value) }) })
+            valInput.value = clampRate(item.valueRate) != null ? String(clampRate(item.valueRate)) : ''
+            const delInput = h('input', { type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), class: 'prop-input', onchange: (event) => actions.updateTicket(item, { delayRate: clampRate(event.target.value) }) })
+            delInput.value = clampRate(item.delayRate) != null ? String(clampRate(item.delayRate)) : ''
+            rows.push(propRow(tablerIcon('coins', { size: 14 }), t('value.value'), valInput))
+            rows.push(propRow(tablerIcon('hourglass', { size: 14 }), t('value.delay'), delInput))
+        }
         if (b.isDone && b.timeliness) {
             const d = deltaPercent(b.inProgressHours, b.estimatedHours)
             rows.push(propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.timeliness'),
@@ -4243,6 +4420,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
+                valueReturnToggleRow(listId, type),
             ], [
                 h('button', {
                     class: 'btn btn-danger',
@@ -4294,6 +4472,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                             class: 'btn btn-secondary',
                             onclick: () => { closeDialog(); actions.shareList(listId) },
                         }, t('shareList.button')),
+                valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {
                     class: 'btn btn-danger',
@@ -4417,6 +4596,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const hoursInput = h('input', { class: 'input', type: 'number', min: '0.25', step: '0.25', style: 'max-width: 130px;', value: draft.hours, placeholder: '6', oninput: (event) => { draft.hours = event.target.value } })
             const cxReadout = h('span', { class: 'complexity-readout label-md' }, `${draft.complexity}%`)
             const cxInput = h('input', { type: 'range', min: '1', max: '100', value: String(draft.complexity), class: 'complexity-slider', oninput: (event) => { draft.complexity = Number(event.target.value); cxReadout.textContent = `${draft.complexity}%` } })
+            // Value-return rating (mandatory when the destination surface has it on).
+            const vListId = ui.dialog.moveFrom ? ui.dialog.targetListId : ui.activeListId
+            const vType = ui.dialog.moveFrom ? ui.dialog.targetListType : ui.activeType
+            const valueOn = isValueSurface(vListId, vType)
+            if (draft.valueRate === undefined) draft.valueRate = null
+            if (draft.delayRate === undefined) draft.delayRate = null
+            const rateInput = (key) => {
+                const inp = h('input', { class: 'input', type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), style: 'max-width: 130px;', placeholder: `${VALUE_MIN}–${VALUE_MAX}`, oninput: (event) => { draft[key] = event.target.value === '' ? null : clampRate(Number(event.target.value)) } })
+                inp.value = draft[key] != null ? String(draft[key]) : ''
+                return inp
+            }
+            const valInput = rateInput('valueRate')
+            const delInput = rateInput('delayRate')
             const taskRows = draft.tasks.map((val, index) => h('div', { class: 'rigor-task-row' },
                 h('input', { class: 'input', value: val, placeholder: t('ticket.field.taskPlaceholder'), oninput: (event) => { draft.tasks[index] = event.target.value } }),
                 h('button', { class: 'btn btn-secondary btn-icon', 'aria-label': t('common.remove'), onclick: () => { draft.tasks.splice(index, 1); if (!draft.tasks.length) draft.tasks.push(''); renderAll() } }, tablerIcon('x', { size: 14 })),
@@ -4434,12 +4626,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         if (!missing.includes(m)) missing.push(m)
                     }
                 }
+                if (valueOn) {
+                    for (const m of validateValueDraft({ valueRate: draft.valueRate, delayRate: draft.delayRate }).missing) {
+                        if (!missing.includes(m)) missing.push(m)
+                    }
+                }
                 if (missing.length) {
                     store.pushNotice(t('ticket.create.missing'), 'error')
                     if (missing.includes('description')) shake(descInput)
                     if (missing.includes('hours')) shake(hoursInput)
+                    if (missing.includes('value')) shake(valInput)
+                    if (missing.includes('delay')) shake(delInput)
                     return
                 }
+                const valueFields = valueOn ? { valueRate: draft.valueRate, delayRate: draft.delayRate } : {}
                 if (ui.dialog.moveFrom) {
                     // Promote-into-board move: relocate the existing item (id
                     // preserved) and supply the rigor fields the form collected.
@@ -4448,11 +4648,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         item: ui.dialog.moveFrom,
                         targetListId: ui.dialog.targetListId,
                         targetListType: BOARD_WRITE_TYPE,
-                        fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity },
+                        fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields },
                     })
                 } else {
                     markLocalText(desc)
-                    send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity })
+                    send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields })
                 }
                 closeDialog()
             }
@@ -4468,12 +4668,51 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('div', {}, fieldLabel(t('ticket.field.hours'), rigorOn), hoursInput),
                     h('div', {}, fieldLabel(t('ticket.field.complexity'), rigorOn), h('div', { class: 'complexity-row' }, cxInput, cxReadout)),
                 ),
+                valueOn ? h('div', { class: 'rigor-2col' },
+                    h('div', {}, fieldLabel(t('value.value'), true), h('div', { class: 'value-input-row' }, tablerIcon('coins', { size: 14 }), valInput)),
+                    h('div', {}, fieldLabel(t('value.delay'), true), h('div', { class: 'value-input-row' }, tablerIcon('hourglass', { size: 14 }), delInput)),
+                ) : null,
                 rigorOn ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('ticket.rigor.ownerNote')) : null,
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-primary', onclick: submit }, t('ticket.create.submit')),
             ])
             queueMicrotask(() => descInput.focus())
+        } else if (kind === 'value-rate') {
+            // Collect the mandatory value + delay rates for a to-do add, or edit
+            // them on an existing item. Shared between the add-bar gate and the
+            // per-row edit affordance.
+            const d = ui.dialog
+            const rateField = (key, label, icon) => {
+                const inp = h('input', { class: 'input', type: 'number', min: String(VALUE_MIN), max: String(VALUE_MAX), style: 'max-width: 130px;', placeholder: `${VALUE_MIN}–${VALUE_MAX}`, oninput: (event) => { d[key] = event.target.value === '' ? null : clampRate(Number(event.target.value)) } })
+                inp.value = d[key] != null ? String(d[key]) : ''
+                return { inp, row: h('div', {}, fieldLabel(label, true), h('div', { class: 'value-input-row' }, tablerIcon(icon, { size: 14 }), inp)) }
+            }
+            const valF = rateField('valueRate', t('value.value'), 'coins')
+            const delF = rateField('delayRate', t('value.delay'), 'hourglass')
+            const submit = () => {
+                const check = validateValueDraft({ valueRate: d.valueRate, delayRate: d.delayRate })
+                if (!check.ok) {
+                    store.pushNotice(t('value.rate.missing'), 'error')
+                    if (check.missing.includes('value')) shake(valF.inp)
+                    if (check.missing.includes('delay')) shake(delF.inp)
+                    return
+                }
+                if (d.mode === 'edit' && d.item) {
+                    actions.updateTicket(d.item, { valueRate: d.valueRate, delayRate: d.delayRate })
+                } else {
+                    actions.addItem(d.text, { valueRate: d.valueRate, delayRate: d.delayRate })
+                }
+                closeDialog()
+            }
+            content = dialogFrame(t('value.addRate'), [
+                d.text ? h('p', { class: 'body-md' }, d.text) : null,
+                h('div', { class: 'rigor-2col' }, valF.row, delF.row),
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-primary', onclick: submit }, d.mode === 'edit' ? t('common.save') : t('value.add')),
+            ])
+            queueMicrotask(() => valF.inp.focus())
         }
 
         replaceChildren(dialogHost,
@@ -4578,9 +4817,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // Set of plan refs ('i:listId::itemId' / 'l:listId::type') with a live day,
     // recomputed once per render so item rows can show their flag state cheaply.
     let plannedRefs = new Set()
+    // Map<surfaceKey, true> of surfaces with the value-return property enabled,
+    // recomputed each render (like plannedRefs) so the gating + badges read a
+    // single snapshot rather than re-reducing per item.
+    let valueSurfaces = new Map()
     function renderAll() {
         const state = store.getState()
         plannedRefs = new Set(reducePlan(state.items).keys())
+        valueSurfaces = reduceValueReturn(state.items)
         // Advertise this device's name once its writer key is known (roster).
         maybeAssertDeviceName()
         // Republish any localStorage-only built-in group placement to the synced

@@ -1397,3 +1397,57 @@ html.board-drawer-open { overflow: hidden; }
 .grid-card:hover .row-flag, .grid-card:focus-within .row-flag { opacity: 0.7; }
 .grid-card .row-flag:hover { opacity: 1; transform: scale(1.12); }
 .grid-card .row-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
+
+/* ===== Value Return ==================================================== */
+/* Per-item value/delay badges (board card meta, todo row, plan rows). */
+.value-badge { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.78rem; color: var(--ink-mute); font-family: var(--font-mono); }
+.value-badge svg { color: var(--signal); flex-shrink: 0; }
+.value-badge.delay svg { color: #EF9F27; }
+.row-value { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: 0.5rem; cursor: pointer; }
+.row-value:hover .value-badge { color: var(--ink); }
+
+/* Settings toggle */
+.value-toggle { margin-top: 0.5rem; }
+.value-toggle .category-heading { display: flex; align-items: center; gap: 0.4rem; padding: 0; margin: 0 0 0.5rem; }
+.value-toggle-row { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: var(--ink-mute); }
+
+/* Rate inputs (create dialog + value-rate dialog) */
+.value-input-row { display: inline-flex; align-items: center; gap: 0.4rem; }
+.value-input-row svg { color: var(--ink-faint); flex-shrink: 0; }
+
+/* Overview rollups (per-day pill / planner head / week bar) */
+.value-rollup { display: inline-flex; align-items: center; gap: 0.15rem; color: var(--ink-faint); font-family: var(--font-mono); }
+.value-rollup svg { flex-shrink: 0; }
+.value-rollup svg:first-child { color: var(--signal); }
+.value-rollup svg:nth-of-type(2) { color: #EF9F27; margin-left: 0.3rem; }
+.plan-weekbar { display: flex; justify-content: flex-end; padding: 0.1rem 0.25rem 0; }
+.plan-week-head-right { display: inline-flex; align-items: center; gap: 0.5rem; }
+.plan-pill .value-rollup { font-size: 0.62rem; margin-top: 0.1rem; }
+.plan-text-open { cursor: pointer; }
+.plan-text-open:hover { text-decoration: underline; }
+
+/* Value tab: chart + period stat cards */
+.value-pane { display: flex; flex-direction: column; gap: 1.5rem; }
+.value-chart-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-dialog); padding: 1.25rem; }
+.value-chart { width: 100%; }
+.value-chart-svg { width: 100%; height: 200px; display: block; }
+.vc-axis { stroke: var(--line); stroke-width: 1; }
+.vc-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.vc-value { stroke: var(--signal); }
+.vc-delay { stroke: #EF9F27; }
+.value-legend { display: flex; gap: 1.25rem; margin-bottom: 0.75rem; color: var(--ink-mute); }
+.value-legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+.value-legend-item svg { color: var(--ink-faint); }
+.value-swatch { width: 14px; height: 3px; border-radius: 2px; }
+.value-swatch.value { background: var(--signal); }
+.value-swatch.delay { background: #EF9F27; }
+.value-axis { display: flex; justify-content: space-between; color: var(--ink-faint); margin-top: 0.4rem; }
+.value-empty { color: var(--ink-faint); text-align: center; padding: 2rem 0; }
+.value-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+.value-stat-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-row); padding: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.value-stat-label { color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.04em; }
+.value-stat-num { font-size: 1.8rem; font-weight: 600; letter-spacing: -0.02em; display: inline-flex; align-items: center; gap: 0.4rem; }
+.value-stat-num svg { color: var(--signal); }
+.value-stat-sub { color: var(--ink-mute); display: inline-flex; align-items: center; gap: 0.3rem; }
+.value-stat-sub svg { color: #EF9F27; }
+@media (max-width: 920px) { .value-stats { grid-template-columns: repeat(2, 1fr); } }
