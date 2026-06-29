@@ -457,11 +457,34 @@ button {
     border: 0;
     animation: dot-breathe 2.6s ease-in-out infinite;
 }
+/* Syncing: half-filled acid disc, slowly rotating. Shape carries the state. */
+.summary-bar .dot.syncing {
+    border: 1.5px solid var(--signal);
+    background: conic-gradient(var(--signal) 0 180deg, transparent 180deg 360deg);
+    animation: dot-spin 1.6s linear infinite;
+}
+/* Attention: a danger SQUARE — the one non-acid signal, reserved for trouble. */
+.summary-bar .dot.attention {
+    background: var(--danger);
+    border: 0;
+    border-radius: 2px;
+}
 @keyframes dot-breathe {
     0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 45%, transparent); }
     60% { box-shadow: 0 0 0 6px transparent; }
     100% { box-shadow: 0 0 0 0 transparent; }
 }
+@keyframes dot-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .summary-bar .dot.live, .summary-bar .dot.syncing { animation: none; }
+}
+/* The beacon is a real button (≥24px hit target) opening the devices popover. */
+.beacon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; margin: -8px 0; border-radius: var(--r-pill);
+    cursor: pointer; background: transparent;
+}
+.beacon-btn:hover { background: var(--surface-2); }
 
 /* List view: no lines, tonal rows, done recedes (history is quiet) */
 .category-section { margin-bottom: var(--section-gap); }
@@ -640,6 +663,10 @@ button {
     color: var(--ink-mute);
 }
 .role-chip.owner { background: var(--signal); color: var(--on-signal); }
+.device-rows { display: flex; flex-direction: column; gap: 0.5rem; }
+.device-row { display: grid; grid-template-columns: auto 1fr auto; gap: 0.75rem; align-items: center; padding: 0.5rem 0.25rem; }
+.device-main { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.device-name { font-family: var(--font-sans); font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
 
 .event-log { display: flex; flex-direction: column; gap: 0.25rem; }
 .event-line {
@@ -763,6 +790,23 @@ button {
     background: transparent; color: var(--inverse-ink);
     border: 1px solid color-mix(in srgb, var(--inverse-ink) 25%, transparent);
 }
+
+/* ⌘K command palette. */
+.command-palette { width: min(560px, calc(100vw - 4rem)); padding: 0; overflow: hidden; background: var(--card); }
+.palette-search { display: flex; align-items: center; gap: 0.6rem; padding: 0.9rem 1.1rem; border-bottom: 1px solid var(--line); }
+.palette-search > svg { color: var(--ink-faint); flex-shrink: 0; }
+.palette-input { flex: 1; min-width: 0; border: none; background: transparent; font-size: 16px; color: var(--ink); font-family: var(--font-sans); }
+.palette-input:focus { outline: none; }
+.palette-results { max-height: 50vh; overflow-y: auto; padding: 0.4rem; }
+.palette-group { padding: 0.5rem 0.6rem 0.2rem; color: var(--ink-faint); }
+.palette-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.6rem; border-radius: var(--r-row); cursor: pointer; }
+.palette-row > svg { color: var(--ink-mute); flex-shrink: 0; }
+.palette-label { flex: 1; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-tag { color: var(--ink-faint); flex-shrink: 0; }
+.palette-row.selected { background: var(--ink-block); }
+.palette-row.selected > svg, .palette-row.selected .palette-label, .palette-row.selected .palette-tag { color: var(--signal); }
+.palette-empty { padding: 1.5rem 0.6rem; color: var(--ink-faint); text-align: center; }
+.palette-footer { padding: 0.6rem 1.1rem; border-top: 1px solid var(--line); color: var(--ink-faint); font-family: var(--font-mono); }
 .invite-code {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -1079,6 +1123,34 @@ html.board-drawer-open { overflow: hidden; }
     white-space: nowrap;
 }
 .detail-toolbar-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+
+/* List-item Inspector — non-modal right panel (toggle I), narrower than the
+   board drawer and below it in z-order. Overlays the right gutter the list
+   leaves empty, so it hides almost no content. */
+.item-inspector {
+    position: fixed; right: 0; top: 44px;
+    width: 320px; height: calc(100vh - 44px);
+    z-index: 40;
+    display: flex; flex-direction: column;
+    background: var(--surface-1);
+    border-left: 1px solid var(--line);
+    animation: drawer-in var(--t-base) var(--ease);
+    -webkit-app-region: no-drag;
+}
+@media (max-width: 920px) { .item-inspector { width: 100vw; } }
+.inspector-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+    padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); flex-shrink: 0;
+}
+.inspector-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 1.25rem; display: flex; flex-direction: column; gap: 1.5rem; }
+.inspector-section { display: flex; flex-direction: column; gap: 0.5rem; }
+.inspector-note { resize: vertical; min-height: 3rem; font-family: var(--font-sans); }
+.inspector-value { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.inspector-value .value-badges { display: inline-flex; gap: 0.5rem; }
+.category-pill { display: inline-flex; align-items: center; padding: 0.2rem 0.6rem; background: var(--surface-2); border-radius: var(--r-pill); color: var(--ink-mute); width: fit-content; }
+.inspector-edited { color: var(--ink-faint); margin: 0; }
+.item-row.inspecting { box-shadow: inset 2px 0 0 0 var(--signal); background: var(--surface-1); }
 .detail-split-scroll {
     flex: 1;
     overflow-y: auto;

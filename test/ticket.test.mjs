@@ -119,10 +119,10 @@ test('selectBoardConfig falls back to defaults and reads store board-config', ()
 
 // --- block-based body ------------------------------------------------------
 
-test('BLOCK_TYPES covers the eight mockup block types', () => {
+test('BLOCK_TYPES covers the block types (structural heading + divider lead)', () => {
     assert.deepEqual(
         BLOCK_TYPES.map((b) => b.type),
-        ['markdown', 'checklist', 'numberedList', 'links', 'image', 'table', 'callout', 'code'],
+        ['heading', 'divider', 'markdown', 'checklist', 'numberedList', 'links', 'image', 'table', 'callout', 'code'],
     )
 })
 

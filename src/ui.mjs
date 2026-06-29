@@ -382,6 +382,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         dialog: null,
         editingItemId: null,
         focusedItemId: null,
+        // List-item Inspector (toggle I): the grocery/todo item whose detail panel
+        // is open on the right. Non-modal — the list stays clickable.
+        inspectorItemId: null,
         // Per-paired-server monitoring state, keyed by serverPublicKeyHex:
         // { status, fetchedAt, error, busy, invite }. Populated by the Servers
         // pane's owner-control status queries; `undefined` means never fetched.
@@ -1162,6 +1165,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
         },
+        // Generic LWW field patch for a list item (quantity/note from the
+        // Inspector). The reducer spreads ...item so new optional fields round-trip.
+        setItemFields(item, patch) {
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
+        },
+        openInspector(id) { ui.inspectorItemId = id; renderAll() },
+        closeInspector() { ui.inspectorItemId = null; renderAll() },
+        toggleInspector(id) { ui.inspectorItemId = ui.inspectorItemId === id ? null : id; renderAll() },
         // Open a plan-row item from the Overview: navigate to its source surface
         // and, for a board ticket, open its detail drawer.
         openPlanItem(item) {
@@ -2260,7 +2272,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('div', {},
                 h('h1', { class: 'page-title title-lg' }, t('desktop.nav.overview')),
                 h('div', { class: 'summary-bar label-md plan-subhead' },
-                    h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                    beacon(state),
                     h('span', {}, parsePlanKey(today).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })),
                 ),
             ),
@@ -2422,12 +2434,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: t('plan.flagList'),
                         onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
                     }, tablerIcon('flag', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${ui.inspectorItemId ? ' active' : ''}`,
+                        'aria-label': t('inspector.toggle'),
+                        title: `${t('inspector.toggle')} (I)`,
+                        onclick: () => { const id = ui.focusedItemId || (items[0] && items[0].id); if (id) actions.toggleInspector(id) },
+                    }, tablerIcon('info-circle', { size: 16 })),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             renderAddBar(t),
             h('div', { class: 'summary-bar label-md' },
-                h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                beacon(state),
                 h('span', {}, t(statusKey, { count: state.peerCount })),
                 h('span', {}, summary.remaining === 0 && summary.total > 0
                     ? t('main.summary.allDone')
@@ -2469,12 +2487,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: t('plan.flagList'),
                         onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
                     }, tablerIcon('flag', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${ui.inspectorItemId ? ' active' : ''}`,
+                        'aria-label': t('inspector.toggle'),
+                        title: `${t('inspector.toggle')} (I)`,
+                        onclick: () => { const id = ui.focusedItemId || (items[0] && items[0].id); if (id) actions.toggleInspector(id) },
+                    }, tablerIcon('info-circle', { size: 16 })),
                     h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             renderAddBar(t),
             h('div', { class: 'summary-bar label-md' },
-                h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                beacon(state),
                 h('span', {}, t(statusKey, { count: state.peerCount })),
                 h('span', {}, summary.remaining === 0 && summary.total > 0
                     ? t('main.summary.allDone')
@@ -2571,12 +2595,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
 
         const props = {
-            class: `item-row body-md${item.isDone ? ' done' : ''}${rowAnimationClass(item)}`,
+            class: `item-row body-md${item.isDone ? ' done' : ''}${ui.inspectorItemId === item.id ? ' inspecting' : ''}${rowAnimationClass(item)}`,
             tabindex: '0',
             role: 'button',
             'aria-pressed': item.isDone ? 'true' : 'false',
             dataset: { itemId: item.id },
-            onclick: () => actions.toggleItem(item),
+            // While the Inspector is open, a click retargets it to this item
+            // instead of toggling done (so you can browse items without checking
+            // them off); otherwise click toggles done as usual.
+            onclick: () => { if (ui.inspectorItemId) { ui.focusedItemId = item.id; actions.openInspector(item.id) } else actions.toggleItem(item) },
             ondblclick: (event) => {
                 event.preventDefault()
                 ui.editingItemId = item.id
@@ -2761,6 +2788,40 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }, h('span', {}, shortKey(k)), tablerIcon('copy', { size: 12 }))
     }
 
+    // State-is-shape sync beacon (Kinetic Minimalist v2 §4.3). Reads only fields
+    // that exist: recovery → attention (danger square), joining → syncing (half
+    // disc), peers>0 → live (breathing acid), else local (hollow ring).
+    function beaconState(state) {
+        if (state.recovery) return 'attention'
+        if (state.isJoining || state.joinPhase) return 'syncing'
+        if (state.peerCount > 0) return 'live'
+        return 'local'
+    }
+    // A clickable beacon → the devices popover (names + roles + count). Used at the
+    // four sync/summary sites; the infra dots (server/leaf/roster) keep their own.
+    function beacon(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const bs = beaconState(state)
+        return h('button', {
+            class: 'beacon-btn',
+            type: 'button',
+            'aria-label': t(`desktop.beacon.${bs}`),
+            title: t(`desktop.beacon.${bs}`),
+            onclick: () => openDialog({ kind: 'devices' }),
+        }, h('span', { class: `dot ${bs}` }))
+    }
+
+    // Coarse, language-neutral "time since" for the Inspector's Edited line.
+    function relativeTime(ms) {
+        const s = Math.max(0, Math.floor(ms / 1000))
+        const m = Math.floor(s / 60)
+        if (m < 1) return '1m'
+        if (m < 60) return `${m}m`
+        const hr = Math.floor(m / 60)
+        if (hr < 24) return `${hr}h`
+        return `${Math.floor(hr / 24)}d`
+    }
+
     // The ticket selected for the split panel / full doc, or null. Filters by
     // listType so a stale id can never surface a grocery row in the detail view.
     function selectedTicket(state) {
@@ -2817,11 +2878,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const show = ui.view === 'board' && !ui.ticketDocId && ui.activeListId != null
         const item = show ? selectedTicket(state) : null
         document.documentElement.classList.toggle('board-drawer-open', !!item)
-        if (!item) { drawerHost.replaceChildren(); return }
-        replaceChildren(drawerHost,
-            h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
-            renderTicketDrawer(item, state),
-        )
+        if (item) {
+            replaceChildren(drawerHost,
+                h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
+                renderTicketDrawer(item, state),
+            )
+            return
+        }
+        // Non-modal list-item Inspector (grocery/todo). No scrim — the list stays
+        // clickable. Drops automatically if the item or surface goes away.
+        const inspItem = (ui.view === 'lists' || ui.view === 'todo') && ui.inspectorItemId
+            ? state.items.find((it) => it && it.id === ui.inspectorItemId)
+            : null
+        if (inspItem) { replaceChildren(drawerHost, renderItemInspector(inspItem, state)); return }
+        drawerHost.replaceChildren()
     }
 
     function renderBoardColumn(col, nowMs, rigorOn = false) {
@@ -3560,6 +3630,58 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
+    // Non-modal right-side Inspector for a grocery/todo item (toggle I). Reuses
+    // the drawer slide-in but narrower; the list stays clickable. Sections are
+    // the ones buildable today; quantity/note are new optional LWW fields.
+    function renderItemInspector(item, state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const isGrocery = !isBoardType(item.listType) && !isTodoType(item.listType)
+        let categoryName = ''
+        if (isGrocery) {
+            const sections = groupByCategory([item], locale.i18n.groceryLocale)
+            const key = sections[0] && sections[0].canonicalKey
+            if (key) categoryName = getDisplayCategoryName(key, locale.i18n.groceryLocale)
+        }
+        const quantityInput = h('input', { class: 'input', value: item.quantity || '', placeholder: t('inspector.quantityPlaceholder') })
+        quantityInput.addEventListener('change', () => {
+            const v = quantityInput.value.trim()
+            if (v !== (item.quantity || '')) actions.setItemFields(item, { quantity: v })
+        })
+        const noteInput = h('textarea', { class: 'input inspector-note', rows: '3', placeholder: t('inspector.notePlaceholder') })
+        noteInput.value = item.note || ''
+        noteInput.addEventListener('change', () => {
+            const v = noteInput.value.trim()
+            if (v !== (item.note || '')) actions.setItemFields(item, { note: v })
+        })
+        const sectionBlock = (labelKey, ...children) => h('div', { class: 'inspector-section' },
+            h('h3', { class: 'category-heading label-sm' }, t(labelKey)), ...children)
+        const bs = state.peerCount > 0 ? 'live' : 'local'
+        return h('aside', { class: 'item-inspector' },
+            h('div', { class: 'inspector-head' },
+                h('span', { class: 'inspector-title title-lg', title: item.text }, item.text),
+                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeInspector() }, tablerIcon('x', { size: 16 })),
+            ),
+            h('div', { class: 'inspector-body' },
+                sectionBlock('inspector.status',
+                    h('div', { class: 'summary-bar label-md', style: 'margin: 0;' },
+                        h('span', { class: `dot ${bs}` }),
+                        h('span', {}, state.peerCount === 0 ? t('desktop.peers.none') : t('desktop.peers.connected', { count: state.peerCount })),
+                    )),
+                sectionBlock('inspector.quantity', quantityInput),
+                sectionBlock('inspector.note', noteInput),
+                isValueItem(item)
+                    ? sectionBlock('inspector.value',
+                        h('div', { class: 'inspector-value' },
+                            hasValueRating(item) ? h('div', { class: 'value-badges' }, ...valueBadges(item)) : null,
+                            h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'value-rate', mode: 'edit', item, valueRate: clampRate(item.valueRate), delayRate: clampRate(item.delayRate) }) }, t('inspector.value')),
+                        ))
+                    : null,
+                isGrocery && categoryName ? sectionBlock('inspector.category', h('span', { class: 'category-pill label-sm' }, categoryName)) : null,
+                item.updatedAt > 1e12 ? h('p', { class: 'inspector-edited label-sm' }, t('inspector.edited', { time: relativeTime(now() - item.updatedAt) })) : null,
+            ),
+        )
+    }
+
     function renderTicketFull(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
@@ -3646,7 +3768,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ),
             ),
             h('div', { class: 'summary-bar label-md' },
-                h('span', { class: `dot${state.peerCount > 0 ? ' live' : ''}` }),
+                beacon(state),
                 h('span', {}, state.peerCount === 0
                     ? t('desktop.peers.none')
                     : t('desktop.peers.connected', { count: state.peerCount })),
@@ -4244,6 +4366,105 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- dialogs -------------------------------------------------------------
+    // ⌘K command palette: fuzzy go-to-anything (rail surfaces + active-surface
+    // items) + an action launcher. Filters/repaints its result list IMPERATIVELY
+    // per keystroke — openDialog calls renderAll, so a renderAll-on-input would
+    // rebuild the field and drop focus/caret.
+    function renderCommandPalette(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const onLists = ui.view === 'lists'
+        const entries = []
+        const act = (icon, label, run) => entries.push({ group: 'actions', icon, label, tag: '', run })
+        const jmp = (icon, label, tag, run) => entries.push({ group: 'jump', icon, label, tag, run })
+        act('plus', t('desktop.shortcuts.addItem'), () => { closeDialog(); actions.summonAddBar() })
+        act('switch-horizontal', t('desktop.header.share'), () => { closeDialog(); actions.share() })
+        act('users', t('joinList.button'), () => openDialog({ kind: 'join-list' }))
+        if (onLists) act('layout-grid', t('header.action.gridView'), () => { closeDialog(); preferencesToggle('isGridView') })
+        act('check', t('main.summary.clearDone'), () => { closeDialog(); actions.clearDone() })
+        act('contrast', t('desktop.shortcuts.cycleTheme'), () => { closeDialog(); actions.cycleTheme() })
+        act('settings', t('desktop.nav.settings'), () => openDialog({ kind: 'settings' }))
+        act('info-circle', t('desktop.shortcuts.help'), () => openDialog({ kind: 'shortcuts' }))
+        jmp('layout-dashboard', t('desktop.nav.overview'), '', () => { closeDialog(); ui.view = 'overview'; renderAll() })
+        jmp('users', t('desktop.nav.peers'), '', () => { closeDialog(); ui.view = 'peers'; renderAll() })
+        for (const g of buildRail(state).groups) {
+            for (const s of g.surfaces) {
+                jmp(iconForType(s.type), s.name, g.name || '', () => { closeDialog(); selectSurface(store.getState(), s) })
+            }
+        }
+        if (onLists || ui.view === 'todo' || ui.view === 'board') {
+            const surfName = activeSurface(state)?.name || ''
+            for (const it of itemsForActiveList(state).slice(0, 150)) {
+                jmp('point', it.text, surfName, () => { closeDialog(); ui.focusedItemId = it.id; renderAll() })
+            }
+        }
+        // Rank: prefix > substring > subsequence. Empty query keeps source order.
+        const score = (label, q) => {
+            if (!q) return 1
+            const l = label.toLowerCase()
+            if (l.startsWith(q)) return 3
+            if (l.includes(q)) return 2
+            let i = 0
+            for (const ch of l) { if (ch === q[i]) i++; if (i === q.length) return 1 }
+            return 0
+        }
+        let sel = 0
+        const rowEls = []
+        const results = h('div', { class: 'palette-results', role: 'listbox' })
+        function rebuild(raw) {
+            const q = raw.trim().toLowerCase()
+            const top = entries.map((e) => ({ e, s: score(e.label, q) })).filter((x) => x.s > 0)
+                .sort((a, b) => b.s - a.s).slice(0, 40)
+            sel = 0
+            rowEls.length = 0
+            results.replaceChildren()
+            let lastGroup = null
+            top.forEach((x, idx) => {
+                if (x.e.group !== lastGroup) {
+                    lastGroup = x.e.group
+                    results.append(h('div', { class: 'palette-group label-sm' }, x.e.group === 'actions' ? t('palette.actions') : t('palette.jump')))
+                }
+                const row = h('div', {
+                    class: `palette-row${idx === 0 ? ' selected' : ''}`,
+                    role: 'option',
+                    onmousedown: (ev) => ev.preventDefault(),
+                    onclick: () => x.e.run(),
+                },
+                    tablerIcon(x.e.icon, { size: 16 }),
+                    h('span', { class: 'palette-label' }, x.e.label),
+                    x.e.tag ? h('span', { class: 'palette-tag label-sm' }, x.e.tag) : null,
+                )
+                results.append(row)
+                rowEls.push({ row, run: x.e.run })
+            })
+            if (!rowEls.length) results.append(h('div', { class: 'palette-empty label-md' }, t('palette.empty')))
+        }
+        function setSel(next) {
+            if (!rowEls.length) return
+            sel = (next + rowEls.length) % rowEls.length
+            rowEls.forEach((r, i) => r.row.classList.toggle('selected', i === sel))
+            rowEls[sel].row.scrollIntoView({ block: 'nearest' })
+        }
+        const input = h('input', {
+            class: 'palette-input',
+            placeholder: t('palette.placeholder'),
+            'aria-label': t('palette.placeholder'),
+            oninput: (ev) => rebuild(ev.target.value),
+            onkeydown: (ev) => {
+                if (ev.key === 'ArrowDown') { ev.preventDefault(); setSel(sel + 1) }
+                else if (ev.key === 'ArrowUp') { ev.preventDefault(); setSel(sel - 1) }
+                else if (ev.key === 'Enter') { ev.preventDefault(); if (rowEls[sel]) rowEls[sel].run() }
+                else if (ev.key === 'Escape') { ev.preventDefault(); closeDialog() }
+            },
+        })
+        rebuild('')
+        queueMicrotask(() => input.focus())
+        return h('div', { class: 'dialog command-palette', role: 'dialog', 'aria-modal': 'true' },
+            h('div', { class: 'palette-search' }, tablerIcon('search', { size: 16 }), input),
+            results,
+            h('div', { class: 'palette-footer label-sm' }, t('palette.footer')),
+        )
+    }
+
     function renderDialog(state) {
         if (!ui.dialog && state.recovery) {
             // Phase 11 parity: surface the storage-recovery decision as soon as
@@ -4258,7 +4479,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const { kind } = ui.dialog
         let content = null
 
-        if (kind === 'plan-day') {
+        if (kind === 'command-palette') {
+            content = renderCommandPalette(state)
+        } else if (kind === 'plan-day') {
             const item = ui.dialog.item
             const today = toDateKey(now())
             const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
@@ -4749,6 +4972,34 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => actions.recover('reset') }, t('backend.recovery.confirmReset')),
             ], { trust: true })
+        } else if (kind === 'devices') {
+            // Who is on this list — names + roles + copyable fingerprint, plus the
+            // connected count. Opened from any sync beacon. (Per-device live
+            // presence/last-seen is a follow-up needing a backend writer↔conn map.)
+            const writers = state.roster?.writers ?? []
+            const deviceRows = writers.length === 0
+                ? [h('p', { class: 'dialog-body', style: 'color: var(--secondary);' }, t('desktop.peers.none'))]
+                : writers.map((w) => {
+                    const pd = peerDisplay(w.writerKey)
+                    return h('div', { class: 'device-row' },
+                        h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials),
+                        h('div', { class: 'device-main' },
+                            h('span', { class: 'device-name' }, pd.name || (pd.isSelf ? t('members.role.self') : pd.short)),
+                            fingerprintChip(w.writerKey),
+                        ),
+                        h('span', { class: `role-chip${pd.isOwner ? ' owner' : ''}` },
+                            pd.isOwner ? t('members.role.owner') : pd.isSelf ? t('members.role.self') : t('members.role.member')),
+                    )
+                })
+            content = dialogFrame(t('desktop.devices.title'), [
+                h('div', { class: 'summary-bar label-md', style: 'margin-bottom: 1rem;' },
+                    h('span', { class: `dot ${beaconState(state)}` }),
+                    h('span', {}, state.peerCount === 0 ? t('desktop.peers.none') : t('desktop.peers.connected', { count: state.peerCount })),
+                ),
+                h('div', { class: 'device-rows' }, ...deviceRows),
+            ], [
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
         } else if (kind === 'shortcuts') {
             const rows = [
                 ['N', t('desktop.shortcuts.addItem')],
@@ -4758,6 +5009,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ['Space', t('desktop.shortcuts.toggleDone')],
                 ['F', t('desktop.shortcuts.flag')],
                 ['⇧ F', t('desktop.shortcuts.flagFor')],
+                ['I', t('inspector.toggle')],
                 ['Delete', t('desktop.shortcuts.deleteItem')],
                 ['T', t('desktop.shortcuts.cycleTheme')],
                 ['H', t('desktop.shortcuts.toggleHints')],
@@ -5001,7 +5253,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (event.key === 'Escape') {
             if (ui.dialog) { closeDialog(); return }
             if (ui.blockMenu) { actions.closeBlockMenu(); return }
+            if (ui.inspectorItemId) { actions.closeInspector(); return }
             if (ui.ticketDocId || ui.selectedTicketId) { actions.closeTicket(); return }
+            return
+        }
+        // ⌘K / Ctrl+K opens the command palette from anywhere (even while typing).
+        if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
+            event.preventDefault()
+            openDialog({ kind: 'command-palette' })
             return
         }
         if (isTypingTarget(event.target) || ui.dialog) return
@@ -5043,6 +5302,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             event.preventDefault()
             if (event.shiftKey) openDialog({ kind: 'plan-day', item })
             else actions.toggleItemPlan(item)
+        } else if (event.key === 'i' || event.key === 'I') {
+            // Toggle the Inspector for the focused grocery/todo item.
+            if (ui.view !== 'lists' && ui.view !== 'todo') return
+            if (!ui.focusedItemId) return
+            event.preventDefault()
+            actions.toggleInspector(ui.focusedItemId)
         }
     })
 
