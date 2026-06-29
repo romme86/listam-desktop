@@ -1001,6 +1001,10 @@ kbd {
     animation: drawer-in var(--t-base) var(--ease);
 }
 @keyframes drawer-in { from { transform: translateX(100%); } }
+/* While the drawer is open the page itself does not scroll — only the drawer's
+   own scroll region does. This stops the board behind it from moving when you
+   scroll the drawer (wheel anywhere, not just at the scroll boundary). */
+html.board-drawer-open { overflow: hidden; }
 .detail-toolbar {
     display: flex;
     justify-content: flex-end;
@@ -1012,6 +1016,7 @@ kbd {
 .detail-split-scroll {
     flex: 1;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 1.25rem;
     display: flex;
     flex-direction: column;

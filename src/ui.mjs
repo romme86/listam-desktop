@@ -1792,6 +1792,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Expose the active view so panes can scope layout rules without a
         // wrapper element (children render directly into `main`).
         main.dataset.view = ui.ticketDocId ? 'doc' : ui.view
+        // Background scroll-lock for the board drawer: cleared on every render so
+        // it can't linger when leaving the board view; renderBoardPane re-adds it
+        // when a ticket drawer is open (see there).
+        document.documentElement.classList.remove('board-drawer-open')
         if (ui.ticketDocId) return renderTicketFull(state)
         if (ui.view === 'overview') return renderOverviewPane(state)
         // A list surface ('lists' | 'board' | 'todo') needs an active list; with
@@ -2517,6 +2521,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const nowMs = now()
         const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs, config.rigorOn)))
         const selected = selectedTicket(state)
+        // Lock the page (html) scroll while the drawer is open so wheel/trackpad
+        // input over the drawer never chains through to the board behind it.
+        document.documentElement.classList.toggle('board-drawer-open', !!selected)
         replaceChildren(main,
             h('header', { class: 'page-header' },
                 h('h1', { class: 'page-title title-lg' }, activeSurface(state)?.name || t('board.title')),
