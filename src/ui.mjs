@@ -4609,7 +4609,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('span', { class: 'switch-knob' }),
                 ),
             )
-            const languageRow = h('div', { class: 'segmented', role: 'group', 'aria-label': t('header.section.language') },
+            const languageRow = h('div', { class: 'segmented segmented-wrap', role: 'group', 'aria-label': t('header.section.language') },
                 ...LOCALE_CHOICES.map((choice) => h('button', {
                     class: `seg ${locale.choice === choice ? 'active' : ''}`,
                     'aria-pressed': locale.choice === choice ? 'true' : 'false',
@@ -4647,7 +4647,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     onclick: () => store.setPreferences({ boardEnabled: false }),
                 }, t('settings.board.off')),
             )
-            content = dialogFrame(t('desktop.settings.title'), [
+            content = dialogFrame(t('desktop.settings.title'), [h('div', { class: 'settings' },
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.deviceName.label')),
                 deviceNameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.deviceName.help')),
@@ -4736,7 +4736,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     ...congruencyContent(state),
                     ...activityContent(state),
                 ),
-            ], [
+            )], [
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
         } else if (kind === 'backup') {

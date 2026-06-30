@@ -1382,6 +1382,19 @@ html.board-drawer-open { overflow: hidden; }
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .plan-viewtoggle .seg.active, .segmented .seg.active { background: var(--ink-block); color: var(--signal); }
+/* Many-option pickers (e.g. Language) wrap to multiple rows: a stadium radius on
+   a tall box looks bad, so this variant is a clean rounded rectangle with gaps. */
+.segmented-wrap { border-radius: var(--r-row); gap: 3px; }
+
+/* Settings dialog rhythm: headings align flush with their controls (no indent),
+   and a consistent gap sits above each heading regardless of the control before
+   it (the old per-control bottom margins drifted once segmented/switch landed). */
+.settings .category-heading { padding: 0; margin: 1.6rem 0 0.7rem; }
+.settings > .category-heading:first-child { margin-top: 0; }
+.settings .label-md { margin: 0.5rem 0 0; }
+.settings .choice-row { margin: 0; }
+.settings .switch-row { margin: 0; }
+.settings .analytics-section { margin-top: 0.6rem; }
 
 /* The 7-day strip: Today + Tomorrow + the next five days. */
 .plan-strip { display: flex; gap: 0.4rem; margin: 0 0 var(--section-gap); }
