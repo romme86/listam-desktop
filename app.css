@@ -1290,6 +1290,35 @@ html.board-drawer-open { overflow: hidden; }
 .block-table th, .block-table td { border: 1px solid var(--line); padding: 0.35rem 0.6rem; text-align: left; }
 .block-table th { background: var(--surface-2); font-weight: 600; }
 
+/* Table block grid editor — a table edits AS a table: one input per cell, with a
+   leading control column (delete row) and control row (delete column), plus an
+   add-row / add-column toolbar. Negative right/bottom cell margins overlap the
+   1px borders so seams stay hairline. */
+.block-table-editor { display: flex; flex-direction: column; gap: 0.5rem; }
+.block-table-grid { display: grid; width: 100%; overflow-x: auto; align-items: stretch; padding-bottom: 1px; }
+.block-table-corner { display: block; }
+.block-table-cell {
+    width: 100%; min-width: 0; margin: 0 -1px -1px 0; border: 1px solid var(--line);
+    background: var(--card); color: var(--ink); font: inherit; font-size: 0.85rem;
+    padding: 0.35rem 0.5rem; outline: none;
+}
+.block-table-cell.block-table-head { background: var(--surface-2); font-weight: 600; }
+.block-table-cell:focus { box-shadow: inset 0 0 0 2px var(--ink); position: relative; z-index: 1; }
+.block-table-btn {
+    display: inline-flex; align-items: center; justify-content: center; width: 100%;
+    min-height: 1.5rem; border: 0; background: transparent; color: var(--ink-faint);
+    cursor: pointer; padding: 0.1rem 0.2rem;
+}
+.block-table-btn:hover { color: var(--signal); }
+.block-table-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.block-table-add {
+    display: inline-flex; align-items: center; gap: 0.3rem; border: 1px dashed var(--line);
+    background: transparent; color: var(--ink-mute); cursor: pointer; font-family: var(--font-mono);
+    font-size: 0.75rem; padding: 0.3rem 0.55rem; border-radius: var(--r-field);
+}
+.block-table-add:hover { background: var(--surface-2); color: var(--ink); }
+.block-table-hint { color: var(--ink-faint); margin-left: auto; }
+
 /* Block editor */
 .block-editor-wrap { position: relative; }
 .block-editor {
@@ -1298,7 +1327,7 @@ html.board-drawer-open { overflow: hidden; }
     font-size: 0.95rem; color: var(--ink); resize: vertical; line-height: 1.5;
 }
 .block-editor:focus { outline: none; box-shadow: inset 0 0 0 2px var(--ink); }
-.block-code .block-editor, .block-table .block-editor { font-family: var(--font-mono); font-size: 0.85rem; }
+.block-code .block-editor { font-family: var(--font-mono); font-size: 0.85rem; }
 
 /* WYSIWYG (contentEditable) markdown + callout editor. Shares .block-md so the
    view and the editor render identically — clicking a block just drops a caret

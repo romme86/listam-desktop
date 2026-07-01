@@ -106,6 +106,11 @@ import {
     blockToText,
     blockFromText,
     normalizeBlocks,
+    normalizeTableRows,
+    tableAddRow,
+    tableAddColumn,
+    tableRemoveRow,
+    tableRemoveColumn,
     renderInlineMarkdown,
     markdownToHtml,
     htmlToMarkdown,
@@ -399,6 +404,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         ticketDocId: null,
         blockEditingId: null,
         blockDraft: '',
+        // Table blocks edit AS a grid, not through the comma-separated blockDraft
+        // text channel: blockTableDraft holds the live array-of-arrays and
+        // blockTableFocus remembers which cell to (re)focus across re-renders.
+        blockTableDraft: null,
+        blockTableFocus: null,
         blockMenu: null,
         blockDrag: null,
         boardDrag: null,
@@ -1155,6 +1165,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ui.ticketDocId = null
             ui.blockEditingId = null
             ui.blockDraft = ''
+            seedTableDraft(null)
             ui.blockMenu = null
             renderAll()
         },
@@ -1204,6 +1215,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ui.blockEditingId = block.id
             ui.blockDraft = blockToText(block)
             ui.blockCaret = null
+            seedTableDraft(block)
             ui.blockMenu = null
             renderAll()
         },
@@ -1212,6 +1224,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             const blocks = blocksWithPendingEdit(item)
             ui.blockEditingId = null
             ui.blockDraft = ''
+            seedTableDraft(null)
             ui.blockMenu = null
             actions.commitBlocks(item, blocks)
             renderAll()
@@ -1219,6 +1232,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         cancelBlockEdit() {
             ui.blockEditingId = null
             ui.blockDraft = ''
+            seedTableDraft(null)
             ui.blockMenu = null
             renderAll()
         },
@@ -1239,6 +1253,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ui.blockDraft = blockToText(block)
                 ui.blockCaret = null
             }
+            seedTableDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, next)
             renderAll()
         },
@@ -1251,6 +1266,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ui.blockDraft = blockToText(block)
                 ui.blockCaret = null
             }
+            seedTableDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -1265,6 +1281,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             if (ui.blockEditingId === blockId) {
                 ui.blockEditingId = null
                 ui.blockDraft = ''
+                seedTableDraft(null)
             }
             ui.blockMenu = null
             actions.commitBlocks(item, blocks)
@@ -2830,12 +2847,33 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return item && isBoardType(item.listType) ? item : null
     }
 
-    // The item's blocks with the in-flight textarea draft folded into the block
-    // currently being edited — the value commitBlocks should persist.
+    // Seed (or clear) the table grid draft. Table blocks edit AS a grid held in
+    // ui.blockTableDraft, so a cell can safely contain a comma; every other block
+    // type edits through the ui.blockDraft text channel and leaves this null.
+    function seedTableDraft(block) {
+        ui.blockTableDraft = block && block.type === 'table' ? normalizeTableRows(block.rows) : null
+        ui.blockTableFocus = ui.blockTableDraft ? { r: 0, c: 0 } : null
+    }
+
+    // The item's blocks with the in-flight draft folded into the block currently
+    // being edited — the value commitBlocks should persist. A table folds its
+    // grid draft (ui.blockTableDraft); everything else folds the text draft.
     function blocksWithPendingEdit(item) {
         const blocks = normalizeBlocks(item.blocks)
         if (!ui.blockEditingId) return blocks
-        return blocks.map((b) => (b.id === ui.blockEditingId ? { ...b, ...blockFromText(b.type, ui.blockDraft) } : b))
+        return blocks.map((b) => {
+            if (b.id !== ui.blockEditingId) return b
+            if (b.type === 'table' && Array.isArray(ui.blockTableDraft)) {
+                const nextRows = normalizeTableRows(ui.blockTableDraft)
+                // Only reshape (and thus emit a write) when the grid actually
+                // changed. Otherwise leave a legacy/ragged table's stored rows
+                // untouched, so merely opening + blurring it never rewrites its
+                // shape or bumps updatedAt for every peer.
+                if (JSON.stringify(nextRows) === JSON.stringify(normalizeTableRows(b.rows))) return b
+                return { ...b, rows: nextRows }
+            }
+            return { ...b, ...blockFromText(b.type, ui.blockDraft) }
+        })
     }
 
     function renderBoardPane(state) {
@@ -3499,10 +3537,149 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('div', { class: 'block-editor-wrap block-heading-wrap' }, input, levelToggle)
     }
 
+    // Grid editor for table blocks: a table edits AS a table — one <input> per
+    // cell (row 0 = header) with per-row/column delete and add-row/column
+    // affordances — instead of the comma-separated textarea. The grid lives in
+    // ui.blockTableDraft and is folded back onto block.rows by
+    // blocksWithPendingEdit, so a cell may safely contain a comma (the old text
+    // channel split cells on commas). Tab / click move between cells; Enter drops
+    // to the cell below; ⌘/Ctrl+Enter saves; Escape cancels.
+    function renderTableBlockEditor(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        if (!Array.isArray(ui.blockTableDraft)) seedTableDraft(block)
+        const grid = ui.blockTableDraft
+        const cols = grid[0].length
+
+        const wrap = h('div', { class: 'block-editor-wrap block-table-editor' })
+
+        // Commit only when focus truly leaves the whole grid. Moving between
+        // cells / clicking a toolbar button keeps focus inside .block-table-editor
+        // (the live one after a structural re-render), so it must not commit.
+        const guardedBlur = () => queueMicrotask(() => {
+            const live = root.querySelector('.block-table-editor')
+            if (live && live.contains(main.ownerDocument.activeElement)) return
+            if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
+        })
+
+        // Structural change (add/remove row or column): rebuild and land focus on
+        // the intended cell. onmousedown:preventDefault on the buttons keeps the
+        // focused cell from blurring first, so guardedBlur never fires here.
+        const applyTable = (nextRows, focus) => {
+            ui.blockTableDraft = normalizeTableRows(nextRows)
+            ui.blockTableFocus = focus
+            renderAll()
+        }
+
+        // After removing a row/column, keep the caret on the cell it was in
+        // (shifting its index when the removed line was at or before it) instead
+        // of yanking it to the header row / first column.
+        const focusAfterRemoveRow = (removed) => {
+            const f = ui.blockTableFocus || { r: 0, c: 0 }
+            const r = f.r === removed ? Math.min(removed, grid.length - 2) : (f.r > removed ? f.r - 1 : f.r)
+            return { r: Math.max(0, r), c: f.c, offset: f.offset }
+        }
+        const focusAfterRemoveCol = (removed) => {
+            const f = ui.blockTableFocus || { r: 0, c: 0 }
+            const c = f.c === removed ? Math.min(removed, cols - 2) : (f.c > removed ? f.c - 1 : f.c)
+            return { r: f.r, c: Math.max(0, c), offset: f.offset }
+        }
+
+        const cellInput = (r, c) => {
+            const input = h('input', {
+                class: `block-table-cell${r === 0 ? ' block-table-head' : ''}`,
+                type: 'text',
+                value: grid[r][c] || '',
+                'aria-label': t('ticket.block.table.cellLabel'),
+                dataset: { cell: `${r},${c}` },
+                oninput: (event) => {
+                    grid[r][c] = event.target.value
+                    ui.blockTableFocus = { r, c, offset: event.target.selectionStart }
+                },
+                onfocus: (event) => { ui.blockTableFocus = { r, c, offset: event.target.selectionStart } },
+                onkeyup: (event) => { ui.blockTableFocus = { r, c, offset: event.target.selectionStart } },
+                onkeydown: (event) => {
+                    if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
+                    if (event.key === 'Enter') {
+                        event.preventDefault()
+                        const below = wrap.querySelector(`[data-cell="${r + 1},${c}"]`)
+                        if (below) { ui.blockTableFocus = { r: r + 1, c }; below.focus() }
+                        else actions.commitBlockEdit(item)
+                    }
+                },
+                onblur: guardedBlur,
+            })
+            return input
+        }
+
+        const iconBtn = (icon, labelKey, onclick) => h('button', {
+            class: 'block-table-btn',
+            type: 'button',
+            'aria-label': t(labelKey),
+            title: t(labelKey),
+            onmousedown: (event) => event.preventDefault(),
+            onclick,
+        }, tablerIcon(icon, { size: 14 }))
+
+        // Grid: a leading control column (per-row delete) + a leading control row
+        // (per-column delete), then the cell inputs. Children are laid out in
+        // row-major order to match grid-template-columns.
+        const children = []
+        // Control row: corner + one delete-column button per column.
+        children.push(h('span', { class: 'block-table-corner' }))
+        for (let c = 0; c < cols; c++) {
+            children.push(cols > 1
+                ? iconBtn('trash', 'ticket.block.table.deleteColumn', () => applyTable(tableRemoveColumn(grid, c), focusAfterRemoveCol(c)))
+                : h('span', { class: 'block-table-corner' }))
+        }
+        // One row per data row: delete-row button + the cell inputs.
+        grid.forEach((row, r) => {
+            children.push(grid.length > 1
+                ? iconBtn('trash', 'ticket.block.table.deleteRow', () => applyTable(tableRemoveRow(grid, r), focusAfterRemoveRow(r)))
+                : h('span', { class: 'block-table-corner' }))
+            for (let c = 0; c < cols; c++) children.push(cellInput(r, c))
+        })
+
+        const gridEl = h('div', {
+            class: 'block-table-grid',
+            style: `grid-template-columns: auto repeat(${cols}, minmax(72px, 1fr));`,
+        }, ...children)
+
+        const toolbar = h('div', { class: 'block-table-toolbar' },
+            h('button', {
+                class: 'block-table-add', type: 'button',
+                onmousedown: (event) => event.preventDefault(),
+                onclick: () => applyTable(tableAddRow(grid), { r: grid.length, c: 0 }),
+            }, tablerIcon('plus', { size: 13 }), h('span', {}, t('ticket.block.table.addRow'))),
+            h('button', {
+                class: 'block-table-add', type: 'button',
+                onmousedown: (event) => event.preventDefault(),
+                onclick: () => applyTable(tableAddColumn(grid), { r: 0, c: cols }),
+            }, tablerIcon('plus', { size: 13 }), h('span', {}, t('ticket.block.table.addColumn'))),
+            h('span', { class: 'block-table-hint label-sm' }, t('ticket.block.table.hint')),
+        )
+
+        // Restore focus after a (structural) re-render. If focus already sits in
+        // the grid, leave it — an unrelated re-render must not steal the caret.
+        queueMicrotask(() => {
+            if (wrap.contains(main.ownerDocument.activeElement)) return
+            const f = ui.blockTableFocus
+            const target = (f && wrap.querySelector(`[data-cell="${f.r},${f.c}"]`)) || wrap.querySelector('.block-table-cell')
+            if (!target) return
+            target.focus()
+            const off = (f && Number.isInteger(f.offset)) ? Math.min(f.offset, target.value.length) : target.value.length
+            try { target.setSelectionRange(off, off) } catch { /* ignore */ }
+        })
+
+        wrap.append(gridEl, toolbar)
+        return wrap
+    }
+
     function renderBlockEditor(item, block) {
         if (block.type === 'markdown' || block.type === 'callout') return renderRichBlockEditor(item, block)
         if (block.type === 'heading') return renderHeadingEditor(item, block)
         if (block.type === 'divider') return h('hr', { class: 'block-divider', 'aria-hidden': 'true' })
+        if (block.type === 'table') return renderTableBlockEditor(item, block)
         const t = locale.i18n.t.bind(locale.i18n)
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
         // Markdown blocks get an inline "/" command menu, toggled purely via
@@ -3512,7 +3689,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (menu) menu.classList.add('block-slash-inline', ui.blockDraft === '/' ? 'open' : 'hidden')
         const ta = h('textarea', {
             class: 'block-editor',
-            rows: (block.type === 'markdown' || block.type === 'code' || block.type === 'callout' || block.type === 'table') ? '4' : '3',
+            rows: (block.type === 'markdown' || block.type === 'code' || block.type === 'callout') ? '4' : '3',
             placeholder,
             oninput: (event) => {
                 ui.blockDraft = event.target.value

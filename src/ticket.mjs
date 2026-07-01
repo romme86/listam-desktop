@@ -24,6 +24,11 @@ import {
     createBlock,
     blockToText,
     blockFromText,
+    normalizeTableRows,
+    tableAddRow,
+    tableAddColumn,
+    tableRemoveRow,
+    tableRemoveColumn,
 } from '@listam/domain/board'
 import {
     markdownToHtml,
@@ -52,6 +57,11 @@ export {
     createBlock,
     blockToText,
     blockFromText,
+    normalizeTableRows,
+    tableAddRow,
+    tableAddColumn,
+    tableRemoveRow,
+    tableRemoveColumn,
 }
 
 export function selectBoardConfig (state) {
