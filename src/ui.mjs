@@ -2643,6 +2643,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 : null,
             h('div', { class: 'row-actions' },
                 h('button', {
+                    class: 'row-delete',
+                    'aria-label': t('main.item.details'),
+                    title: `${t('main.item.details')} (I)`,
+                    onclick: (event) => {
+                        event.stopPropagation()
+                        ui.focusedItemId = item.id
+                        actions.openInspector(item.id)
+                    },
+                }, tablerIcon('info-circle', { size: 14 })),
+                h('button', {
                     class: `row-flag${planned ? ' flagged' : ''}`,
                     'aria-label': planned ? t('plan.inPlan') : t('plan.flag'),
                     title: planned ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
@@ -3095,7 +3105,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // value; otherwise switching tickets would inherit the prior ticket's title.
         if (prev && main.ownerDocument.activeElement === prev) {
             el.value = prev.value
-            queueMicrotask(() => { el.focus(); const p = el.value.length; try { el.setSelectionRange(p, p) } catch { /* number/date inputs reject */ } })
+            // Preserve the caret/selection across the re-render (a live-syncing
+            // background render must not jump the caret to the end mid-edit).
+            const selStart = prev.selectionStart, selEnd = prev.selectionEnd
+            queueMicrotask(() => {
+                el.focus()
+                const end = el.value.length
+                try { el.setSelectionRange(selStart == null ? end : selStart, selEnd == null ? end : selEnd) } catch { /* number/date inputs reject */ }
+            })
         }
         return el
     }
@@ -3835,7 +3852,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const bs = state.peerCount > 0 ? 'live' : 'local'
         return h('aside', { class: 'item-inspector' },
             h('div', { class: 'inspector-head' },
-                h('span', { class: 'inspector-title title-lg', title: item.text }, item.text),
+                editableText({
+                    id: 'insp-title',
+                    value: item.text || '',
+                    placeholder: t('main.item.editPlaceholder'),
+                    className: 'inspector-title-field title-lg',
+                    onCommit: (v) => actions.editItem(item, v),
+                }),
                 h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeInspector() }, tablerIcon('x', { size: 16 })),
             ),
             h('div', { class: 'inspector-body' },
@@ -3844,7 +3867,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         h('span', { class: `dot ${bs}` }),
                         h('span', {}, state.peerCount === 0 ? t('desktop.peers.none') : t('desktop.peers.connected', { count: state.peerCount })),
                     )),
-                sectionBlock('inspector.quantity', quantityInput),
+                isGrocery ? sectionBlock('inspector.quantity', quantityInput) : null,
                 sectionBlock('inspector.note', noteInput),
                 isValueItem(item)
                     ? sectionBlock('inspector.value',
@@ -5507,14 +5530,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         migrateBuiltinGroups()
         // Materialize the mandated default "general" group once we're writable.
         maybeEnsureGeneralGroup()
+        // If a field inside the drawer/inspector holds focus (editing the title,
+        // note, etc.), don't let the row focus-restore below yank focus (and the
+        // scroll position) back to the list row on a background re-render.
+        const keepDrawerFocus = drawerHost.contains(main.ownerDocument.activeElement)
         renderNav(state)
         renderMain(state)
         renderDrawerHost(state)
         renderHints(state)
         renderDialog(state)
         renderNotices(state)
-        if (ui.focusedItemId && !ui.editingItemId) {
-            root.querySelector(`[data-item-id="${CSS.escape(ui.focusedItemId)}"]`)?.focus?.()
+        if (ui.focusedItemId && !ui.editingItemId && !keepDrawerFocus) {
+            // preventScroll: re-rendering the list must never scroll it.
+            root.querySelector(`[data-item-id="${CSS.escape(ui.focusedItemId)}"]`)?.focus?.({ preventScroll: true })
         }
         // Snapshot for the next render's motion diff (rowAnimationClass).
         prevItems = new Map(state.items.map((item) => [item.id, { isDone: !!item.isDone, text: item.text }]))

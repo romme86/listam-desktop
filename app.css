@@ -1143,6 +1143,13 @@ html.board-drawer-open { overflow: hidden; }
     padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); flex-shrink: 0;
 }
 .inspector-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The title doubles as the rename field: looks like plain title text until focused. */
+.inspector-title-field {
+    min-width: 0; flex: 1; border: 0; background: transparent; color: var(--ink);
+    padding: 0.15rem 0.3rem; margin: -0.15rem -0.3rem; border-radius: var(--r-field);
+}
+.inspector-title-field:hover { background: var(--surface-2); }
+.inspector-title-field:focus { outline: none; background: var(--card); box-shadow: inset 0 0 0 2px var(--ink); }
 .inspector-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 1.25rem; display: flex; flex-direction: column; gap: 1.5rem; }
 .inspector-section { display: flex; flex-direction: column; gap: 0.5rem; }
 .inspector-note { resize: vertical; min-height: 3rem; font-family: var(--font-sans); }
