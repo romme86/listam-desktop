@@ -1384,7 +1384,7 @@ html.board-drawer-open { overflow: hidden; }
 .plan-viewtoggle .seg.active, .segmented .seg.active { background: var(--ink-block); color: var(--signal); }
 /* Many-option pickers (e.g. Language) wrap to multiple rows: a stadium radius on
    a tall box looks bad, so this variant is a clean rounded rectangle with gaps. */
-.segmented-wrap { border-radius: var(--r-row); gap: 3px; }
+.segmented-wrap { border-radius: var(--r-row); gap: 4px; padding: 8px; }
 
 /* Settings dialog rhythm: headings align flush with their controls (no indent),
    and a consistent gap sits above each heading regardless of the control before
