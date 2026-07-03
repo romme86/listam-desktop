@@ -426,6 +426,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // task added post-creation never collides with a creation-time `task-N-…` id.
     let taskIdSeq = 0
     const nextTaskId = () => `task-${now()}-${taskIdSeq++}`
+    // First text-bearing block of a body — used to re-seed a folded description
+    // for the rigor gate when a ticket moves (see moveItem/foldLegacyText).
+    const ticketDescriptionFromBlocks = (blocks) => {
+        const hit = (Array.isArray(blocks) ? blocks : []).find((b) => b && typeof b.text === 'string' && b.text.trim())
+        return hit ? hit.text.trim() : ''
+    }
     // List/group ids double as the registry meta-item's id; clock + counter keeps
     // them unique across a session without coordinating with peers.
     let registryIdSeq = 0
@@ -1070,9 +1076,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         moveItem(item, targetListId, targetType) {
             if (!item) return
             if (item.listId === targetListId && surfaceForType(item.listType) === surfaceForType(targetType)) return
+            let payload = item
             if (isBoardType(targetType)) {
+                // The description may have been folded into the block body
+                // (foldLegacyText). Every peer's rigor gate still checks the
+                // plain description string — making the shared gate blocks-
+                // aware would diverge apply() across builds (the board-rename
+                // lesson) — so re-seed it write-side from the first text-
+                // bearing block; the fold's duplicate guard clears it again on
+                // the next open without doubling content.
+                const description = (typeof item.description === 'string' && item.description.trim())
+                    ? item.description
+                    : ticketDescriptionFromBlocks(item.blocks)
+                if (description !== (item.description || '')) payload = { ...item, description }
                 const config = selectBoardConfig(store.getState())
-                const candidate = { text: item.text, description: item.description, checklist: item.checklist, estimatedHours: item.estimatedHours, estimatedComplexity: item.estimatedComplexity }
+                const candidate = { text: item.text, description, checklist: item.checklist, estimatedHours: item.estimatedHours, estimatedComplexity: item.estimatedComplexity }
                 if (config.rigorOn && validateRigorDraft(candidate, config).missing.length > 0) {
                     const tasks = (Array.isArray(item.checklist) && item.checklist.length) ? item.checklist.map((task) => task.text) : ['']
                     openDialog({
@@ -1080,7 +1098,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         moveFrom: item,
                         targetListId,
                         draft: {
-                            description: item.description || item.text || '',
+                            description: description || item.text || '',
                             tasks,
                             hours: item.estimatedHours ? String(item.estimatedHours) : '',
                             complexity: Number.isFinite(item.estimatedComplexity) ? item.estimatedComplexity : 50,
@@ -1090,7 +1108,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 }
             }
             markLocalId(item.id)
-            send(RPC_MOVE, { item, targetListId, targetListType: isBoardType(targetType) ? BOARD_WRITE_TYPE : targetType })
+            send(RPC_MOVE, { item: payload, targetListId, targetListType: isBoardType(targetType) ? BOARD_WRITE_TYPE : targetType })
         },
         clearDone() {
             const onSurface = ui.view === 'todo' ? isTodoItem : isGroceryItem
@@ -1223,9 +1241,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             if (!item) return
             selectSurface(store.getState(), { listId: item.listId, type: canonicalSurfaceType(item.listType) })
             if (isBoardType(item.listType)) {
+                const changed = ui.selectedTicketId !== item.id
                 ui.selectedTicketId = item.id
                 ui.ticketDocId = null
-                actions.foldLegacyText(item, 'description')
+                if (changed) actions.foldLegacyText(item, 'description')
             }
             renderAll()
         },
@@ -1238,9 +1257,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         foldLegacyText(item, field) {
             const text = typeof item[field] === 'string' ? item[field].trim() : ''
             if (!text) return
-            const block = { ...createBlock('markdown', nextBlockId()), ...blockFromText('markdown', text) }
+            // Keep the raw blocks array (not normalizeBlocks): merely opening
+            // an item must never strip block types a newer peer wrote that
+            // this build doesn't know yet.
+            const blocks = (Array.isArray(item.blocks) ? item.blocks : []).filter((b) => b && typeof b === 'object')
+            // Idempotence: when the text already sits in a block verbatim
+            // (e.g. moveItem re-seeded the description from the body for the
+            // rigor gate), just clear the field instead of doubling content.
+            const dup = blocks.some((b) => typeof b.text === 'string' && b.text.trim() === text)
+            const next = dup ? blocks : [{ ...createBlock('markdown', nextBlockId()), ...blockFromText('markdown', text) }, ...blocks]
             markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, [field]: '', blocks: [block, ...normalizeBlocks(item.blocks)], updatedAt: now() } })
+            send(RPC_UPDATE, { item: { ...item, [field]: '', blocks: next, updatedAt: now() } })
         },
         commitBlocks(item, blocks) {
             const current = normalizeBlocks(item.blocks)
