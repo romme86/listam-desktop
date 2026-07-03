@@ -1170,6 +1170,9 @@ html.board-drawer-open { overflow: hidden; }
     padding: 0.35rem 0; cursor: pointer; text-align: left; letter-spacing: 0.05em;
 }
 .block-addhint:hover { color: var(--ink); }
+/* The inspector body fills the drawer so any empty-space click starts a text
+   block (cursor: text signals it); children keep their own cursors. */
+.ticket-body.inspector-variant { flex: 1; cursor: text; }
 .inspector-empty { display: flex; flex-direction: column; gap: 0.7rem; align-items: flex-start; }
 .inspector-empty-hint {
     border: 0; background: transparent; color: var(--ink-faint);
@@ -1255,31 +1258,27 @@ html.board-drawer-open { overflow: hidden; }
 .block-hint { color: var(--ink-faint); }
 .ticket-blocks { display: flex; flex-direction: column; gap: 0.1rem; }
 
+/* Blocks are quiet: no hover/editing highlight, content flush left. The
+   six-dot handle floats in the container's left padding on hover only, so it
+   never indents or reflows the content; all block actions live in its menu. */
 .block {
     position: relative;
-    display: grid;
-    grid-template-columns: 34px minmax(0, 1fr) 28px;
-    align-items: start;
     border-radius: var(--r-field);
-    transition: background var(--t-fast) var(--ease);
 }
-.block:hover { background: var(--surface-1); }
-.block.editing { background: var(--surface-1); }
 .block.block-drop { box-shadow: inset 0 2px 0 var(--signal); }
 .block.block-dragging { opacity: 0.4; }
-.block-gutter { display: flex; gap: 1px; align-items: center; padding-top: 0.35rem; opacity: 0; transition: opacity var(--t-fast) var(--ease); }
-.block:hover .block-gutter, .block:focus-within .block-gutter, .block.editing .block-gutter { opacity: 1; }
-.block.editing .block-plus, .block:focus-within .block-plus { background: var(--signal); color: var(--on-signal); }
-.block-handle, .block-plus, .block-delete {
+.block-handle {
+    position: absolute; left: -1.25rem; top: 0.25rem;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 22px; height: 22px; border-radius: var(--r-field); color: var(--ink-faint);
+    width: 1.15rem; height: 1.15rem; padding: 0; border: 0; background: transparent;
+    border-radius: var(--r-field); color: var(--ink-faint);
+    opacity: 0; transition: opacity var(--t-fast) var(--ease);
+    cursor: grab;
 }
-.block-handle { cursor: grab; }
+.block:hover .block-handle { opacity: 1; }
 .block-handle:active { cursor: grabbing; }
-.block-handle:hover, .block-plus:hover, .block-delete:hover { background: var(--surface-3); color: var(--ink-mute); }
-.block-delete { align-self: start; margin-top: 0.35rem; opacity: 0; transition: opacity var(--t-fast) var(--ease); }
-.block:hover .block-delete, .block:focus-within .block-delete { opacity: 1; }
-.block-content { min-width: 0; padding: 0.3rem 0.25rem; font-size: 0.95rem; color: var(--ink); }
+.block-handle:hover { background: var(--surface-2); color: var(--ink); }
+.block-content { min-width: 0; padding: 0.3rem 0; font-size: 0.95rem; color: var(--ink); }
 
 /* Block content views */
 .block-md { line-height: 1.5; cursor: text; white-space: pre-wrap; word-break: break-word; }
@@ -1305,7 +1304,7 @@ html.board-drawer-open { overflow: hidden; }
 .block-heading-input:focus { outline: none; }
 .heading-level { flex-shrink: 0; }
 .heading-level .seg { padding: 0.2rem 0.55rem; }
-.block-callout { display: flex; gap: 0.6rem; background: var(--surface-2); border-left: 3px solid var(--signal); border-radius: var(--r-field); padding: 0.6rem 0.8rem; cursor: text; }
+.block-content .block-callout { display: flex; gap: 0.6rem; background: var(--surface-2); border-left: 3px solid var(--signal); border-radius: var(--r-field); padding: 0.6rem 0.8rem; cursor: text; }
 .block-callout > svg { color: var(--ink-mute); flex-shrink: 0; margin-top: 2px; }
 .block-code { font-family: var(--font-mono); font-size: 0.82rem; background: var(--surface-2); border-radius: var(--r-field); padding: 0.7rem 0.9rem; overflow-x: auto; white-space: pre; cursor: text; margin: 0; }
 .block-checklist, .block-numbered, .block-links { margin: 0; display: flex; flex-direction: column; gap: 0.25rem; }
@@ -1353,12 +1352,14 @@ html.board-drawer-open { overflow: hidden; }
 
 /* Block editor */
 .block-editor-wrap { position: relative; }
+/* Editing is seamless: no box, no border, no background — the caret is the
+   only signal, and the text sits exactly where the view rendered it. */
 .block-editor {
-    width: 100%; border: 0; border-radius: var(--r-field); background: var(--card);
-    box-shadow: inset 0 0 0 1px var(--line); padding: 0.5rem 0.7rem; font: inherit;
+    width: 100%; border: 0; border-radius: 0; background: transparent;
+    box-shadow: none; padding: 0; font: inherit;
     font-size: 0.95rem; color: var(--ink); resize: vertical; line-height: 1.5;
 }
-.block-editor:focus { outline: none; box-shadow: inset 0 0 0 2px var(--ink); }
+.block-editor:focus { outline: none; box-shadow: none; }
 .block-code .block-editor { font-family: var(--font-mono); font-size: 0.85rem; }
 
 /* WYSIWYG (contentEditable) markdown + callout editor. Shares .block-md so the
@@ -1367,8 +1368,9 @@ html.board-drawer-open { overflow: hidden; }
 .block-rich p { margin: 0; }
 .block-rich p:empty::after { content: "\200b"; } /* keep empty lines selectable */
 .block-rich.block-editor { white-space: pre-wrap; cursor: text; min-height: 1.6em; }
-.block-rich.block-editor:focus { outline: none; box-shadow: inset 0 0 0 2px var(--ink); }
-.block-rich-callout.block-editor { box-shadow: inset 0 0 0 1px var(--line); border-left: 3px solid var(--signal); background: var(--surface-2); }
+.block-rich.block-editor:focus { outline: none; box-shadow: none; }
+/* The callout editor keeps only the callout's own visual identity. */
+.block-rich-callout.block-editor { border-left: 3px solid var(--signal); background: var(--surface-2); border-radius: var(--r-field); padding: 0.6rem 0.8rem; }
 .block-rich.is-empty::before {
     content: attr(data-placeholder); color: var(--ink-faint); font-style: italic;
     pointer-events: none; position: absolute; padding: inherit;

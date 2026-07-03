@@ -3800,12 +3800,36 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return h('div', { class: 'block-editor-wrap' }, ta, menu)
     }
 
+    // Options menu behind the six-dot handle: turn into, insert below, delete.
+    // Turn-into and insert re-anchor the slash menu in the matching mode.
+    function renderBlockOpsMenu(item, block) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const op = (icon, label, onclick) => h('button', {
+            class: 'slash-item',
+            type: 'button',
+            role: 'menuitem',
+            onmousedown: (event) => event.preventDefault(),
+            onclick,
+        }, tablerIcon(icon, { size: 15 }), h('span', { class: 'label-md' }, label))
+        return h('div', { class: 'block-slash-menu', role: 'menu' },
+            op('switch-horizontal', t('ticket.block.turnInto'), () => actions.openBlockMenu({ mode: 'turn', blockId: block.id })),
+            op('plus', t('ticket.block.insert'), () => actions.openBlockMenu({ mode: 'after', blockId: block.id })),
+            op('trash', t('ticket.block.delete'), () => actions.deleteBlock(item, block.id)),
+        )
+    }
+
     function renderBlock(item, block) {
         const t = locale.i18n.t.bind(locale.i18n)
         const editing = ui.blockEditingId === block.id
-        const afterMenu = (!editing && ui.blockMenu && ui.blockMenu.mode === 'after' && ui.blockMenu.blockId === block.id)
-            ? h('div', { class: 'block-menu-anchor' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, ui.blockMenu))
-            : null
+        const anchoredMenu = () => {
+            if (editing || !ui.blockMenu || ui.blockMenu.blockId !== block.id) return null
+            const menu = ui.blockMenu.mode === 'ops' ? renderBlockOpsMenu(item, block)
+                : ui.blockMenu.mode === 'turn' ? renderSlashMenu(item, { mode: 'replace', blockId: block.id })
+                    : ui.blockMenu.mode === 'after' ? renderSlashMenu(item, ui.blockMenu)
+                        : null
+            if (!menu) return null
+            return h('div', { class: 'block-menu-anchor' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), menu)
+        }
         const row = h('div', {
             class: `block block-${block.type}${editing ? ' editing' : ''}`,
             dataset: { blockId: block.id },
@@ -3819,36 +3843,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 if (drag) actions.moveBlock(item, drag.id, block.id)
             },
         },
-            h('div', { class: 'block-gutter' },
-                h('button', {
-                    class: 'block-handle',
-                    type: 'button',
-                    draggable: 'true',
-                    'aria-label': t('ticket.block.move'),
-                    ondragstart: (event) => {
-                        ui.blockDrag = { id: block.id }
-                        event.dataTransfer.effectAllowed = 'move'
-                        try { event.dataTransfer.setData('text/plain', block.id) } catch { /* some platforms reject */ }
-                        row.classList.add('block-dragging')
-                    },
-                    ondragend: () => { ui.blockDrag = null; row.classList.remove('block-dragging') },
-                }, tablerIcon('grip-vertical', { size: 15 })),
-                h('button', {
-                    class: 'block-plus',
-                    type: 'button',
-                    'aria-label': t('ticket.block.insert'),
-                    title: t('ticket.block.insert'),
-                    onclick: () => actions.openBlockMenu({ mode: 'after', blockId: block.id }),
-                }, tablerIcon('plus', { size: 15 })),
-            ),
-            h('div', { class: 'block-content' }, editing ? renderBlockEditor(item, block) : renderBlockView(item, block)),
-            h('button', {
-                class: 'block-delete',
+            // Floating six-dot handle: hover-only, absolutely positioned into
+            // the container padding so it never indents the content. Click
+            // opens the options menu; drag reorders. Hidden while editing.
+            editing ? null : h('button', {
+                class: 'block-handle',
                 type: 'button',
-                'aria-label': t('ticket.block.delete'),
-                onclick: () => actions.deleteBlock(item, block.id),
-            }, tablerIcon('trash', { size: 14 })),
-            afterMenu,
+                draggable: 'true',
+                'aria-label': t('ticket.block.options'),
+                title: t('ticket.block.options'),
+                onclick: () => actions.openBlockMenu({ mode: 'ops', blockId: block.id }),
+                ondragstart: (event) => {
+                    ui.blockDrag = { id: block.id }
+                    event.dataTransfer.effectAllowed = 'move'
+                    try { event.dataTransfer.setData('text/plain', block.id) } catch { /* some platforms reject */ }
+                    row.classList.add('block-dragging')
+                },
+                ondragend: () => { ui.blockDrag = null; row.classList.remove('block-dragging') },
+            }, tablerIcon('grip-vertical', { size: 14 })),
+            h('div', { class: 'block-content' }, editing ? renderBlockEditor(item, block) : renderBlockView(item, block)),
+            anchoredMenu(),
         )
         return row
     }
@@ -3865,7 +3879,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (legacy) {
             const md = h('div', { class: 'block-md block-rich' })
             md.innerHTML = markdownToHtml(legacy)
-            legacyRow = h('div', { class: 'block' }, h('div', { class: 'block-gutter' }), h('div', { class: 'block-content' }, md))
+            legacyRow = h('div', { class: 'block' }, h('div', { class: 'block-content' }, md))
         }
         const endMenu = addMenuOpen
             ? h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, { mode: 'end' }))
@@ -3876,11 +3890,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             // empty-button + add-button pair; a fresh item invites plain text
             // with ghost chips for the common block types.
             const empty = blocks.length === 0 && !legacy
-            return h('section', { class: 'ticket-body inspector-variant' },
+            // Clicking empty body space starts writing: text is the default
+            // block. Reuse a trailing empty text block instead of stacking new
+            // ones; a click mid-edit just commits (the blur already did).
+            const appendTextBlock = () => {
+                if (ui.blockEditingId) return
+                const last = blocks[blocks.length - 1]
+                if (last && last.type === 'markdown' && !(last.text || '').trim()) { actions.startBlockEdit(item, last); return }
+                actions.insertBlock(item, 'markdown')
+            }
+            return h('section', {
+                class: 'ticket-body inspector-variant',
+                onclick: (event) => {
+                    const el = event.target
+                    if (el === event.currentTarget || (el instanceof HTMLElement && el.classList.contains('ticket-blocks'))) appendTextBlock()
+                },
+            },
                 legacyRow,
                 empty
                     ? h('div', { class: 'inspector-empty' },
-                        h('button', { class: 'inspector-empty-hint', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, t('inspector.emptyHint')),
+                        h('button', { class: 'inspector-empty-hint', type: 'button', onclick: () => appendTextBlock() }, t('inspector.emptyHint')),
                         h('div', { class: 'inspector-empty-chips' },
                             ...['checklist', 'markdown', 'table', 'code'].map((type) => {
                                 const spec = BLOCK_TYPES.find((bt) => bt.type === type)
