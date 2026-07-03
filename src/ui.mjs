@@ -1142,11 +1142,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Card click -> right drawer that slides in over the right half of the
         // screen (the board stays full-width and visible underneath).
         openTicket(id) {
+            const changed = ui.selectedTicketId !== id
             ui.selectedTicketId = id
             ui.ticketDocId = null
             ui.blockEditingId = null
             ui.blockMenu = null
             ui.view = 'board'
+            // Fold only on a genuine open (not a re-click of the already-open
+            // card) so a second click before the fold echo returns can't re-read
+            // the still-set description and fold it twice.
+            const item = changed ? store.getState().items.find((entry) => entry && entry.id === id) : null
+            if (item) actions.foldLegacyText(item, 'description')
             renderAll()
         },
         promoteTicket(id) {
@@ -1176,15 +1182,41 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
         },
-        // Generic LWW field patch for a list item (quantity/note from the
+        // Generic LWW field patch for a list item (quantity from the
         // Inspector). The reducer spreads ...item so new optional fields round-trip.
         setItemFields(item, patch) {
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, ...patch, updatedAt: now() } })
         },
-        openInspector(id) { ui.inspectorItemId = id; renderAll() },
-        closeInspector() { ui.inspectorItemId = null; renderAll() },
-        toggleInspector(id) { ui.inspectorItemId = ui.inspectorItemId === id ? null : id; renderAll() },
+        openInspector(id) {
+            const changed = ui.inspectorItemId !== id
+            if (changed) {
+                // Switching items: the previous block editor's blur has already
+                // committed; just drop the stale edit/menu state.
+                ui.blockEditingId = null
+                ui.blockDraft = ''
+                seedTableDraft(null)
+                ui.blockMenu = null
+            }
+            ui.inspectorItemId = id
+            // Fold only on a genuine open (see openTicket) so a re-click before
+            // the fold echo returns can't fold the same note twice.
+            const item = changed ? store.getState().items.find((entry) => entry && entry.id === id) : null
+            if (item) actions.foldLegacyText(item, 'note')
+            renderAll()
+        },
+        closeInspector() {
+            ui.inspectorItemId = null
+            ui.blockEditingId = null
+            ui.blockDraft = ''
+            seedTableDraft(null)
+            ui.blockMenu = null
+            renderAll()
+        },
+        toggleInspector(id) {
+            if (ui.inspectorItemId === id) actions.closeInspector()
+            else actions.openInspector(id)
+        },
         // Open a plan-row item from the Overview: navigate to its source surface
         // and, for a board ticket, open its detail drawer.
         openPlanItem(item) {
@@ -1193,10 +1225,23 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             if (isBoardType(item.listType)) {
                 ui.selectedTicketId = item.id
                 ui.ticketDocId = null
+                actions.foldLegacyText(item, 'description')
             }
             renderAll()
         },
         // --- block-based body --------------------------------------------
+        // Fold legacy free-text (item `note`, ticket `description`) into a
+        // leading markdown block when a detail surface opens. Continuous
+        // dual-read: text an older build or another platform writes into the
+        // legacy field surfaces as a block on the next open here, and the
+        // field is cleared in the same LWW write so it never folds twice.
+        foldLegacyText(item, field) {
+            const text = typeof item[field] === 'string' ? item[field].trim() : ''
+            if (!text) return
+            const block = { ...createBlock('markdown', nextBlockId()), ...blockFromText('markdown', text) }
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item: { ...item, [field]: '', blocks: [block, ...normalizeBlocks(item.blocks)], updatedAt: now() } })
+        },
         commitBlocks(item, blocks) {
             const current = normalizeBlocks(item.blocks)
             if (JSON.stringify(current) === JSON.stringify(blocks)) {
@@ -3146,14 +3191,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 className: 'ticket-title-field',
                 onCommit: (v) => { const nv = v.trim(); if (nv && nv !== item.text) actions.updateTicket(item, { text: nv }) },
             }),
-            editableText({
-                id: 'tf-desc',
-                value: item.description || '',
-                placeholder: t('ticket.detail.descriptionPlaceholder'),
-                multiline: true,
-                className: 'ticket-desc-field',
-                onCommit: (v) => { if (v !== (item.description || '')) actions.updateTicket(item, { description: v }) },
-            }),
+            // The free-text description now lives in the block body: it is
+            // folded into the first markdown block on open (foldLegacyText),
+            // so the summary keeps only the structured bits.
             meta.length ? h('div', { class: 'ticket-summary-meta label-sm' }, ...meta) : null,
             h('div', { class: 'ticket-summary-tasks' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
@@ -3786,17 +3826,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return row
     }
 
-    function renderTicketBody(item) {
+    function renderTicketBody(item, { legacyField = 'description' } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const blocks = normalizeBlocks(item.blocks)
         const addMenuOpen = !!(ui.blockMenu && ui.blockMenu.mode === 'end')
+        // Legacy free-text not yet folded into blocks (fold echo pending, or
+        // this peer isn't writable yet): keep it visible read-only so removing
+        // the old field's UI never hides data.
+        const legacy = typeof item[legacyField] === 'string' ? item[legacyField].trim() : ''
+        let legacyRow = null
+        if (legacy) {
+            const md = h('div', { class: 'block-md block-rich' })
+            md.innerHTML = markdownToHtml(legacy)
+            legacyRow = h('div', { class: 'block' }, h('div', { class: 'block-gutter' }), h('div', { class: 'block-content' }, md))
+        }
         return h('section', { class: 'ticket-body' },
             h('div', { class: 'ticket-body-head' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.body')),
                 blocks.length ? h('span', { class: 'block-hint label-sm' }, `${t('ticket.block.editHint')} · ${t('ticket.block.slashHint')}`) : null,
             ),
+            legacyRow,
             blocks.length === 0
-                ? h('button', { class: 'block-empty', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 16 }), t('ticket.block.empty'))
+                ? (legacy ? null : h('button', { class: 'block-empty', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 16 }), t('ticket.block.empty')))
                 : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
             h('div', { class: 'block-add-row' },
                 h('button', { class: 'block-add', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 14 }), t('ticket.block.add')),
@@ -3825,8 +3876,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // Non-modal right-side Inspector for a grocery/todo item (toggle I). Reuses
-    // the drawer slide-in but narrower; the list stays clickable. Sections are
-    // the ones buildable today; quantity/note are new optional LWW fields.
+    // the drawer slide-in but narrower; the list stays clickable. Free-form
+    // detail is the shared block body (same system as board tickets); legacy
+    // `note` text folds into the first markdown block via foldLegacyText.
     function renderItemInspector(item, state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const isGrocery = !isBoardType(item.listType) && !isTodoType(item.listType)
@@ -3840,12 +3892,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         quantityInput.addEventListener('change', () => {
             const v = quantityInput.value.trim()
             if (v !== (item.quantity || '')) actions.setItemFields(item, { quantity: v })
-        })
-        const noteInput = h('textarea', { class: 'input inspector-note', rows: '3', placeholder: t('inspector.notePlaceholder') })
-        noteInput.value = item.note || ''
-        noteInput.addEventListener('change', () => {
-            const v = noteInput.value.trim()
-            if (v !== (item.note || '')) actions.setItemFields(item, { note: v })
         })
         const sectionBlock = (labelKey, ...children) => h('div', { class: 'inspector-section' },
             h('h3', { class: 'category-heading label-sm' }, t(labelKey)), ...children)
@@ -3868,7 +3914,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         h('span', {}, state.peerCount === 0 ? t('desktop.peers.none') : t('desktop.peers.connected', { count: state.peerCount })),
                     )),
                 isGrocery ? sectionBlock('inspector.quantity', quantityInput) : null,
-                sectionBlock('inspector.note', noteInput),
                 isValueItem(item)
                     ? sectionBlock('inspector.value',
                         h('div', { class: 'inspector-value' },
@@ -3877,6 +3922,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         ))
                     : null,
                 isGrocery && categoryName ? sectionBlock('inspector.category', h('span', { class: 'category-pill label-sm' }, categoryName)) : null,
+                renderTicketBody(item, { legacyField: 'note' }),
                 item.updatedAt > 1e12 ? h('p', { class: 'inspector-edited label-sm' }, t('inspector.edited', { time: relativeTime(now() - item.updatedAt) })) : null,
             ),
         )
