@@ -3853,7 +3853,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         return row
     }
 
-    function renderTicketBody(item, { legacyField = 'description' } = {}) {
+    function renderTicketBody(item, { legacyField = 'description', variant = 'drawer' } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const blocks = normalizeBlocks(item.blocks)
         const addMenuOpen = !!(ui.blockMenu && ui.blockMenu.mode === 'end')
@@ -3867,6 +3867,35 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             md.innerHTML = markdownToHtml(legacy)
             legacyRow = h('div', { class: 'block' }, h('div', { class: 'block-gutter' }), h('div', { class: 'block-content' }, md))
         }
+        const endMenu = addMenuOpen
+            ? h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, { mode: 'end' }))
+            : null
+        if (variant === 'inspector') {
+            // Inspector anatomy (Option B mockup): no section head — blocks
+            // start right under the title; one inline add hint instead of the
+            // empty-button + add-button pair; a fresh item invites plain text
+            // with ghost chips for the common block types.
+            const empty = blocks.length === 0 && !legacy
+            return h('section', { class: 'ticket-body inspector-variant' },
+                legacyRow,
+                empty
+                    ? h('div', { class: 'inspector-empty' },
+                        h('button', { class: 'inspector-empty-hint', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, t('inspector.emptyHint')),
+                        h('div', { class: 'inspector-empty-chips' },
+                            ...['checklist', 'markdown', 'table', 'code'].map((type) => {
+                                const spec = BLOCK_TYPES.find((bt) => bt.type === type)
+                                if (!spec) return null
+                                return h('button', { class: 'ghost-chip label-sm', type: 'button', onclick: () => actions.insertBlock(item, type) }, tablerIcon(spec.icon, { size: 12 }), t(spec.labelKey))
+                            }),
+                        ),
+                    )
+                    : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
+                h('div', { class: 'block-add-row' },
+                    empty ? null : h('button', { class: 'block-addhint label-md', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, `+ ${t('inspector.addHint')}`),
+                    endMenu,
+                ),
+            )
+        }
         return h('section', { class: 'ticket-body' },
             h('div', { class: 'ticket-body-head' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.body')),
@@ -3878,7 +3907,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
             h('div', { class: 'block-add-row' },
                 h('button', { class: 'block-add', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, tablerIcon('plus', { size: 14 }), t('ticket.block.add')),
-                addMenuOpen ? h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, { mode: 'end' })) : null,
+                endMenu,
             ),
         )
     }
@@ -3925,6 +3954,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const bs = state.peerCount > 0 ? 'live' : 'local'
         return h('aside', { class: 'item-inspector' },
             h('div', { class: 'inspector-head' },
+                h('div', { class: 'inspector-kicker-row' },
+                    h('span', { class: 'inspector-kicker label-sm' }, `${t('inspector.kicker')} · ${isGrocery ? t('desktop.rail.groceries') : t('desktop.rail.todo')}`),
+                    h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeInspector() }, tablerIcon('x', { size: 16 })),
+                ),
                 editableText({
                     id: 'insp-title',
                     value: item.text || '',
@@ -3932,14 +3965,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     className: 'inspector-title-field title-lg',
                     onCommit: (v) => actions.editItem(item, v),
                 }),
-                h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeInspector() }, tablerIcon('x', { size: 16 })),
             ),
             h('div', { class: 'inspector-body' },
-                sectionBlock('inspector.status',
-                    h('div', { class: 'summary-bar label-md', style: 'margin: 0;' },
-                        h('span', { class: `dot ${bs}` }),
-                        h('span', {}, state.peerCount === 0 ? t('desktop.peers.none') : t('desktop.peers.connected', { count: state.peerCount })),
-                    )),
                 isGrocery ? sectionBlock('inspector.quantity', quantityInput) : null,
                 isValueItem(item)
                     ? sectionBlock('inspector.value',
@@ -3949,8 +3976,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         ))
                     : null,
                 isGrocery && categoryName ? sectionBlock('inspector.category', h('span', { class: 'category-pill label-sm' }, categoryName)) : null,
-                renderTicketBody(item, { legacyField: 'note' }),
-                item.updatedAt > 1e12 ? h('p', { class: 'inspector-edited label-sm' }, t('inspector.edited', { time: relativeTime(now() - item.updatedAt) })) : null,
+                renderTicketBody(item, { legacyField: 'note', variant: 'inspector' }),
+            ),
+            // Mockup footer: edited-time on the left, live sync beacon on the
+            // right (replaces the old STATUS section at the top).
+            h('div', { class: 'inspector-foot label-sm' },
+                h('span', {}, item.updatedAt > 1e12 ? t('inspector.edited', { time: relativeTime(now() - item.updatedAt) }) : ''),
+                h('span', { class: 'inspector-foot-status' },
+                    h('span', { class: `dot ${bs}` }),
+                    h('span', {}, state.peerCount > 0 ? t('header.status.synced', { count: state.peerCount }) : t('header.status.online')),
+                ),
             ),
         )
     }

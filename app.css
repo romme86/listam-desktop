@@ -1139,9 +1139,11 @@ html.board-drawer-open { overflow: hidden; }
 }
 @media (max-width: 920px) { .item-inspector { width: 100vw; } }
 .inspector-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-    padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); flex-shrink: 0;
+    display: flex; flex-direction: column; gap: 0.4rem;
+    padding: 0.9rem 1.25rem 0.35rem; flex-shrink: 0;
 }
+.inspector-kicker-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.inspector-kicker { text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-mute); }
 .inspector-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The title doubles as the rename field: looks like plain title text until focused. */
 .inspector-title-field {
@@ -1152,10 +1154,39 @@ html.board-drawer-open { overflow: hidden; }
 .inspector-title-field:focus { outline: none; background: var(--card); box-shadow: inset 0 0 0 2px var(--ink); }
 .inspector-body { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 1.25rem; display: flex; flex-direction: column; gap: 1.5rem; }
 .inspector-section { display: flex; flex-direction: column; gap: 0.5rem; }
+/* Mockup footer: edited-time left, sync beacon right; the only rule line. */
+.inspector-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+    padding: 0.7rem 1.25rem; border-top: 1px solid var(--line);
+    color: var(--ink-mute); flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.08em;
+}
+.inspector-foot-status { display: inline-flex; align-items: center; gap: 0.4rem; }
+.inspector-foot .dot { width: 0.5rem; height: 0.5rem; border-radius: var(--r-pill); background: transparent; border: 2px solid var(--ink-faint); flex-shrink: 0; }
+.inspector-foot .dot.live { background: var(--signal); border: 0; }
+/* Blocks-only body affordances (Option B mockup): a single inline hint line
+   and, on a fresh item, a plain-text invitation plus ghost type chips. */
+.block-addhint {
+    border: 0; background: transparent; color: var(--ink-faint);
+    padding: 0.35rem 0; cursor: pointer; text-align: left; letter-spacing: 0.05em;
+}
+.block-addhint:hover { color: var(--ink); }
+.inspector-empty { display: flex; flex-direction: column; gap: 0.7rem; align-items: flex-start; }
+.inspector-empty-hint {
+    border: 0; background: transparent; color: var(--ink-faint);
+    font-family: var(--font-sans); font-size: 0.9rem; padding: 0; cursor: pointer; text-align: left;
+}
+.inspector-empty-hint:hover { color: var(--ink-mute); }
+.inspector-empty-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.ghost-chip {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    border: 1px dashed var(--line-strong); background: transparent; color: var(--ink-mute);
+    border-radius: var(--r-field); padding: 0.28rem 0.55rem; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.06em;
+}
+.ghost-chip:hover { color: var(--ink); border-color: var(--ink); border-style: solid; }
 .inspector-value { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .inspector-value .value-badges { display: inline-flex; gap: 0.5rem; }
 .category-pill { display: inline-flex; align-items: center; padding: 0.2rem 0.6rem; background: var(--surface-2); border-radius: var(--r-pill); color: var(--ink-mute); width: fit-content; }
-.inspector-edited { color: var(--ink-faint); margin: 0; }
 .item-row.inspecting { box-shadow: inset 2px 0 0 0 var(--signal); background: var(--surface-1); }
 .detail-split-scroll {
     flex: 1;
