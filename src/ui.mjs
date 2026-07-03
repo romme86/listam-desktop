@@ -4064,14 +4064,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
                 ),
             ),
-            h('div', { class: 'detail-split-scroll' },
+            // Two columns like the full view: tasks + notes prominent on the
+            // left, the property rail on the right (sticky while scrolling).
+            // DOM order summary→body→rail so the narrow-window fallback stacks
+            // with the prominent content first; the grid places by area.
+            h('div', { class: 'detail-split-scroll two-col' },
                 renderTicketSummary(item, state, { full: false }),
+                renderTicketBody(item, { variant: 'inspector' }),
                 h('div', { class: 'prop-rail compact' }, renderPropertyRail(item, state)),
-                renderTicketBody(item),
             ),
         )
         if (drawerWidths.ticket) drawer.style.width = `${drawerWidths.ticket}px`
-        drawer.append(drawerResizer(drawer, 'ticket', 'listam.ticketW', 420))
+        drawer.append(drawerResizer(drawer, 'ticket', 'listam.ticketW', 600))
         return drawer
     }
 
@@ -4155,7 +4159,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('div', { class: 'ticket-doc' },
                 h('div', { class: 'ticket-doc-summary' }, renderTicketSummary(item, state, { full: true })),
                 h('aside', { class: 'ticket-doc-rail prop-rail' }, renderPropertyRail(item, state)),
-                h('div', { class: 'ticket-doc-body' }, renderTicketBody(item)),
+                h('div', { class: 'ticket-doc-body' }, renderTicketBody(item, { variant: 'inspector' })),
             ),
         )
     }
