@@ -1095,13 +1095,16 @@ kbd {
     background: var(--card);
     border-left: 1px solid var(--line);
     box-shadow: -12px 0 40px rgba(0, 0, 0, 0.18);
-    animation: drawer-in var(--t-base) var(--ease);
     /* The drawer's top strip overlaps the titlebar's window-drag region; without
        this, real clicks on the toolbar (incl. the close ✕) are swallowed by the
        OS drag region and never reach the button — the drawer wouldn't close. */
     -webkit-app-region: no-drag;
 }
 @keyframes drawer-in { from { transform: translateX(100%); } }
+/* Slide in only when the drawer OPENS. Every re-render rebuilds the DOM node;
+   replaying the animation on each store update reads as a glitch and moves
+   the hover targets under the cursor. renderDrawerHost adds .enter once. */
+.detail-drawer.enter, .item-inspector.enter { animation: drawer-in var(--t-base) var(--ease); }
 /* While the drawer is open the page itself does not scroll — only the drawer's
    own scroll region does. This stops the board behind it from moving when you
    scroll the drawer (wheel anywhere, not just at the scroll boundary). */
@@ -1134,7 +1137,6 @@ html.board-drawer-open { overflow: hidden; }
     display: flex; flex-direction: column;
     background: var(--surface-1);
     border-left: 1px solid var(--line);
-    animation: drawer-in var(--t-base) var(--ease);
     -webkit-app-region: no-drag;
 }
 @media (max-width: 920px) { .item-inspector { width: 100vw; } }
@@ -1387,16 +1389,30 @@ html.board-drawer-open { overflow: hidden; }
 .block-empty { width: 100%; justify-content: flex-start; border: 1px dashed var(--line); padding: 0.85rem; }
 .block-menu-anchor { position: relative; }
 .block-menu-scrim { position: fixed; inset: 0; z-index: 40; }
+/* Compact command menu (mockup): sticky mono header showing the filter, a
+   keyboard-driven selection (black row, acid icon), sticky hint footer. */
 .block-slash-menu {
-    position: absolute; z-index: 41; top: 100%; left: 0; margin-top: 4px; min-width: 200px;
+    position: absolute; z-index: 41; top: 100%; left: 0; margin-top: 4px; min-width: 220px; max-width: 260px;
     background: var(--card); border: 1px solid var(--line); border-radius: var(--r-row);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 0.3rem;
-    display: flex; flex-direction: column; gap: 1px; max-height: 280px; overflow-y: auto;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 0;
+    display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; outline: none;
 }
-.slash-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.6rem; border-radius: var(--r-field); color: var(--ink); text-align: left; }
+.slash-head, .slash-foot {
+    position: sticky; z-index: 1; background: var(--surface-2); color: var(--ink-mute);
+    padding: 0.35rem 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; flex-shrink: 0;
+}
+.slash-head { top: 0; }
+.slash-foot { bottom: 0; }
+.slash-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; border-radius: 0; color: var(--ink); text-align: left; }
 .slash-item:hover { background: var(--surface-2); }
+.slash-item.sel { background: var(--ink); color: var(--card); }
+.slash-item.sel .label-md { color: inherit; }
+.slash-item.sel svg { color: var(--signal); }
 .slash-item svg { color: var(--ink-mute); flex-shrink: 0; }
 .block-slash-menu.hidden { display: none; }
+/* Left-edge grip for resizing the right-anchored drawers. */
+.drawer-resizer { position: absolute; left: -2px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 46; }
+.drawer-resizer:hover { background: var(--line); }
 
 @media (max-width: 920px) {
     .detail-drawer { width: 100vw; }

@@ -426,6 +426,33 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // task added post-creation never collides with a creation-time `task-N-…` id.
     let taskIdSeq = 0
     const nextTaskId = () => `task-${now()}-${taskIdSeq++}`
+    // Device-local drawer widths (persisted like theme; never replicated).
+    const drawerWidths = {
+        insp: Number(localStorage.getItem('listam.inspectorW')) || 0,
+        ticket: Number(localStorage.getItem('listam.ticketW')) || 0,
+    }
+    // Left-edge grip that resizes a right-anchored drawer. Pure style writes
+    // during the drag (no re-render); the width persists on release.
+    function drawerResizer(el, kind, storeKey, min) {
+        const resizer = h('div', { class: 'drawer-resizer', role: 'separator', 'aria-orientation': 'vertical' })
+        resizer.addEventListener('pointerdown', (event) => {
+            event.preventDefault()
+            resizer.setPointerCapture(event.pointerId)
+            const move = (ev) => {
+                const w = Math.min(Math.max(min, window.innerWidth - ev.clientX), Math.max(min, window.innerWidth - 260))
+                drawerWidths[kind] = w
+                el.style.width = `${w}px`
+            }
+            const stop = () => {
+                resizer.removeEventListener('pointermove', move)
+                try { localStorage.setItem(storeKey, String(Math.round(drawerWidths[kind]))) } catch { /* storage unavailable */ }
+            }
+            resizer.addEventListener('pointermove', move)
+            resizer.addEventListener('pointerup', stop, { once: true })
+            resizer.addEventListener('pointercancel', stop, { once: true })
+        })
+        return resizer
+    }
     // First text-bearing block of a body — used to re-seed a folded description
     // for the rigor gate when a ticket moves (see moveItem/foldLegacyText).
     const ticketDescriptionFromBlocks = (blocks) => {
@@ -2994,14 +3021,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // Renders the ticket detail drawer (and its click-away scrim) into the
     // top-level drawerHost — outside .main so the fixed drawer can never be
     // re-anchored by an ancestor transform. Also owns the page scroll-lock.
+    // Which drawer kind is currently mounted — the slide-in animation replays
+    // only when this changes (opening), never on routine re-renders.
+    let mountedDrawerKind = null
     function renderDrawerHost(state) {
         const show = ui.view === 'board' && !ui.ticketDocId && ui.activeListId != null
         const item = show ? selectedTicket(state) : null
         document.documentElement.classList.toggle('board-drawer-open', !!item)
         if (item) {
+            const drawer = renderTicketDrawer(item, state)
+            if (mountedDrawerKind !== 'ticket') drawer.classList.add('enter')
+            mountedDrawerKind = 'ticket'
             replaceChildren(drawerHost,
                 h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
-                renderTicketDrawer(item, state),
+                drawer,
             )
             return
         }
@@ -3010,7 +3043,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const inspItem = (ui.view === 'lists' || ui.view === 'todo') && ui.inspectorItemId
             ? state.items.find((it) => it && it.id === ui.inspectorItemId)
             : null
-        if (inspItem) { replaceChildren(drawerHost, renderItemInspector(inspItem, state)); return }
+        if (inspItem) {
+            const insp = renderItemInspector(inspItem, state)
+            if (mountedDrawerKind !== 'insp') insp.classList.add('enter')
+            mountedDrawerKind = 'insp'
+            replaceChildren(drawerHost, insp)
+            return
+        }
+        mountedDrawerKind = null
         drawerHost.replaceChildren()
     }
 
@@ -3473,20 +3513,66 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
     }
 
+    // Slash/insert menu with type-to-filter and keyboard control. Filter and
+    // selection live in-DOM (no re-render per keystroke): anchored menus focus
+    // themselves and capture keys; the markdown editor drives its inline
+    // instance through menu._slash.
     function renderSlashMenu(item, spec) {
         const t = locale.i18n.t.bind(locale.i18n)
-        return h('div', { class: 'block-slash-menu', role: 'menu' },
-            ...BLOCK_TYPES.map((bt) => h('button', {
+        const pick = (type) => {
+            if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, type)
+            else actions.insertBlock(item, type, spec.mode === 'after' ? spec.blockId : null)
+        }
+        const headLabel = spec.mode === 'replace' ? t('ticket.block.turnInto') : t('ticket.block.insert')
+        const head = h('div', { class: 'slash-head label-sm' })
+        const entries = BLOCK_TYPES.map((bt) => ({
+            type: bt.type,
+            label: t(bt.labelKey),
+            el: h('button', {
                 class: 'slash-item',
                 type: 'button',
                 role: 'menuitem',
                 onmousedown: (event) => event.preventDefault(),
-                onclick: () => {
-                    if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, bt.type)
-                    else actions.insertBlock(item, bt.type, spec.mode === 'after' ? spec.blockId : null)
-                },
-            }, tablerIcon(bt.icon, { size: 15 }), h('span', { class: 'label-md' }, t(bt.labelKey)))),
+                onclick: () => pick(bt.type),
+            }, tablerIcon(bt.icon, { size: 15 }), h('span', { class: 'label-md' }, t(bt.labelKey))),
+        }))
+        let filter = ''
+        let sel = 0
+        let visible = entries
+        const apply = () => {
+            const q = filter.toLowerCase()
+            visible = entries.filter((entry) => entry.label.toLowerCase().includes(q))
+            if (sel >= visible.length) sel = Math.max(0, visible.length - 1)
+            for (const entry of entries) {
+                entry.el.style.display = visible.includes(entry) ? '' : 'none'
+                entry.el.classList.toggle('sel', visible[sel] === entry)
+            }
+            head.textContent = filter ? `${headLabel} · ${filter}` : headLabel
+            visible[sel]?.el.scrollIntoView({ block: 'nearest' })
+        }
+        const menu = h('div', { class: 'block-slash-menu', role: 'menu', tabindex: '-1' },
+            head,
+            ...entries.map((entry) => entry.el),
+            h('div', { class: 'slash-foot label-sm' }, '↑↓ · ↵ · esc'),
         )
+        menu._slash = {
+            filterTo(q) { filter = q; sel = 0; apply() },
+            move(delta) { if (visible.length) { sel = (sel + delta + visible.length) % visible.length; apply() } },
+            choose() { const hit = visible[sel]; if (hit) pick(hit.type); return !!hit },
+        }
+        menu.addEventListener('keydown', (event) => {
+            // Anchored mode: the focused menu owns the keyboard, so single-key
+            // app shortcuts (i, t, n, …) never fire underneath it.
+            event.stopPropagation()
+            if (event.key === 'Escape') { actions.closeBlockMenu(); return }
+            if (event.key === 'ArrowDown') { event.preventDefault(); menu._slash.move(1); return }
+            if (event.key === 'ArrowUp') { event.preventDefault(); menu._slash.move(-1); return }
+            if (event.key === 'Enter') { event.preventDefault(); menu._slash.choose(); return }
+            if (event.key === 'Backspace') { menu._slash.filterTo(filter.slice(0, -1)); return }
+            if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) menu._slash.filterTo(filter + event.key)
+        })
+        apply()
+        return menu
     }
 
     // Seed a callout's contentEditable with inline-only HTML (no heading
@@ -3506,7 +3592,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const isMarkdown = block.type === 'markdown'
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
         const menu = isMarkdown ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
-        if (menu) menu.classList.add('block-slash-inline', ui.blockDraft === '/' ? 'open' : 'hidden')
+        // The inline menu opens while the draft is "/" plus an optional filter
+        // word ("/tab" → Table) and Esc only dismisses the menu, not the edit.
+        let slashDismissed = false
+        const slashActive = () => !slashDismissed && /^\/[\p{L}\p{N}]*$/u.test(ui.blockDraft)
+        const syncSlashMenu = () => {
+            if (!menu) return
+            if (!ui.blockDraft.startsWith('/')) slashDismissed = false
+            const on = slashActive()
+            menu.classList.toggle('hidden', !on)
+            menu.classList.toggle('open', on)
+            if (on) menu._slash.filterTo(ui.blockDraft.slice(1))
+        }
+        if (menu) { menu.classList.add('block-slash-inline'); syncSlashMenu() }
 
         const ed = h('div', {
             class: `block-md block-rich block-editor block-rich-${block.type}`,
@@ -3528,10 +3626,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ui.blockDraft = htmlToMarkdown(ed.innerHTML)
             ed.classList.toggle('is-empty', ui.blockDraft === '')
             remember()
-            if (menu) {
-                menu.classList.toggle('hidden', ui.blockDraft !== '/')
-                menu.classList.toggle('open', ui.blockDraft === '/')
-            }
+            syncSlashMenu()
         }
         ed.addEventListener('input', () => {
             // Live-interpret recognized markdown so the raw syntax never lingers.
@@ -3542,6 +3637,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         ed.addEventListener('keyup', remember)
         ed.addEventListener('mouseup', remember)
         ed.addEventListener('keydown', (event) => {
+            if (menu && slashActive()) {
+                // While the inline menu is open the keyboard drives it.
+                if (event.key === 'ArrowDown') { event.preventDefault(); menu._slash.move(1); return }
+                if (event.key === 'ArrowUp') { event.preventDefault(); menu._slash.move(-1); return }
+                if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.shiftKey) { event.preventDefault(); menu._slash.choose(); return }
+                if (event.key === 'Escape') { event.stopPropagation(); slashDismissed = true; syncSlashMenu(); return }
+            }
             if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
             if ((event.metaKey || event.ctrlKey) && !event.altKey) {
@@ -3811,11 +3913,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             onmousedown: (event) => event.preventDefault(),
             onclick,
         }, tablerIcon(icon, { size: 15 }), h('span', { class: 'label-md' }, label))
-        return h('div', { class: 'block-slash-menu', role: 'menu' },
+        const menu = h('div', { class: 'block-slash-menu', role: 'menu', tabindex: '-1' },
             op('switch-horizontal', t('ticket.block.turnInto'), () => actions.openBlockMenu({ mode: 'turn', blockId: block.id })),
             op('plus', t('ticket.block.insert'), () => actions.openBlockMenu({ mode: 'after', blockId: block.id })),
             op('trash', t('ticket.block.delete'), () => actions.deleteBlock(item, block.id)),
         )
+        menu.addEventListener('keydown', (event) => {
+            event.stopPropagation()
+            if (event.key === 'Escape') actions.closeBlockMenu()
+        })
+        return menu
     }
 
     function renderBlock(item, block) {
@@ -3828,6 +3935,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     : ui.blockMenu.mode === 'after' ? renderSlashMenu(item, ui.blockMenu)
                         : null
             if (!menu) return null
+            // Focus the menu so type-to-filter and ↑↓/↵/esc work immediately.
+            queueMicrotask(() => { if (menu.isConnected) menu.focus() })
             return h('div', { class: 'block-menu-anchor' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), menu)
         }
         const row = h('div', {
@@ -3881,9 +3990,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             md.innerHTML = markdownToHtml(legacy)
             legacyRow = h('div', { class: 'block' }, h('div', { class: 'block-content' }, md))
         }
-        const endMenu = addMenuOpen
-            ? h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), renderSlashMenu(item, { mode: 'end' }))
-            : null
+        let endMenu = null
+        if (addMenuOpen) {
+            const menu = renderSlashMenu(item, { mode: 'end' })
+            queueMicrotask(() => { if (menu.isConnected) menu.focus() })
+            endMenu = h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), menu)
+        }
         if (variant === 'inspector') {
             // Inspector anatomy (Option B mockup): no section head — blocks
             // start right under the title; one inline add hint instead of the
@@ -3943,7 +4055,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
     function renderTicketDrawer(item, state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        return h('aside', { class: 'detail-drawer' },
+        const drawer = h('aside', { class: 'detail-drawer' },
             h('div', { class: 'detail-toolbar' },
                 h('span', { class: 'detail-toolbar-title', title: item.text }, item.text),
                 h('div', { class: 'detail-toolbar-actions' },
@@ -3958,6 +4070,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 renderTicketBody(item),
             ),
         )
+        if (drawerWidths.ticket) drawer.style.width = `${drawerWidths.ticket}px`
+        drawer.append(drawerResizer(drawer, 'ticket', 'listam.ticketW', 420))
+        return drawer
     }
 
     // Non-modal right-side Inspector for a grocery/todo item (toggle I). Reuses
@@ -3981,7 +4096,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const sectionBlock = (labelKey, ...children) => h('div', { class: 'inspector-section' },
             h('h3', { class: 'category-heading label-sm' }, t(labelKey)), ...children)
         const bs = state.peerCount > 0 ? 'live' : 'local'
-        return h('aside', { class: 'item-inspector' },
+        const aside = h('aside', { class: 'item-inspector' },
             h('div', { class: 'inspector-head' },
                 h('div', { class: 'inspector-kicker-row' },
                     h('span', { class: 'inspector-kicker label-sm' }, `${t('inspector.kicker')} · ${isGrocery ? t('desktop.rail.groceries') : t('desktop.rail.todo')}`),
@@ -4017,6 +4132,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ),
             ),
         )
+        if (drawerWidths.insp) aside.style.width = `${drawerWidths.insp}px`
+        aside.append(drawerResizer(aside, 'insp', 'listam.inspectorW', 320))
+        return aside
     }
 
     function renderTicketFull(state) {
