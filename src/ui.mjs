@@ -1442,12 +1442,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 preferencesToggle('showKeyHints')
             }
         },
-        share() {
-            // The Share button used to mint a whole-project invite straight
-            // away — easy to hit when the user meant "share this list". Open a
-            // chooser that spells out both scopes before minting anything.
-            openDialog({ kind: 'share-choose' })
-        },
+        // Whole-project invite (every list syncs to whoever joins). Reached only
+        // from Settings — deliberately NOT a page-header button, so it can't be
+        // hit by reflex when the user meant to share one list (that lives in the
+        // per-list settings dialog via shareList).
         shareProject() {
             send(RPC_CREATE_INVITE)
             openDialog({ kind: 'share' })
@@ -2562,7 +2560,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: `${t('inspector.toggle')} (I)`,
                         onclick: () => { const id = ui.focusedItemId || (items[0] && items[0].id); if (id) actions.toggleInspector(id) },
                     }, tablerIcon('info-circle', { size: 16 })),
-                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             renderAddBar(t),
@@ -2615,7 +2612,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: `${t('inspector.toggle')} (I)`,
                         onclick: () => { const id = ui.focusedItemId || (items[0] && items[0].id); if (id) actions.toggleInspector(id) },
                     }, tablerIcon('info-circle', { size: 16 })),
-                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             renderAddBar(t),
@@ -3017,7 +3013,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         title: t('plan.flagList'),
                         onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
                     }, tablerIcon('flag', { size: 16 })),
-                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             board,
@@ -4229,7 +4224,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('div', { class: 'header-actions' },
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'join-list' }) }, t('joinList.button')),
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'join' }) }, t('desktop.header.join')),
-                    h('button', { class: 'btn btn-critical', onclick: actions.share }, t('desktop.header.share')),
                 ),
             ),
             h('div', { class: 'summary-bar label-md' },
@@ -4842,7 +4836,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         const act = (icon, label, run) => entries.push({ group: 'actions', icon, label, tag: '', run })
         const jmp = (icon, label, tag, run) => entries.push({ group: 'jump', icon, label, tag, run })
         act('plus', t('desktop.shortcuts.addItem'), () => { closeDialog(); actions.summonAddBar() })
-        act('switch-horizontal', t('desktop.header.share'), () => { closeDialog(); actions.share() })
         act('users', t('joinList.button'), () => openDialog({ kind: 'join-list' }))
         if (onLists) act('layout-grid', t('header.action.gridView'), () => { closeDialog(); preferencesToggle('isGridView') })
         act('check', t('main.summary.clearDone'), () => { closeDialog(); actions.clearDone() })
@@ -4974,32 +4967,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     ? h('button', { class: 'btn btn-secondary', onclick: () => { actions.clearFromPlan(planItemKey(item.listId, item.id)); closeDialog() } }, t('plan.clearFromPlan'))
                     : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-        } else if (kind === 'share-choose') {
-            // The two invite kinds are easy to confuse: a project invite syncs
-            // EVERYTHING, a list invite only one list. Offer both, each with
-            // its scope spelled out, before minting anything.
-            const registry = reduceRegistry(state.items)
-            const activeEntry = ui.activeListId && ui.activeListId !== DEFAULT_LIST_ID
-                ? registry.lists.find((l) => l.id === ui.activeListId)
-                : null
-            content = dialogFrame(t('share.choose.title'), [
-                h('p', { class: 'dialog-body' }, t('share.choose.subtitle')),
-                h('button', {
-                    class: 'btn btn-primary',
-                    onclick: () => { closeDialog(); actions.shareProject() },
-                }, t('share.project.button')),
-                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.project.hint')),
-                activeEntry
-                    ? h('button', {
-                        class: 'btn btn-secondary',
-                        onclick: () => { closeDialog(); actions.shareList(activeEntry.id) },
-                    }, activeEntry.baseKey ? t('shareList.showInvite') : t('share.list.button', { name: activeEntry.name }))
-                    : null,
-                h('p', { class: 'label-md', style: 'color: var(--secondary);' },
-                    activeEntry ? t('share.list.hint') : t('share.list.noneActive')),
-            ], [
-                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.cancel')),
             ])
         } else if (kind === 'share') {
             content = dialogFrame(t('share.project.dialogTitle'), [
@@ -5154,6 +5121,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.board.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
+                // Whole-project sharing lives here (Settings) only — never a
+                // page-header button. To share a single list, use that list's
+                // settings dialog.
+                h('h3', { class: 'category-heading label-sm' }, t('lists.menu.sectionSharing')),
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => { closeDialog(); actions.shareProject() } }, t('share.project.button')),
+                ),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.project.hint')),
                 h('h3', { class: 'category-heading label-sm' }, t('backup.section')),
                 h('div', { class: 'choice-row' },
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-data' }) }, t('backup.exportData')),
