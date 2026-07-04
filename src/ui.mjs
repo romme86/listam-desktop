@@ -1443,6 +1443,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
         },
         share() {
+            // The Share button used to mint a whole-project invite straight
+            // away — easy to hit when the user meant "share this list". Open a
+            // chooser that spells out both scopes before minting anything.
+            openDialog({ kind: 'share-choose' })
+        },
+        shareProject() {
             send(RPC_CREATE_INVITE)
             openDialog({ kind: 'share' })
         },
@@ -4969,9 +4975,35 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
+        } else if (kind === 'share-choose') {
+            // The two invite kinds are easy to confuse: a project invite syncs
+            // EVERYTHING, a list invite only one list. Offer both, each with
+            // its scope spelled out, before minting anything.
+            const registry = reduceRegistry(state.items)
+            const activeEntry = ui.activeListId && ui.activeListId !== DEFAULT_LIST_ID
+                ? registry.lists.find((l) => l.id === ui.activeListId)
+                : null
+            content = dialogFrame(t('share.choose.title'), [
+                h('p', { class: 'dialog-body' }, t('share.choose.subtitle')),
+                h('button', {
+                    class: 'btn btn-primary',
+                    onclick: () => { closeDialog(); actions.shareProject() },
+                }, t('share.project.button')),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.project.hint')),
+                activeEntry
+                    ? h('button', {
+                        class: 'btn btn-secondary',
+                        onclick: () => { closeDialog(); actions.shareList(activeEntry.id) },
+                    }, activeEntry.baseKey ? t('shareList.showInvite') : t('share.list.button', { name: activeEntry.name }))
+                    : null,
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' },
+                    activeEntry ? t('share.list.hint') : t('share.list.noneActive')),
+            ], [
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.cancel')),
+            ])
         } else if (kind === 'share') {
-            content = dialogFrame(t('invite.share.title'), [
-                h('p', { class: 'dialog-body' }, t('invite.share.message')),
+            content = dialogFrame(t('share.project.dialogTitle'), [
+                h('p', { class: 'dialog-body' }, t('share.project.dialogMessage')),
                 state.inviteKey
                     ? h('div', { class: 'invite-code' }, state.inviteKey)
                     : h('p', { class: 'dialog-body' }, t('invite.share.notReady')),
@@ -5355,11 +5387,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 listId === DEFAULT_LIST_ID
                     ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.builtinBlocked'))
                     : entry.baseKey
-                        ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.shared'))
-                        : h('button', {
-                            class: 'btn btn-secondary',
-                            onclick: () => { closeDialog(); actions.shareList(listId) },
-                        }, t('shareList.button')),
+                        // Already shared: say so, and offer a fresh invite for
+                        // the next person (the backend re-mints on demand).
+                        ? h('div', {},
+                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, `${t('shareList.shared')} — ${t('share.list.hint')}`),
+                            h('button', {
+                                class: 'btn btn-secondary',
+                                onclick: () => { closeDialog(); actions.shareList(listId) },
+                            }, t('shareList.showInvite')),
+                        )
+                        : h('div', {},
+                            h('button', {
+                                class: 'btn btn-secondary',
+                                onclick: () => { closeDialog(); actions.shareList(listId) },
+                            }, t('shareList.button')),
+                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
+                        ),
                 valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {
