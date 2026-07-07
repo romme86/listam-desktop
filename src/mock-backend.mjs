@@ -25,6 +25,7 @@ import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
 import { buildValueReturnItem } from '@listam/domain/labels'
+import { buildItemPlanEntry, buildListPlanEntry, toDateKey, shiftDateKey } from '@listam/domain/plan'
 import { reductionFromItems } from './store.mjs'
 
 // Grocery, board and to-do all live on the default list (the legacy desktop
@@ -148,7 +149,18 @@ export function createMockBackend() {
 
     // Keep the mock's own items multi-list (the single-list applyOperationToList
     // would drop registry meta-items and the non-default named list).
-    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures])
+    // Plan fixtures: items/lists flagged into the day plan — some on TODAY, some
+    // parked on PAST days so ?mock=1 exercises the Overview's carry-over tray and
+    // week paging. Pointers into the live fixtures above (never copied text).
+    const todayKey = toDateKey(NOWMS)
+    const planFixtures = [
+        buildItemPlanEntry({ listId: DEFAULT_LIST, itemId: todoFixtures[0].id, plannedFor: todayKey, planOrder: 1000, updatedAt: 2 }),
+        buildItemPlanEntry({ listId: DEFAULT_LIST, itemId: todoFixtures[1].id, plannedFor: shiftDateKey(todayKey, -1), planOrder: 1000, updatedAt: 2 }),
+        buildItemPlanEntry({ listId: DEFAULT_LIST, itemId: boardFixtures[1].id, plannedFor: shiftDateKey(todayKey, -3), planOrder: 1000, updatedAt: 2 }),
+        buildListPlanEntry({ listId: HARDWARE_LIST, listType: 'shopping', plannedFor: shiftDateKey(todayKey, -2), planOrder: 2000, updatedAt: 2 }),
+    ]
+
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures, ...planFixtures])
     items = reduction.allItems()
 
     function emit(event) {

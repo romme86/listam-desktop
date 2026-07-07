@@ -63,6 +63,7 @@ import {
     isPlanItem,
     reducePlan,
     groupPlanByDate,
+    overduePlanRecords,
     computePlanReorder,
     buildItemPlanEntry,
     buildListPlanEntry,
@@ -372,6 +373,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         view: 'overview',
         // Selected day in the Overview (a 'YYYY-MM-DD' key); '' tracks today.
         planDate: '',
+        // Which week the Overview strip shows: 0 = the week starting today, −1 the
+        // previous week, +1 the next, etc. Lets the strip page into past days.
+        weekOffset: 0,
         // Plan row drag (reorder within a day / drop onto a day pill): { ref, fromDate }.
         planDrag: null,
         activeListId: null,
@@ -2191,8 +2195,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
 
         const today = toDateKey(now())
-        const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(today, i))
-        const selected = (ui.planDate && week.includes(ui.planDate)) ? ui.planDate : today
+        const tomorrowKey = shiftDateKey(today, 1)
+        // The strip pages a week at a time; weekOffset 0 starts on today, negative
+        // pages into the past, positive into the future.
+        const anchor = shiftDateKey(today, ui.weekOffset * 7)
+        const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(anchor, i))
+        // Keep the selected day within the visible week; fall back to today when
+        // it's on-screen, else the first pill of the paged week.
+        const selected = (ui.planDate && week.includes(ui.planDate))
+            ? ui.planDate
+            : (week.includes(today) ? today : week[0])
         const view = ['planner', 'value'].includes(state.preferences.overviewView) ? state.preferences.overviewView : 'focus'
 
         // Resolve a plan record to a renderable row, dropping dangling item refs.
@@ -2220,6 +2232,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }
         }
         const resolveDay = (dateKey) => (byDate.get(dateKey) || []).map(resolve).filter(Boolean)
+        // Derived carryover: entries parked on a past day that aren't done yet
+        // surface under Today (oldest first). Their stored plannedFor is never
+        // rewritten — completing writes through to the source; "move to today"
+        // (below) re-homes the entry for real if the user wants it off the past.
+        const carried = overduePlanRecords(reduced, today).map(resolve).filter(Boolean).filter((r) => !r.done)
 
         // Value rollups for the plan strip / rail: sum value + average delay over
         // the rated single items planned into a day (list-cards have no rate).
@@ -2329,13 +2346,77 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             )
         }
 
-        // One day's agenda: spotlight (first pending) + next-up + a done tray.
+        // A carried-over row (shown only under Today): same check / open / clear
+        // as a normal plan row, plus a badge for the past day it slipped from and
+        // a one-click "move to today" that actually re-homes the entry. Not
+        // draggable (the rows span different source days).
+        const carryRow = (resolved) => {
+            const rec = resolved.rec
+            const badge = h('span', {
+                class: 'plan-carry-badge label-sm',
+                title: parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
+            },
+                tablerIcon('history', { size: 12 }),
+                parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }),
+            )
+            const moveBtn = h('button', {
+                class: 'plan-carry-move',
+                'aria-label': t('plan.moveToToday'),
+                title: t('plan.moveToToday'),
+                onclick: () => actions.movePlanToDay(rec.ref, today),
+            }, tablerIcon('calendar-up', { size: 16 }))
+            if (resolved.kind === 'list') {
+                return h('div', { class: 'plan-row plan-list-card plan-carry' },
+                    h('button', {
+                        class: 'plan-check',
+                        'aria-label': t('plan.clearFromPlan'),
+                        title: t('plan.clearFromPlan'),
+                        onclick: () => actions.clearFromPlan(rec.ref),
+                    }, tablerIcon('square', { size: 18 })),
+                    h('span', { class: 'glyph' }, tablerIcon(iconForType(resolved.listType), { size: 16 })),
+                    h('span', { class: 'plan-text', onclick: () => openSurfaceById(resolved.listId, resolved.listType) }, resolved.label),
+                    badge,
+                    h('span', { class: 'plan-chip' }, t('plan.listItems', { count: resolved.count })),
+                    moveBtn,
+                    h('button', {
+                        class: 'plan-open',
+                        'aria-label': t('plan.openList'),
+                        onclick: () => openSurfaceById(resolved.listId, resolved.listType),
+                    }, tablerIcon('chevron-right', { size: 16 })),
+                )
+            }
+            const item = resolved.item
+            return h('div', { class: 'plan-row plan-carry' },
+                h('button', {
+                    class: 'plan-check',
+                    'aria-pressed': 'false',
+                    'aria-label': t('main.item.toggle'),
+                    onclick: () => toggleItemDone(item),
+                }, tablerIcon('square', { size: 18 })),
+                h('span', { class: 'plan-text plan-text-open', title: t('plan.openList'), onclick: () => actions.openPlanItem(item) }, item.text),
+                badge,
+                ...valueBadges(item),
+                h('span', { class: 'plan-chip' }, resolved.chip),
+                moveBtn,
+                h('button', {
+                    class: 'plan-remove',
+                    'aria-label': t('plan.remove'),
+                    title: t('plan.remove'),
+                    onclick: () => actions.clearFromPlan(rec.ref),
+                }, tablerIcon('x', { size: 14 })),
+            )
+        }
+
+        // One day's agenda: an optional carried-over tray (Today only), then the
+        // spotlight (first pending) + next-up + a done tray.
         const dayAgenda = (dateKey) => {
             const rows = resolveDay(dateKey)
+            // Carried-over work belongs to Today only; other days show just their own.
+            const carriedHere = dateKey === today ? carried : []
             const pending = rows.filter((r) => !r.done)
             const done = rows.filter((r) => r.done)
             const pendingRecords = pending.map((r) => r.rec)
-            if (rows.length === 0) {
+            if (rows.length === 0 && carriedHere.length === 0) {
                 return h('div', { class: 'plan-empty' },
                     h('div', { class: 'plan-empty-icon' }, tablerIcon('flag', { size: 22 })),
                     h('p', { class: 'plan-empty-title' }, t('plan.empty.title')),
@@ -2349,6 +2430,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 )
             }
             const parts = []
+            if (carriedHere.length > 0) {
+                parts.push(h('div', { class: 'plan-section-label plan-carry-label label-sm' },
+                    tablerIcon('history', { size: 13 }),
+                    h('span', {}, t('plan.carriedOver', { count: carriedHere.length })),
+                ))
+                parts.push(h('div', { class: 'plan-rows plan-carry-rows' }, ...carriedHere.map((r) => carryRow(r))))
+            }
             if (pending.length > 0) {
                 parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.now')))
                 parts.push(h('div', { class: 'plan-spotlight-wrap' }, planRow(pending[0], pendingRecords, 0, { spotlight: true })))
@@ -2367,7 +2455,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return h('div', {}, ...parts)
         }
 
-        // The clickable + droppable 7-day strip.
+        // The clickable + droppable day strip.
         const strip = h('div', { class: 'plan-strip' }, ...week.map((dk) => {
             const count = resolveDay(dk).length
             return h('button', {
@@ -2381,12 +2469,32 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     if (d) actions.movePlanToDay(d.ref, dk)
                 },
             },
-                h('span', { class: 'pill-dow label-sm' }, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short' })),
+                h('span', { class: 'pill-dow label-sm' }, dk === today ? t('plan.today') : dk === tomorrowKey ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short' })),
                 h('span', { class: 'pill-day' }, String(parsePlanKey(dk).getDate())),
                 h('span', { class: `pill-count label-sm${count === 0 ? ' zero' : ''}` }, count > 0 ? String(count) : '·'),
                 valueRollup(summarizeValue(dayValueItems(dk))),
             )
         }))
+
+        // Page the strip a week at a time so past days are reachable; a Today jump
+        // snaps back to the current week whenever the strip has drifted off it.
+        const rangeLabel = `${parsePlanKey(week[0]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} – ${parsePlanKey(week[6]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+        const stripNav = h('div', { class: 'plan-strip-nav' },
+            h('button', {
+                class: 'plan-week-btn', 'aria-label': t('plan.prevWeek'), title: t('plan.prevWeek'),
+                onclick: () => { ui.weekOffset -= 1; ui.planDate = ''; renderAll() },
+            }, tablerIcon('chevron-left', { size: 16 })),
+            h('span', { class: 'plan-week-range label-sm' }, rangeLabel),
+            h('button', {
+                class: 'plan-week-btn', 'aria-label': t('plan.nextWeek'), title: t('plan.nextWeek'),
+                onclick: () => { ui.weekOffset += 1; ui.planDate = ''; renderAll() },
+            }, tablerIcon('chevron-right', { size: 16 })),
+            ui.weekOffset === 0 ? null : h('button', {
+                class: 'plan-today-btn label-sm',
+                onclick: () => { ui.weekOffset = 0; ui.planDate = today; renderAll() },
+            }, t('plan.today')),
+        )
+        const stripWrap = h('div', { class: 'plan-strip-wrap' }, stripNav, strip)
 
         const header = h('header', { class: 'page-header' },
             h('div', {},
@@ -2420,7 +2528,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     ondrop: (event) => { event.preventDefault(); event.currentTarget.classList.remove('drop'); const d = ui.planDrag; ui.planDrag = null; if (d) actions.movePlanToDay(d.ref, dk) },
                 },
                     h('div', { class: 'plan-week-head' },
-                        h('span', {}, dk === today ? t('plan.today') : dk === week[1] ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })),
+                        h('span', {}, dk === today ? t('plan.today') : dk === tomorrowKey ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })),
                         h('span', { class: 'plan-week-head-right' },
                             valueRollup(summarizeValue(dayValueItems(dk))),
                             h('span', { class: `pill-count label-sm${rows.length === 0 ? ' zero' : ''}` }, rows.length > 0 ? String(rows.length) : '·'),
@@ -2434,7 +2542,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                         ))),
                 )
             }))
-            return replaceChildren(main, header, strip, weekValueBar,
+            return replaceChildren(main, header, stripWrap, weekValueBar,
                 h('div', { class: 'plan-planner' },
                     h('div', { class: 'plan-agenda' }, dayAgenda(selected)),
                     rail,
@@ -2443,9 +2551,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
 
         // Focus layout: selected-day agenda, plus a receded Tomorrow when on today.
-        const parts = [header, strip, weekValueBar, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
+        const parts = [header, stripWrap, weekValueBar, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
         if (selected === today) {
-            const tomorrow = resolveDay(week[1]).filter((r) => !r.done)
+            const tomorrow = resolveDay(tomorrowKey).filter((r) => !r.done)
             if (tomorrow.length > 0) {
                 parts.push(h('div', { class: 'plan-tomorrow' },
                     h('div', { class: 'plan-section-label label-sm' }, t('plan.tomorrow')),
