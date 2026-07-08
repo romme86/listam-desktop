@@ -36,7 +36,7 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
-import { isRegistryItem, reduceRegistry, buildProjectSettingsItem } from '@listam/domain/list-registry'
+import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
 import {
     isLabelItem,
     surfaceLabelKey,
@@ -990,23 +990,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             send(RPC_UPDATE, { item })
         },
-        // Flag a list as the project's DEFAULT for un-targeted adds — voice / the
-        // leaf saying "add X" with no list name lands here (instead of the built-in
-        // Groceries). Synced project-wide via a singleton settings meta-item (LWW by
-        // fixed id), read live by the voice host, so any device and whichever host
-        // runs voice honors it. `enabled` false — or re-toggling the current default
-        // — clears it back to the built-in default.
-        setDefaultList(listId, type, enabled = true) {
-            const cur = currentRegistry().settings?.defaultListId ?? null
-            const on = enabled && cur !== listId
-            const item = buildProjectSettingsItem({
-                defaultListId: on ? listId : null,
-                defaultListType: on ? (type || null) : null,
-                updatedAt: now(),
-            })
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item })
-        },
         // Set the project's synced default list — where un-targeted adds land
         // (voice "aggiungi X" with no spoken list, and quick-add). Falsy listId
         // clears the preference (reverts to the built-in default). Rides the
@@ -1660,7 +1643,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     function defaultListToggleRow (listId, type) {
         const t = locale.i18n.t.bind(locale.i18n)
         const on = (currentRegistry().settings?.defaultListId ?? null) === listId
-        const cb = h('input', { type: 'checkbox', class: 'switch-input', checked: on ? '' : null, onchange: (event) => actions.setDefaultList(listId, type, event.target.checked) })
+        // Checking sets this list as the synced default; unchecking clears it
+        // (falsy listId reverts to the built-in default). Same action the project
+        // Settings picker uses, so the two stay in lock-step.
+        const cb = h('input', { type: 'checkbox', class: 'switch-input', checked: on ? '' : null, onchange: (event) => (event.target.checked ? actions.setDefaultList(listId, type) : actions.setDefaultList('', '')) })
         return h('div', { class: 'value-toggle' },
             h('label', { class: 'switch-row' },
                 h('span', { class: 'switch-text' },
