@@ -34,9 +34,9 @@ import {
     buildProvisioningPayload,
     provisionLeaf,
 } from '@listam/provisioning'
-import { DEFAULT_LIST_ID, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
+import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
-import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
+import { isRegistryItem, reduceRegistry, buildProjectSettingsItem } from '@listam/domain/list-registry'
 import {
     isLabelItem,
     surfaceLabelKey,
@@ -76,6 +76,7 @@ import {
 import {
     newListMeta,
     newGroupMeta,
+    newProjectSettingsMeta,
     patchListMeta,
     patchGroupMeta,
     deleteListMeta,
@@ -989,6 +990,36 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(item.id)
             send(RPC_UPDATE, { item })
         },
+        // Flag a list as the project's DEFAULT for un-targeted adds — voice / the
+        // leaf saying "add X" with no list name lands here (instead of the built-in
+        // Groceries). Synced project-wide via a singleton settings meta-item (LWW by
+        // fixed id), read live by the voice host, so any device and whichever host
+        // runs voice honors it. `enabled` false — or re-toggling the current default
+        // — clears it back to the built-in default.
+        setDefaultList(listId, type, enabled = true) {
+            const cur = currentRegistry().settings?.defaultListId ?? null
+            const on = enabled && cur !== listId
+            const item = buildProjectSettingsItem({
+                defaultListId: on ? listId : null,
+                defaultListType: on ? (type || null) : null,
+                updatedAt: now(),
+            })
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
+        },
+        // Set the project's synced default list — where un-targeted adds land
+        // (voice "aggiungi X" with no spoken list, and quick-add). Falsy listId
+        // clears the preference (reverts to the built-in default). Rides the
+        // registry as a singleton settings meta-item, so every peer (incl. the
+        // headless voice host) picks it up.
+        setDefaultList(listId, listType) {
+            const item = newProjectSettingsMeta(
+                listId ? { defaultListId: listId, defaultListType: listType || '' } : {},
+                now(),
+            )
+            markLocalId(item.id)
+            send(RPC_UPDATE, { item })
+        },
         // Collapse/expand a rail group (device-local). Stored as presence so the
         // map only carries collapsed groups; absence means expanded.
         toggleGroupCollapsed(groupId) {
@@ -1615,6 +1646,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'switch-text' },
                     h('span', { class: 'switch-title label-sm' }, tablerIcon('coins', { size: 14 }), h('span', {}, t('value.enable'))),
                     h('span', { class: 'switch-hint label-md' }, t('value.enableHint')),
+                ),
+                h('span', { class: `switch${on ? ' on' : ''}` }, cb, h('span', { class: 'switch-knob' })),
+            ),
+        )
+    }
+    // The per-list "default list" toggle in list settings. Flagging a list makes
+    // voice / the leaf "add X" (with no spoken list name) land here instead of the
+    // built-in Groceries. Synced project-wide (buildProjectSettingsItem), so any
+    // device and whichever host runs voice honors it. Only ONE list is default:
+    // flipping this on clears any previous default; flipping it off reverts to the
+    // built-in default.
+    function defaultListToggleRow (listId, type) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const on = (currentRegistry().settings?.defaultListId ?? null) === listId
+        const cb = h('input', { type: 'checkbox', class: 'switch-input', checked: on ? '' : null, onchange: (event) => actions.setDefaultList(listId, type, event.target.checked) })
+        return h('div', { class: 'value-toggle' },
+            h('label', { class: 'switch-row' },
+                h('span', { class: 'switch-text' },
+                    h('span', { class: 'switch-title label-sm' }, tablerIcon('flag', { size: 14 }), h('span', {}, t('desktop.list.voiceDefault'))),
+                    h('span', { class: 'switch-hint label-md' }, t('desktop.list.voiceDefaultHint')),
                 ),
                 h('span', { class: `switch${on ? ' on' : ''}` }, cb, h('span', { class: 'switch-knob' })),
             ),
@@ -5227,6 +5278,29 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('settings.board.label')),
                 boardRow,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.board.help')),
+                // Default list for un-targeted adds (voice / quick-add). Synced
+                // across the project via a registry settings meta-item; the
+                // built-in default is always offered even if it has no meta-item.
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.defaultList.label')),
+                (() => {
+                    const reg = reduceRegistry(state.items)
+                    const current = reg.settings?.defaultListId || DEFAULT_LIST_ID
+                    const choices = reg.lists.some((l) => l.id === DEFAULT_LIST_ID)
+                        ? reg.lists
+                        : [{ id: DEFAULT_LIST_ID, name: t('desktop.settings.defaultList.builtin'), type: DEFAULT_LIST_TYPE }, ...reg.lists]
+                    return h('select', {
+                        class: 'prop-select',
+                        onchange: (event) => {
+                            const chosen = choices.find((l) => l.id === event.target.value)
+                            actions.setDefaultList(chosen?.id || DEFAULT_LIST_ID, chosen?.type || DEFAULT_LIST_TYPE)
+                        },
+                    }, ...choices.map((l) => {
+                        const opt = h('option', { value: l.id }, l.name)
+                        if (l.id === current) opt.setAttribute('selected', 'selected')
+                        return opt
+                    }))
+                })(),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.defaultList.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
                 // Whole-project sharing lives here (Settings) only — never a
@@ -5486,6 +5560,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                             }, t('shareList.button')),
                             h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
                         ),
+                defaultListToggleRow(listId, entry.type),
                 valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {

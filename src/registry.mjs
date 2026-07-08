@@ -8,7 +8,7 @@
 // inputs are always the *reduced* registry ({groups, lists}) from
 // reduceRegistry(state.items), so a rebuild preserves the current name / type /
 // group / order / view unless the patch overrides them.
-import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
+import { buildListMetaItem, buildGroupMetaItem, buildProjectSettingsItem, isRegistryItem } from '@listam/domain/list-registry'
 import { isLabelItem } from '@listam/domain/labels'
 import { isPlanItem } from '@listam/domain/plan'
 import { BOARD_WRITE_TYPE, isBoardType } from '@listam/domain/board'
@@ -49,6 +49,12 @@ export function newListMeta({ id, name, type, groupId = null, order = 0, view },
 
 export function newGroupMeta({ id, name, order = 0 }, updatedAt) {
     return buildGroupMetaItem({ id, name, order, updatedAt })
+}
+
+// The singleton project-settings meta-item: the synced default target list for
+// un-targeted adds (voice "aggiungi X", quick-add). Null id/type clears it.
+export function newProjectSettingsMeta({ defaultListId = null, defaultListType = null }, updatedAt) {
+    return buildProjectSettingsItem({ defaultListId, defaultListType, updatedAt })
 }
 
 // Rebuild a list / group meta-item from its current reduced entry, applying a
