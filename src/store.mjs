@@ -123,6 +123,13 @@ export function createDesktopStore(initial = {}) {
         recovery: null,
         notices: [],
         diagnostics: [],
+        // Why local writes are currently refused by the backend, or null when
+        // writes flow. 'not-writable' = this device isn't an accepted writer
+        // (yet); 'sync-stalled' = the local writer can't flush (no reachable
+        // peer). Set from backend messages, cleared by clearWriteBlock() when
+        // a mutation succeeds again. The UI renders it as a persistent banner
+        // so refused writes are never silent.
+        writeBlock: null,
         // Live leaf-bridge state pushed by the backend worker; null until the
         // worker reports it. { running, port, controlKey, connections, error }
         leafBridge: null,
@@ -158,6 +165,11 @@ export function createDesktopStore(initial = {}) {
 
     function dismissNotice(id) {
         setState({ notices: state.notices.filter((notice) => notice.id !== id) })
+    }
+
+    // A mutation went through again — writes flow, drop the write-block banner.
+    function clearWriteBlock() {
+        if (state.writeBlock) setState({ writeBlock: null })
     }
 
     function recordDiagnostic(label, detail, now) {
@@ -214,6 +226,7 @@ export function createDesktopStore(initial = {}) {
                     inviteKey: '',
                     roster: null,
                     synced: false,
+                    writeBlock: null,
                     diagnostics: recordDiagnostic('reset', undefined, now),
                 })
                 return 'reset'
@@ -257,7 +270,11 @@ export function createDesktopStore(initial = {}) {
                 })
                 return type
             case 'not-writable':
-                setState({ diagnostics: recordDiagnostic('not-writable', undefined, now) })
+            case 'sync-stalled':
+                // The backend refused a mutation (see @listam/backend lib/item.mjs
+                // write gates) — remember why so the UI can say so instead of
+                // dropping the change silently.
+                setState({ writeBlock: type, diagnostics: recordDiagnostic(type, undefined, now) })
                 return type
             case 'membership-roster':
                 setState({
@@ -311,6 +328,7 @@ export function createDesktopStore(initial = {}) {
         setPreferences,
         pushNotice,
         dismissNotice,
+        clearWriteBlock,
         applyClientEvent,
     }
 }

@@ -629,7 +629,32 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     // --- backend commands -------------------------------------------------
-    const send = (command, payload) => Promise.resolve(client.send(command, payload)).catch(() => {
+    // Mutation replies come back as a JSON string ({ ok, reason } from the
+    // backend's replyMutationResult). Tolerates null / non-JSON replies from
+    // commands that answer with nothing (or the mock backend).
+    function parseReply(raw) {
+        if (typeof raw !== 'string' || !raw) return null
+        try { return JSON.parse(raw) } catch { return null }
+    }
+    // A refused write (not writable / sync stalled / unroutable list) used to
+    // vanish silently: the backend answers { ok:false } but nothing surfaced
+    // it. Say so — the specific cause is on state.writeBlock when the backend
+    // messaged it (rendered as a persistent banner), so the toast only covers
+    // the caseless refusal.
+    function noticeWriteRefused() {
+        if (store.getState().writeBlock) return // the write-block banner already explains it
+        const text = locale.i18n.t('main.notification.writeRefused')
+        if (store.getState().notices.some((notice) => notice.text === text)) return
+        store.pushNotice(text, 'error')
+    }
+    // Resolves with the worker's RAW reply (JSON string or null); the few
+    // callers that need it (shareList/joinList) parse it themselves.
+    const send = (command, payload) => Promise.resolve(client.send(command, payload)).then((raw) => {
+        const res = parseReply(raw)
+        if (res?.ok === false && res.reason === 'mutation-refused') noticeWriteRefused()
+        else if (res?.ok === true) store.clearWriteBlock()
+        return raw
+    }).catch(() => {
         store.pushNotice(locale.i18n.t('backend.startFailed'), 'error')
     })
 
@@ -861,6 +886,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             // A shared list's writes carry its baseKey so the backend routes them
             // to that base (UPDATE/DELETE/MOVE already carry it on the item).
             send(RPC_ADD, { text: trimmed, listId, listType: isTodo ? TODO_LIST_TYPE : undefined, baseKey: ui.activeBaseKey || undefined, ...rates })
+                .then((raw) => {
+                    // The bar cleared optimistically; a refused add (surfaced by
+                    // `send`) would still lose the typed text. Put it back into a
+                    // still-open, still-idle add bar — never over a newer draft.
+                    if (parseReply(raw)?.ok !== false) return
+                    const live = root.querySelector('#add-item-input')
+                    if (!live || live.value.trim()) return
+                    live.value = trimmed
+                    live.classList.remove('shake')
+                    void live.offsetWidth
+                    live.classList.add('shake')
+                })
             return true
         },
         // --- list registry (groups, lists) --------------------------------
@@ -5862,7 +5899,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     function renderNotices(state) {
+        // Persistent write-block banner: pure projection of state.writeBlock
+        // (set on the backend's not-writable / sync-stalled refusal messages,
+        // cleared when a write succeeds). Unlike toasts it never times out —
+        // "your changes aren't being saved" must stay visible while true.
+        const writeBlockBanner = state.writeBlock
+            ? h('div', { class: 'notice error', dataset: { writeBlock: state.writeBlock } },
+                locale.i18n.t(state.writeBlock === 'not-writable'
+                    ? 'main.notification.writeNotWritable'
+                    : 'main.notification.writeSyncStalled'))
+            : null
         replaceChildren(noticesHost,
+            ...(writeBlockBanner ? [writeBlockBanner] : []),
             ...state.notices.map((notice) => h('div', {
                 class: `notice ${notice.tone}`,
                 dataset: { noticeId: String(notice.id) },

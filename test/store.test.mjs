@@ -105,6 +105,30 @@ test('store tracks sync, membership, and recovery message payloads', () => {
     assert.equal(store.getState().inviteKey, '')
 })
 
+test('write refusals set writeBlock; success and reset clear it', () => {
+    const store = createDesktopStore()
+    assert.equal(store.getState().writeBlock, null)
+
+    // The backend's mutation gates message the refusal cause (item.mjs gates:
+    // not an accepted writer / local writer can't flush).
+    store.applyClientEvent({ type: 'message', payload: { type: 'not-writable' } }, 5)
+    assert.equal(store.getState().writeBlock, 'not-writable')
+    assert.equal(store.getState().diagnostics.at(-1).label, 'not-writable')
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'sync-stalled' } }, 6)
+    assert.equal(store.getState().writeBlock, 'sync-stalled')
+    assert.equal(store.getState().diagnostics.at(-1).label, 'sync-stalled')
+
+    // A successful mutation clears the block (ui.mjs calls this on ok:true).
+    store.clearWriteBlock()
+    assert.equal(store.getState().writeBlock, null)
+
+    // A base reset also drops it — the new base starts unjudged.
+    store.applyClientEvent({ type: 'message', payload: { type: 'not-writable' } }, 7)
+    store.applyClientEvent({ type: 'reset' }, 8)
+    assert.equal(store.getState().writeBlock, null)
+})
+
 test('diagnostics entries are redacted and bounded', () => {
     const store = createDesktopStore()
     const hexKey = 'a'.repeat(64)

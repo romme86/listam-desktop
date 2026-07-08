@@ -112,6 +112,10 @@ async function boot() {
     store.setState({ backendReady: true })
     mountApp({ root, store, client: mock.client, locale })
     mock.start()
+    // Design-preview handle (mock boot only, never under Pear): lets browser
+    // automation drive store events (e.g. simulate backend messages) to verify
+    // UI states the fixtures can't reach.
+    globalThis.__listamPreview = { store, client: mock.client }
 }
 
 boot().catch((error) => {
