@@ -2324,8 +2324,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return roll ? h('div', { class: 'plan-weekbar' }, roll) : null
         })()
 
-        // Drag within a day reorders; drop onto a day pill re-plans to that day.
-        const planDnd = (rec, dayRecords, index) => ({
+        // Every plan row is a drag SOURCE: dropping it onto a day pill (the strip)
+        // or a week column re-plans it to that day (movePlanToDay). This is what
+        // makes single-item days, done rows, and carried-over rows movable — not
+        // only the multi-row days that also support reordering.
+        const planDragSource = (rec) => ({
             draggable: 'true',
             ondragstart: (event) => {
                 ui.planDrag = { ref: rec.ref, fromDate: rec.plannedFor }
@@ -2335,6 +2338,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 event.stopPropagation()
             },
             ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
+        })
+        // Within a single day, a row is ALSO a reorder drop target — only wired
+        // when the day holds more than one row (a lone row has nothing to reorder
+        // against). Cross-day moves are handled by the day pill / column drops.
+        const planReorderTarget = (rec, dayRecords, index) => ({
             ondragover: (event) => {
                 const d = ui.planDrag
                 if (!d || d.ref === rec.ref || d.fromDate !== rec.plannedFor) return
@@ -2359,13 +2367,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         })
 
         const planRow = (resolved, dayRecords, index, opts = {}) => {
-            const draggable = !!(dayRecords && dayRecords.length > 1)
-            const dnd = draggable ? planDnd(resolved.rec, dayRecords, index) : {}
-            // A visible grip on reorderable rows so drag-to-reorder (and drag onto
-            // a day pill) is discoverable; the whole row is the drag source.
-            const grip = draggable
-                ? h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
-                : null
+            // Every row is a drag source (drop on a day pill/column to re-plan it to
+            // another day); rows in a multi-row day are additionally reorder targets.
+            // The whole row is the drag surface — the grip is just the affordance,
+            // shown on every row so "move to another day" is always discoverable.
+            const records = Array.isArray(dayRecords) ? dayRecords : []
+            const dnd = { ...planDragSource(resolved.rec), ...(records.length > 1 ? planReorderTarget(resolved.rec, records, index) : {}) }
+            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
             if (resolved.kind === 'list') {
                 return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
                     grip,
@@ -2422,10 +2430,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
 
         // A carried-over row (shown only under Today): same check / open / clear
         // as a normal plan row, plus a badge for the past day it slipped from and
-        // a one-click "move to today" that actually re-homes the entry. Not
-        // draggable (the rows span different source days).
+        // a one-click "move to today" shortcut. It's a drag source too, so a
+        // slipped item can be dropped onto ANY day pill/column — not just today.
+        // Not a reorder target (each carries a different past day of its own).
         const carryRow = (resolved) => {
             const rec = resolved.rec
+            const dnd = planDragSource(rec)
+            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
             const badge = h('span', {
                 class: 'plan-carry-badge label-sm',
                 title: parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
@@ -2440,7 +2451,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 onclick: () => actions.movePlanToDay(rec.ref, today),
             }, tablerIcon('calendar-up', { size: 16 }))
             if (resolved.kind === 'list') {
-                return h('div', { class: 'plan-row plan-list-card plan-carry' },
+                return h('div', { class: 'plan-row plan-list-card plan-carry', ...dnd },
+                    grip,
                     h('button', {
                         class: 'plan-check',
                         'aria-label': t('plan.clearFromPlan'),
@@ -2460,7 +2472,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 )
             }
             const item = resolved.item
-            return h('div', { class: 'plan-row plan-carry' },
+            return h('div', { class: 'plan-row plan-carry', ...dnd },
+                grip,
                 h('button', {
                     class: 'plan-check',
                     'aria-pressed': 'false',
