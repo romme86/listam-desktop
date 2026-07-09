@@ -199,6 +199,7 @@ export function createMockBackend() {
                 reduction.applyOperation({ type: 'add', value: item })
                 items = reduction.allItems()
                 emit({ type: 'add-from-backend', item, raw: JSON.stringify(item) })
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_UPDATE) {
                 let item = payload?.item
                 if (item && isBoardType(item.listType)) {
@@ -211,11 +212,13 @@ export function createMockBackend() {
                 reduction.applyOperation({ type: 'update', value: item })
                 items = reduction.allItems()
                 emit({ type: 'update-from-backend', item, raw: JSON.stringify(item) })
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_DELETE) {
                 const item = payload?.item
                 reduction.applyOperation({ type: 'delete', value: item })
                 items = reduction.allItems()
                 emit({ type: 'delete-from-backend', item, raw: JSON.stringify(item) })
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_MOVE) {
                 // Mirror the backend: same listId -> single in-place update;
                 // different listId -> add destination then delete source.
@@ -238,6 +241,7 @@ export function createMockBackend() {
                     items = reduction.allItems()
                     emit({ type: 'delete-from-backend', item: source, raw: JSON.stringify(source) })
                 }
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_CREATE_INVITE) {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
             } else if (command === RPC_SHARE_LIST) {

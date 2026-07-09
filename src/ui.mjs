@@ -86,6 +86,7 @@ import {
     detectExtraLists,
 } from './registry.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
+import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
 import { LOCALE_CHOICES, localeChoiceLabel } from './i18n.mjs'
 import { nextTheme, THEME_CHOICES } from './prefs.mjs'
@@ -421,6 +422,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // { listId, type, builtin, fromGroupId } while a drag is in flight.
         railDrag: null,
         boardConfigRequested: false,
+        // Per-session, in-memory undo history (Ship 1: delete / edit / toggle).
+        // Each entry is one gesture's pre-image; undo replays it as a fresh LWW
+        // write. Lost on reload and cleared on a base switch (see renderAll).
+        undoStack: [],
     }
     const now = env.now ?? (() => Date.now())
     // Block ids only need to be unique within a session; the renderer rebuilds
@@ -657,6 +662,37 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }).catch(() => {
         store.pushNotice(locale.i18n.t('backend.startFailed'), 'error')
     })
+
+    // --- undo (Ship 1: delete / edit / toggle) -----------------------------
+    // A capture is only recorded once its forward write is acknowledged ok, so
+    // refused / offline writes never enter the stack (nothing changed → nothing
+    // to invert). Undo replays the pre-image as a new LWW write stamped now().
+    const UNDO_CAP = 50
+    function pushUndo(entry) {
+        pushCapped(ui.undoStack, entry, UNDO_CAP)
+    }
+    // Pair with a send(): records `entry` iff the reply says the write landed.
+    function captureIfOk(raw, entry) {
+        if (parseReply(raw)?.ok === true) pushUndo(entry)
+    }
+    function undoLast() {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const entry = ui.undoStack.at(-1)
+        if (!entry) { store.pushNotice(t('main.notification.nothingToUndo'), 'info'); return }
+        const lookup = (id) => store.getState().items.find((it) => it.id === id)
+        if (!guardOk(entry, lookup)) {
+            // The target changed underneath us (a change we can already see);
+            // drop the stale entry rather than clobber the newer value.
+            ui.undoStack.pop()
+            store.pushNotice(t('main.notification.undoConflict'), 'error')
+            return
+        }
+        const { command, payload } = applyInverseWrite(entry, now(), RPC_UPDATE)
+        markLocalId(entry.itemId)
+        send(command, payload)
+        ui.undoStack.pop()
+        store.pushNotice(t('main.notification.undone'), 'info')
+    }
 
     // --- this device's advertised name (synced peer-label item) ------------
     // This device only learns its own autobase writer key from the membership
@@ -1131,24 +1167,25 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         },
         toggleItem(item) {
             markLocalId(item.id)
-            send(RPC_UPDATE, {
-                item: {
-                    ...item,
-                    isDone: !item.isDone,
-                    timeOfCompletion: item.isDone ? 0 : now(),
-                    updatedAt: now(),
-                },
-            })
+            const ts = now()
+            const forward = { ...item, isDone: !item.isDone, timeOfCompletion: item.isDone ? 0 : ts, updatedAt: ts }
+            const entry = buildUndoEntry({ kind: 'toggle', itemId: item.id, preImage: item, touched: { isDone: forward.isDone, timeOfCompletion: forward.timeOfCompletion } })
+            send(RPC_UPDATE, { item: forward }).then((raw) => captureIfOk(raw, entry))
         },
         editItem(item, text) {
             const trimmed = text.trim()
             if (!trimmed || trimmed === item.text) return
             markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, text: trimmed, updatedAt: now() } })
+            const entry = buildUndoEntry({ kind: 'edit', itemId: item.id, preImage: item, touched: { text: trimmed } })
+            send(RPC_UPDATE, { item: { ...item, text: trimmed, updatedAt: now() } }).then((raw) => captureIfOk(raw, entry))
         },
         deleteItem(item) {
             markLocalId(item.id)
-            animateRowExit(item, () => send(RPC_DELETE, { item }))
+            // Undo resurrects by re-writing the full pre-image under its original
+            // id (order preserved → position restored); pushed only once the
+            // delete lands ok, inside the row-exit callback.
+            const entry = buildUndoEntry({ kind: 'delete', itemId: item.id, preImage: item })
+            animateRowExit(item, () => send(RPC_DELETE, { item }).then((raw) => captureIfOk(raw, entry)))
         },
         // Move an item to a different list and/or type, WITHIN this project. The
         // backend decomposes it into add+delete (different listId) or a single
@@ -2159,6 +2196,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ['Space', t('desktop.hints.done')],
             ['F', t('desktop.hints.flag')],
             ['Del', t('desktop.hints.delete')],
+            ['⌘Z', t('desktop.hints.undo')],
             ['T', t('desktop.hints.theme')],
             ['?', t('desktop.hints.help')],
         ]
@@ -5707,6 +5745,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 ['⇧ F', t('desktop.shortcuts.flagFor')],
                 ['I', t('inspector.toggle')],
                 ['Delete', t('desktop.shortcuts.deleteItem')],
+                ['⌘Z', t('desktop.shortcuts.undo')],
                 ['T', t('desktop.shortcuts.cycleTheme')],
                 ['H', t('desktop.shortcuts.toggleHints')],
                 ['?', t('desktop.shortcuts.help')],
@@ -5972,6 +6011,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         if (isTypingTarget(event.target) || ui.dialog) return
 
+        // ⌘Z / Ctrl+Z undoes the last content change (delete / edit / toggle).
+        // Deliberately BELOW the typing guard so native char-undo wins inside
+        // inputs and the block editor — this only fires when focus isn't in a
+        // field. ⇧ (redo) is reserved for a later ship; ignore it here.
+        if ((event.metaKey || event.ctrlKey) && (event.key === 'z' || event.key === 'Z')) {
+            if (event.shiftKey) return
+            event.preventDefault()
+            undoLast()
+            return
+        }
+
         if (event.key === 'n' || event.key === '/') {
             event.preventDefault()
             actions.summonAddBar()
@@ -6026,8 +6076,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // recomputed each render (like plannedRefs) so the gating + badges read a
     // single snapshot rather than re-reducing per item.
     let valueSurfaces = new Map()
+    // Undo history is per-base: a reset / join (synced flips false) invalidates
+    // every captured inverse, which may point at items that no longer exist.
+    let lastSynced = null
     function renderAll() {
         const state = store.getState()
+        if (state.synced === false && lastSynced !== false) ui.undoStack.length = 0
+        lastSynced = state.synced
         plannedRefs = new Set(reducePlan(state.items).keys())
         valueSurfaces = reduceValueReturn(state.items)
         // Advertise this device's name once its writer key is known (roster).
