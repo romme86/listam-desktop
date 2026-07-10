@@ -13,6 +13,12 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import readline from 'node:readline'
 import createTestnet from 'hyperdht/testnet.js'
+import { isLabelItem } from '@listam/domain/labels'
+
+// The backend now self-publishes synced presence/heartbeat meta-items (text: '')
+// alongside real list content; the UI hides them via isLabelItem, so the visible
+// list is the non-meta items. Mirror that here when asserting list content.
+const contentItems = (items) => items.filter((item) => !isLabelItem(item))
 
 const DRIVER = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'backend-driver.mjs')
 const JOIN_TIMEOUT_MS = 120_000
@@ -135,8 +141,8 @@ test('desktop contract: two instances pair via invite on a private testnet and c
     const joined = await guest.waitFor((dump) => dump.joined)
     assert.ok(joined.joined, 'guest reported join-success')
 
-    const guestSynced = await guest.waitFor((dump) => dump.items.length >= 2)
-    const guestTexts = guestSynced.items.map((item) => item.text).sort()
+    const guestSynced = await guest.waitFor((dump) => contentItems(dump.items).length >= 2)
+    const guestTexts = contentItems(guestSynced.items).map((item) => item.text).sort()
     assert.deepEqual(guestTexts, ['Bread', 'Milk'])
 
     // The host accepted the guest as a writer through the owner-signed

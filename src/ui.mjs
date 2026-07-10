@@ -50,6 +50,11 @@ import {
     reduceValueReturn,
 } from '@listam/domain/labels'
 import {
+    reducePresence,
+    isOnlineNow,
+    averageOnlineMs,
+} from '@listam/domain/presence'
+import {
     VALUE_MIN,
     VALUE_MAX,
     clampRate,
@@ -127,6 +132,9 @@ const HINTS_LEAVE_MS = 150
 const REMOTE_ATTRIBUTION_MS = 5000
 // How often the Servers pane re-polls paired headless peers while it's open.
 const SERVERS_POLL_MS = 20000
+// How often to re-render the peers pane / devices dialog so presence (online-now,
+// "seen ago") decays with wall-clock even when no new heartbeat event arrives.
+const PRESENCE_TICK_MS = 20000
 
 function replaceChildren(host, ...children) {
     host.replaceChildren(...children.filter((child) => child != null))
@@ -3119,6 +3127,57 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (items !== _peerLabelItems) { _peerLabelItems = items; _peerLabelMap = reducePeerLabels(items) }
         return _peerLabelMap
     }
+    // --- Presence: per-peer online / last-seen / last-ping / avg-online, reduced
+    // (memoized like labels) from the synced heartbeat channel that rides state.items. ---
+    let _presenceItems = null
+    let _presenceMap = null
+    function presenceMap() {
+        const items = store.getState().items
+        if (items !== _presenceItems) { _presenceItems = items; _presenceMap = reducePresence(items) }
+        return _presenceMap
+    }
+    // Presence facts for a writer key: live online flag (heartbeat within the
+    // threshold), last-active/last-interaction stamps, average online time, and the
+    // owner-signed join date carried on the roster.
+    function peerPresence(key) {
+        const k = String(key || '')
+        const entry = presenceMap().get(k) || null
+        const w = (store.getState().roster?.writers ?? []).find((x) => x.writerKey === k)
+        return {
+            entry,
+            online: isOnlineNow(entry, now()),
+            lastActiveAt: entry?.lastActiveAt || 0,
+            lastInteractionAt: entry?.lastInteractionAt || 0,
+            avgOnlineMs: averageOnlineMs(entry),
+            joinedAt: (w && typeof w.joinedAt === 'number') ? w.joinedAt : null,
+        }
+    }
+    function presenceDate(ms) {
+        try { return locale.i18n.date(Number(ms), { day: 'numeric', month: 'short' }) } catch { return '' }
+    }
+    // Shape-encoded status dot: breathing acid when online, hollow ring otherwise.
+    function presenceDot(key) {
+        return h('span', { class: `presence-dot ${peerPresence(key).online ? 'live' : 'off'}` })
+    }
+    // Mono meta sub-line: "Joined 3 Apr · Active 12s ago · Avg 3h 5m online". Empty
+    // string when nothing is known yet (a peer that has not beaten this session).
+    function presenceMeta(key) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const p = peerPresence(key)
+        const parts = []
+        if (p.joinedAt) parts.push(t('presence.joined', { date: presenceDate(p.joinedAt) }))
+        if (p.lastInteractionAt) parts.push(t('presence.lastPing', { ago: formatAgo(now() - p.lastInteractionAt) }))
+        if (p.avgOnlineMs > 0) parts.push(t('presence.avgOnline', { time: formatUptime(p.avgOnlineMs) }))
+        return parts.join(' · ')
+    }
+    // Right-aligned live status: "Online now" (acid) or "Seen 2d ago" (muted).
+    function presenceStatus(key) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const p = peerPresence(key)
+        if (p.online) return h('span', { class: 'presence-status online' }, t('presence.onlineNow'))
+        if (p.lastActiveAt) return h('span', { class: 'presence-status' }, t('presence.lastSeen', { ago: formatAgo(now() - p.lastActiveAt) }))
+        return h('span', { class: 'presence-status' }, '')
+    }
     // Resolve a writer/device key to a human display. Synced device name when
     // present (initials from the name); otherwise the self label or a short
     // fingerprint. Used everywhere an assignee/author/member key is shown so the
@@ -4976,11 +5035,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // member is legible (name or self label) AND its key is grabbable.
         return members.map((member) => {
             const pd = peerDisplay(member.writerKey)
+            const meta = presenceMeta(member.writerKey)
             return h('div', { class: 'member-row' },
+                presenceDot(member.writerKey),
                 h('div', { class: 'who' },
                     h('span', { class: 'who-name', title: pd.title }, pd.name || (member.isSelf ? t('members.role.self') : pd.short)),
                     fingerprintChip(member.writerKey),
+                    meta ? h('span', { class: 'presence-meta' }, meta) : null,
                 ),
+                presenceStatus(member.writerKey),
                 h('span', { class: `role-chip${member.isOwner ? ' owner' : ''}` },
                     member.isOwner ? t('members.role.owner') : member.isSelf ? t('members.role.self') : t('members.role.member')),
                 canAdminister && !member.isSelf && !member.isOwner
@@ -5707,20 +5770,24 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('button', { class: 'btn btn-danger', onclick: () => actions.recover('reset') }, t('backend.recovery.confirmReset')),
             ], { trust: true })
         } else if (kind === 'devices') {
-            // Who is on this list — names + roles + copyable fingerprint, plus the
-            // connected count. Opened from any sync beacon. (Per-device live
-            // presence/last-seen is a follow-up needing a backend writer↔conn map.)
+            // Who is on this list — names + roles + copyable fingerprint, and per
+            // device its live presence (online-now / last-seen / last-ping / avg
+            // online, from the synced heartbeat channel) plus the connected count.
             const writers = state.roster?.writers ?? []
             const deviceRows = writers.length === 0
                 ? [h('p', { class: 'dialog-body', style: 'color: var(--secondary);' }, t('desktop.peers.none'))]
                 : writers.map((w) => {
                     const pd = peerDisplay(w.writerKey)
+                    const meta = presenceMeta(w.writerKey)
                     return h('div', { class: 'device-row' },
+                        presenceDot(w.writerKey),
                         h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials),
                         h('div', { class: 'device-main' },
                             h('span', { class: 'device-name' }, pd.name || (pd.isSelf ? t('members.role.self') : pd.short)),
                             fingerprintChip(w.writerKey),
+                            meta ? h('span', { class: 'presence-meta' }, meta) : null,
                         ),
+                        presenceStatus(w.writerKey),
                         h('span', { class: `role-chip${pd.isOwner ? ' owner' : ''}` },
                             pd.isOwner ? t('members.role.owner') : pd.isSelf ? t('members.role.self') : t('members.role.member')),
                     )
@@ -6120,6 +6187,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     // prevents overlap. One interval for the app's lifetime — cheap when hidden.
     if (ownerControl && typeof setInterval === 'function') {
         setInterval(() => { if (ui.view === 'peers') refreshAllServers({ silent: true }) }, SERVERS_POLL_MS)
+    }
+    // Presence decays with wall-clock: a peer that stops beating must flip offline
+    // as time passes, with no new event to drive a re-render. Re-render the peers
+    // pane / devices dialog on a slow tick so online-now and "seen ago" stay live
+    // while visible. Cheap and idle when neither surface is showing.
+    if (typeof setInterval === 'function') {
+        setInterval(() => {
+            if (ui.view === 'peers' || ui.dialog?.kind === 'devices') renderAll()
+        }, PRESENCE_TICK_MS)
     }
     return { renderAll, openDialog, closeDialog, actions }
 }

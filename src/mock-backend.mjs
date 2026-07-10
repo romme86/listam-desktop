@@ -25,6 +25,7 @@ import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
 import { TODO_LIST_TYPE } from '@listam/domain/identity'
 import { buildValueReturnItem } from '@listam/domain/labels'
+import { buildPresenceItem } from '@listam/domain/presence'
 import { buildItemPlanEntry, buildListPlanEntry, toDateKey, shiftDateKey } from '@listam/domain/plan'
 import { reductionFromItems } from './store.mjs'
 
@@ -160,7 +161,15 @@ export function createMockBackend() {
         buildListPlanEntry({ listId: HARDWARE_LIST, listType: 'shopping', plannedFor: shiftDateKey(todayKey, -2), planOrder: 2000, updatedAt: 2 }),
     ]
 
-    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures, ...planFixtures])
+    // Presence fixtures so ?mock=1 renders the per-peer status (online-now,
+    // last-seen, last-ping, avg-online): A (this device / owner) is online now with
+    // a high average; B (a member) was last seen ~2h ago with a lower average.
+    const presenceFixtures = [
+        buildPresenceItem({ writerKey: A, lastActiveAt: NOWMS - 30 * 1000, lastInteractionAt: NOWMS - 12 * 1000, sessionStartedAt: NOWMS - 3 * HOUR, cumulativeOnlineMs: Math.round(9.67 * HOUR), sessionCount: 1, updatedAt: NOWMS - 30 * 1000 }),
+        buildPresenceItem({ writerKey: B, lastActiveAt: NOWMS - 2 * HOUR, lastInteractionAt: NOWMS - 2 * HOUR - 5 * 60 * 1000, sessionStartedAt: NOWMS - 5 * HOUR, cumulativeOnlineMs: Math.round(3.08 * HOUR), sessionCount: 1, updatedAt: NOWMS - 2 * HOUR }),
+    ]
+
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures, ...planFixtures, ...presenceFixtures])
     items = reduction.allItems()
 
     function emit(event) {
@@ -363,8 +372,8 @@ export function createMockBackend() {
                 roster: {
                     canAdminister: true,
                     writers: [
-                        { writerKey: 'a1'.repeat(32), isOwner: true, isSelf: true },
-                        { writerKey: 'b2'.repeat(32), isOwner: false, isSelf: false },
+                        { writerKey: 'a1'.repeat(32), isOwner: true, isSelf: true, joinedAt: NOWMS - 60 * DAY },
+                        { writerKey: 'b2'.repeat(32), isOwner: false, isSelf: false, joinedAt: NOWMS - 20 * DAY },
                     ],
                 },
             },
