@@ -49,9 +49,9 @@ export function createLeafBridgeManager({ load, log, publish }) {
                 port,
                 logger: log,
                 tcp,
-                onStatus({ connections }) {
+                onStatus({ connections, lastConnectAt, lastDisconnectAt }) {
                     if (token !== generation) return
-                    setStatus({ ...status, connections })
+                    setStatus({ ...status, connections, lastConnectAt, lastDisconnectAt })
                 },
             })
             setStatus({
@@ -60,6 +60,8 @@ export function createLeafBridgeManager({ load, log, publish }) {
                 controlKey: bridge.controlKey,
                 hubAddr: hubAddrFromOs(os, bridge.port),
                 connections: 0,
+                lastConnectAt: 0,
+                lastDisconnectAt: 0,
                 error: null,
             })
             log.info('leaf-bridge started', { port: bridge.port })

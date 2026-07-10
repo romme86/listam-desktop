@@ -4650,7 +4650,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     ? t('desktop.leaf.off')
                     : (leaf.connections > 0
                         ? t('desktop.leaf.connected', { count: leaf.connections })
-                        : t('desktop.leaf.waiting', { port: leaf.port }))),
+                        // Leaves are anonymous mirrors — when none is live, show when
+                        // one was last seen (hub-observed, not a synced roster peer).
+                        : (leaf.lastDisconnectAt
+                            ? `${t('desktop.leaf.waiting', { port: leaf.port })} · ${t('presence.lastSeen', { ago: formatAgo(now() - leaf.lastDisconnectAt) })}`
+                            : t('desktop.leaf.waiting', { port: leaf.port })))),
             ),
             h('div', { class: 'choice-row', style: 'padding: 0 1rem;' },
                 h('button', {
@@ -4906,7 +4910,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             h('span', { class: 'label-sm', style: 'color: var(--secondary);' }, label),
             h('span', { class: 'body-md' }, value),
         ))
-        add(t('desktop.servers.field.role'), String(status.role ?? '—'))
+        add(t('desktop.servers.field.role'), status.role === 'blind-storage' ? t('members.role.blind') : String(status.role ?? '—'))
         add(t('desktop.servers.field.joined'), status.joined ? t('desktop.servers.yes') : t('desktop.servers.no'))
         add(t('desktop.servers.field.peers'), String(status.peerCount ?? 0))
         add(t('desktop.servers.field.items'), String(status.itemCount ?? 0))
