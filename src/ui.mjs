@@ -5409,6 +5409,27 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.deviceName.label')),
                 deviceNameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.deviceName.help')),
+                // This device's own writer key — the public identifier peers use to
+                // tell devices apart. Shown so a user can match this device against a
+                // row in Peers & Devices (e.g. to check why a name isn't syncing).
+                // Prefer the roster's localWriterKey (present even before this device
+                // is an accepted writer) so the key shows the moment the base opens.
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.deviceKey.label')),
+                (() => {
+                    const key = state.roster?.localWriterKey || state.roster?.writers?.find((w) => w.isSelf)?.writerKey || ''
+                    if (!key) return h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.deviceKey.pending'))
+                    return h('div', { class: 'device-key-row', style: 'display: flex; align-items: center; gap: 0.5rem;' },
+                        h('code', { class: 'device-key-value', style: 'flex: 1; min-width: 0; overflow-wrap: anywhere; word-break: break-all; user-select: text; font-size: 0.72rem; line-height: 1.35; color: var(--secondary);' }, key),
+                        h('button', {
+                            class: 'fingerprint-chip',
+                            type: 'button',
+                            title: t('desktop.peers.copy'),
+                            'aria-label': t('desktop.peers.copy'),
+                            onclick: () => copyText(key, 'desktop.settings.deviceKey.copied'),
+                        }, tablerIcon('copy', { size: 12 })),
+                    )
+                })(),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.deviceKey.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.theme.label')),
                 themeRow,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.hints.show')),

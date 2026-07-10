@@ -371,6 +371,7 @@ export function createMockBackend() {
                 type: 'membership-roster',
                 roster: {
                     canAdminister: true,
+                    localWriterKey: 'a1'.repeat(32),
                     writers: [
                         { writerKey: 'a1'.repeat(32), isOwner: true, isSelf: true, joinedAt: NOWMS - 60 * DAY },
                         { writerKey: 'b2'.repeat(32), isOwner: false, isSelf: false, joinedAt: NOWMS - 20 * DAY },
