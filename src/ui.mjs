@@ -1831,8 +1831,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Synced group placement for the built-in surfaces (surfaceKey -> groupId).
         const syncedBuiltinGroups = reduceBuiltinGroups(items)
         // Built-ins the user has deleted on THIS device are hidden (device-local).
+        // The built-in GROCERY surface is exempt: it is undeletable AND unhideable
+        // (the always-there landing list for voice/quick adds), so a leftover
+        // hiddenBuiltins entry written by an older build is ignored.
         const hidden = new Set(Array.isArray(state.preferences.hiddenBuiltins) ? state.preferences.hiddenBuiltins : [])
-        const builtinVisible = (type) => !hidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type))
+        const builtinVisible = (type) => (!isBoardType(type) && !isTodoType(type)) || !hidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type))
 
         // The former built-ins on the default list, now general-group lists.
         // Board follows the gate-creation-only rule: shown when boardEnabled OR a
