@@ -36,7 +36,7 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
-import { isRegistryItem, reduceRegistry } from '@listam/domain/list-registry'
+import { isRegistryItem, reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
     isLabelItem,
     surfaceLabelKey,
@@ -81,7 +81,6 @@ import {
 import {
     newListMeta,
     newGroupMeta,
-    newProjectSettingsMeta,
     patchListMeta,
     patchGroupMeta,
     deleteListMeta,
@@ -484,6 +483,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     const nextGroupId = () => `group-${now()}-${registryIdSeq++}`
     // The reduced registry derived from the synced meta-items in state.items.
     const currentRegistry = () => reduceRegistry(store.getState().items)
+
+    // Duplicate list names made spoken/name-based targeting ambiguous, so every
+    // create/rename validates here. Two name namespaces exist: registry lists
+    // (regName) and the built-in surfaces (synced surface labels, listId
+    // 'default') — a clash across them is just as ambiguous as within one.
+    const foldListName = (value) => String(value ?? '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim()
+    function listNameTaken(name, { excludeId = null, excludeBuiltinType = null } = {}) {
+        const target = foldListName(name)
+        if (!target) return false
+        const items = store.getState().items
+        if (isListNameTaken(items, name, { excludeId })) return true
+        const surfaceLabels = reduceSurfaceLabels(items)
+        for (const type of [DEFAULT_LIST_TYPE, BOARD_LIST_TYPE, TODO_LIST_TYPE]) {
+            if (excludeBuiltinType && canonicalSurfaceType(excludeBuiltinType) === canonicalSurfaceType(type)) continue
+            if (foldListName(builtinDisplayName(type, surfaceLabels)) === target) return true
+        }
+        return false
+    }
+    const rejectDuplicateListName = () => store.pushNotice(locale.i18n.t('desktop.list.duplicateName'), 'error')
 
     // Every list must belong to a group; "general" is the mandated default home
     // (also where the former built-in Groceries/Board/Todo surfaces live). Its id
@@ -952,6 +971,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         createList({ name, type, groupId = GENERAL_GROUP_ID }) {
             // Every list must have a group; default to "general" and make sure
             // that group's meta-item exists before filing the list under it.
+            if (listNameTaken(name)) { rejectDuplicateListName(); return null }
             const dest = groupId || GENERAL_GROUP_ID
             if (dest === GENERAL_GROUP_ID) ensureGeneralGroup()
             const id = nextListId()
@@ -968,6 +988,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             return id
         },
         renameList(id, name) {
+            if (listNameTaken(name, { excludeId: id })) { rejectDuplicateListName(); return }
             const meta = patchListMeta(currentRegistry(), id, { name: (name ?? '').trim() }, now())
             if (!meta) return
             markLocalId(id)
@@ -1033,6 +1054,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // surface-name label item keyed by (listId:type). Empty name clears the
         // override (reverts to the localized default).
         renameBuiltin(listId, type, name) {
+            if ((name ?? '').trim() && listNameTaken(name, { excludeBuiltinType: type })) { rejectDuplicateListName(); return }
             const item = buildSurfaceLabelItem({ listId, type, name: (name ?? '').trim(), updatedAt: now() })
             markLocalId(item.id)
             send(RPC_UPDATE, { item })
@@ -1042,6 +1064,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // (b) records the surfaceKey in the device-local `hiddenBuiltins` so the
         // surface drops off this rail.
         deleteBuiltin(listId, type) {
+            // The built-in grocery list is undeletable by design (it is the
+            // always-there landing list for voice/quick adds); board/todo
+            // surfaces remain hideable.
+            if (!isBoardType(type) && !isTodoType(type)) return
             const pred = typePredicate(type)
             for (const item of store.getState().items.filter((i) => i.listId === listId && pred(i))) {
                 send(RPC_DELETE, { item })
@@ -1068,19 +1094,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             else next[key] = dest
             store.setPreferences({ builtinGroups: next })
             const item = buildBuiltinGroupItem({ listId, type, groupId: dest === GENERAL_GROUP_ID ? '' : dest, updatedAt: now() })
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item })
-        },
-        // Set the project's synced default list — where un-targeted adds land
-        // (voice "aggiungi X" with no spoken list, and quick-add). Falsy listId
-        // clears the preference (reverts to the built-in default). Rides the
-        // registry as a singleton settings meta-item, so every peer (incl. the
-        // headless voice host) picks it up.
-        setDefaultList(listId, listType) {
-            const item = newProjectSettingsMeta(
-                listId ? { defaultListId: listId, defaultListType: listType || '' } : {},
-                now(),
-            )
             markLocalId(item.id)
             send(RPC_UPDATE, { item })
         },
@@ -1711,29 +1724,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('span', { class: 'switch-text' },
                     h('span', { class: 'switch-title label-sm' }, tablerIcon('coins', { size: 14 }), h('span', {}, t('value.enable'))),
                     h('span', { class: 'switch-hint label-md' }, t('value.enableHint')),
-                ),
-                h('span', { class: `switch${on ? ' on' : ''}` }, cb, h('span', { class: 'switch-knob' })),
-            ),
-        )
-    }
-    // The per-list "default list" toggle in list settings. Flagging a list makes
-    // voice / the leaf "add X" (with no spoken list name) land here instead of the
-    // built-in Groceries. Synced project-wide (buildProjectSettingsItem), so any
-    // device and whichever host runs voice honors it. Only ONE list is default:
-    // flipping this on clears any previous default; flipping it off reverts to the
-    // built-in default.
-    function defaultListToggleRow (listId, type) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const on = (currentRegistry().settings?.defaultListId ?? null) === listId
-        // Checking sets this list as the synced default; unchecking clears it
-        // (falsy listId reverts to the built-in default). Same action the project
-        // Settings picker uses, so the two stay in lock-step.
-        const cb = h('input', { type: 'checkbox', class: 'switch-input', checked: on ? '' : null, onchange: (event) => (event.target.checked ? actions.setDefaultList(listId, type) : actions.setDefaultList('', '')) })
-        return h('div', { class: 'value-toggle' },
-            h('label', { class: 'switch-row' },
-                h('span', { class: 'switch-text' },
-                    h('span', { class: 'switch-title label-sm' }, tablerIcon('flag', { size: 14 }), h('span', {}, t('desktop.list.voiceDefault'))),
-                    h('span', { class: 'switch-hint label-md' }, t('desktop.list.voiceDefaultHint')),
                 ),
                 h('span', { class: `switch${on ? ' on' : ''}` }, cb, h('span', { class: 'switch-knob' })),
             ),
@@ -5440,29 +5430,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('settings.board.label')),
                 boardRow,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.board.help')),
-                // Default list for un-targeted adds (voice / quick-add). Synced
-                // across the project via a registry settings meta-item; the
-                // built-in default is always offered even if it has no meta-item.
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.settings.defaultList.label')),
-                (() => {
-                    const reg = reduceRegistry(state.items)
-                    const current = reg.settings?.defaultListId || DEFAULT_LIST_ID
-                    const choices = reg.lists.some((l) => l.id === DEFAULT_LIST_ID)
-                        ? reg.lists
-                        : [{ id: DEFAULT_LIST_ID, name: t('desktop.settings.defaultList.builtin'), type: DEFAULT_LIST_TYPE }, ...reg.lists]
-                    return h('select', {
-                        class: 'prop-select',
-                        onchange: (event) => {
-                            const chosen = choices.find((l) => l.id === event.target.value)
-                            actions.setDefaultList(chosen?.id || DEFAULT_LIST_ID, chosen?.type || DEFAULT_LIST_TYPE)
-                        },
-                    }, ...choices.map((l) => {
-                        const opt = h('option', { value: l.id }, l.name)
-                        if (l.id === current) opt.setAttribute('selected', 'selected')
-                        return opt
-                    }))
-                })(),
-                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.settings.defaultList.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
                 // Whole-project sharing lives here (Settings) only — never a
@@ -5661,14 +5628,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
                 valueReturnToggleRow(listId, type),
             ], [
-                h('button', {
+                // The built-in grocery surface is undeletable (the always-there
+                // landing list for voice/quick adds) — no delete affordance.
+                (isBoardType(type) || isTodoType(type)) ? h('button', {
                     class: 'btn btn-danger',
                     onclick: () => {
                         if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
                         actions.deleteBuiltin(listId, type)
                         closeDialog()
                     },
-                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
+                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')) : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
             queueMicrotask(() => nameInput.focus())
@@ -5722,7 +5691,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                             }, t('shareList.button')),
                             h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
                         ),
-                defaultListToggleRow(listId, entry.type),
                 valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {
