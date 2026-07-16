@@ -2182,10 +2182,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
+    let renderedHints = null
+    let renderedHintsI18n = null
     function renderHints(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const show = state.preferences.showKeyHints
         shell.classList.toggle('has-hints', show)
+        // The footer is independent of list/backend state. Keeping the same DOM
+        // node across background updates prevents its entrance animation from
+        // restarting and preserves keyboard focus on its close button.
+        if (renderedHints === show && renderedHintsI18n === locale.i18n) return
+        renderedHints = show
+        renderedHintsI18n = locale.i18n
         if (!show) {
             hintsHost.replaceChildren()
             return
@@ -5629,6 +5637,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.rename')),
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
+                listIdentityBlock(listId, type),
                 valueReturnToggleRow(listId, type),
             ], [
                 // The built-in grocery surface is undeletable (the always-there
@@ -5671,6 +5680,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                 nameInput,
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
+                listIdentityBlock(listId, entry.type),
                 h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
                 // The built-in surfaces multiplex listId 'default' and cannot be
                 // shared on their own (the backend refuses it) — show why instead
@@ -5981,6 +5991,23 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             queueMicrotask(() => valF.inp.focus())
         }
 
+        function listIdentityBlock(listId, listType) {
+            const surfaceId = `${listId}:${listType || DEFAULT_LIST_TYPE}`
+            const row = (label, value) => h('div', { class: 'list-identity-row' },
+                h('dt', {}, label),
+                h('dd', {}, value || '—'),
+            )
+            return h('section', { class: 'list-identity' },
+                h('h3', { class: 'category-heading label-sm' }, t('list.identity.title')),
+                h('dl', {},
+                    row(t('list.identity.project'), state.baseId),
+                    row(t('list.identity.list'), listId),
+                    row(t('list.identity.surface'), surfaceId),
+                    row(t('list.identity.epoch'), state.epoch == null ? '—' : String(state.epoch)),
+                ),
+            )
+        }
+
         replaceChildren(dialogHost,
             h('div', { class: 'dialog-backdrop', onclick: (event) => { if (event.target === event.currentTarget) closeDialog() } }, content),
         )
@@ -6013,6 +6040,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         )
     }
 
+    // Redux Toolkit freezes projected state in development (and may do so in
+    // packaged builds), so timer bookkeeping must stay renderer-local. Writing
+    // `_timed` onto a notice used to throw on the first toast and abort every
+    // later store-driven render, making successful mutations appear inert.
+    const timedNoticeIds = new Set()
     function renderNotices(state) {
         // Persistent write-block banner: pure projection of state.writeBlock
         // (set on the backend's not-writable / sync-stalled refusal messages,
@@ -6032,12 +6064,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             }, notice.text)),
         )
         for (const notice of state.notices) {
-            if (notice._timed) continue
-            notice._timed = true
+            if (timedNoticeIds.has(notice.id)) continue
+            timedNoticeIds.add(notice.id)
             setTimeout(() => {
                 // Fade out in place, then drop from the store.
                 noticesHost.querySelector(`[data-notice-id="${notice.id}"]`)?.classList.add('leaving')
-                setTimeout(() => store.dismissNotice(notice.id), reduceMotion() ? 0 : NOTICE_LEAVE_MS)
+                setTimeout(() => {
+                    timedNoticeIds.delete(notice.id)
+                    store.dismissNotice(notice.id)
+                }, reduceMotion() ? 0 : NOTICE_LEAVE_MS)
             }, NOTICE_TTL_MS)
         }
     }

@@ -1,6 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createDesktopStore, selectSummary, DEFAULT_PREFERENCES } from '../src/store.mjs'
+import {
+    createDesktopStore,
+    desktopActions,
+    selectDesktopState,
+    selectSummary,
+    DEFAULT_PREFERENCES,
+} from '../src/store.mjs'
 import { loadUiPreferences, persistUiPreferences } from '../src/prefs.mjs'
 
 function item(id, text, overrides = {}) {
@@ -15,6 +21,44 @@ function item(id, text, overrides = {}) {
         ...overrides,
     }
 }
+
+test('desktop state is owned by named Redux slices with a flat compatibility view', () => {
+    const store = createDesktopStore({ preferences: { theme: 'dark' } })
+    const root = store.getReduxState()
+
+    assert.deepEqual(Object.keys(root), [
+        'lists',
+        'sync',
+        'devices',
+        'boardConfig',
+        'labels',
+        'presence',
+        'runtime',
+        'preferences',
+    ])
+    assert.deepEqual(root.lists.itemsById, {})
+    assert.equal(root.sync.isWorkletReady, false)
+    assert.equal(root.runtime.leafBridge, null)
+    assert.equal(root.preferences.theme, 'dark')
+    assert.deepEqual(store.getState(), selectDesktopState(root))
+
+    let observed = null
+    const unsubscribe = store.subscribe((state) => { observed = state })
+    store.dispatch(desktopActions.lists.selectedListItemsSynced([item('a', 'Milk')]))
+    store.dispatch(desktopActions.sync.snapshotReceived())
+    store.dispatch(desktopActions.sync.workletReadySet(true))
+    unsubscribe()
+
+    assert.equal(Object.values(store.getReduxState().lists.itemsById)[0].text, 'Milk')
+    assert.equal(store.getReduxState().sync.hasReceivedSnapshot, true)
+    assert.equal(store.getReduxState().sync.isWorkletReady, true)
+    assert.equal(observed.backendReady, true)
+    assert.equal(observed.items[0].text, 'Milk')
+
+    // The legacy bridge still merges preference patches, but Redux owns them.
+    store.setState({ preferences: { categoryHeaders: false } })
+    assert.equal(store.getReduxState().preferences.categoryHeaders, false)
+})
 
 test('store reduces backend item events through the shared id-keyed reduction', () => {
     const store = createDesktopStore()
@@ -76,6 +120,43 @@ test('store keeps items across every list bucket, not just default', () => {
     assert.equal(store.getState().items.some((e) => e.id === 'a' && e.listId === 'default'), true)
 })
 
+test('recovery sync is quiet when unchanged and preserves projected extra lists', () => {
+    const store = createDesktopStore()
+    const defaultItems = [item('a', 'Milk')]
+    const named = item('n1', 'Hardware', { listId: 'named', listType: 'shopping' })
+    let renders = 0
+    store.subscribe(() => { renders++ })
+
+    store.applyClientEvent({ type: 'sync-list', items: defaultItems })
+    store.applyClientEvent({ type: 'add-from-backend', item: named })
+    assert.equal(renders, 2)
+
+    store.applyClientEvent({ type: 'sync-list', items: defaultItems })
+    assert.equal(renders, 2, 'identical authoritative snapshot does not re-render')
+    assert.equal(store.getState().items.some((entry) => entry.id === 'n1'), true)
+
+    store.applyClientEvent({ type: 'sync-list', items: [item('b', 'Bread')] })
+    assert.equal(renders, 3)
+    assert.equal(store.getState().items.some((entry) => entry.id === 'a'), false)
+    assert.equal(store.getState().items.some((entry) => entry.id === 'n1'), true)
+})
+
+test('idempotent projected items do not notify subscribers', () => {
+    const store = createDesktopStore()
+    const first = item('n1', 'Hardware', { listId: 'named', listType: 'shopping' })
+    const second = item('n2', 'Paint', { listId: 'named', listType: 'shopping' })
+    let renders = 0
+    store.subscribe(() => { renders++ })
+
+    store.applyClientEvent({ type: 'add-from-backend', item: first })
+    store.applyClientEvent({ type: 'add-from-backend', item: second })
+    const before = store.getState().items.map((entry) => entry.id)
+    store.applyClientEvent({ type: 'add-from-backend', item: { ...first } })
+
+    assert.equal(renders, 2)
+    assert.deepEqual(store.getState().items.map((entry) => entry.id), before)
+})
+
 test('store tracks sync, membership, and recovery message payloads', () => {
     const store = createDesktopStore()
 
@@ -91,9 +172,10 @@ test('store tracks sync, membership, and recovery message payloads', () => {
     assert.equal(store.getState().isJoining, false)
     assert.equal(store.getState().joinPhase, null)
 
-    const roster = { canAdminister: true, members: [{ writerKey: 'aa', isOwner: true, isSelf: true }] }
+    const roster = { canAdminister: true, writers: [{ writerKey: 'aa', isOwner: true, isSelf: true }] }
     store.applyClientEvent({ type: 'message', payload: { type: 'membership-roster', roster } })
-    assert.deepEqual(store.getState().roster, roster)
+    assert.equal(store.getState().roster.canAdminister, true)
+    assert.equal(store.getState().roster.writers[0].writerKey, 'aa')
 
     store.applyClientEvent({ type: 'message', payload: { type: 'recovery-required', policy: 'interactive', reason: 'storage-corrupt' } })
     assert.deepEqual(store.getState().recovery, { policy: 'interactive', reason: 'storage-corrupt' })

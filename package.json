@@ -42,6 +42,7 @@
     "@listam/protocol": "file:../listam-packages/packages/protocol",
     "@listam/provisioning": "file:../listam-packages/packages/provisioning",
     "@listam/secrets": "file:../listam-packages/packages/secrets",
+    "@reduxjs/toolkit": "^2.12.0",
     "autobase": "^7.20.0",
     "b4a": "^1.7.1",
     "bare-fs": "^4.4.4",

@@ -8,6 +8,7 @@ import { buildI18n, loadLocaleChoice, persistLocaleChoice } from './i18n.mjs'
 import { loadUiPreferences, persistUiPreferences, createThemeController } from './prefs.mjs'
 import { mountApp } from './ui.mjs'
 import { createMockBackend } from './mock-backend.mjs'
+import { installSyncRecovery } from './sync-recovery.mjs'
 
 const root = document.getElementById('app')
 const storage = globalThis.localStorage
@@ -70,7 +71,10 @@ async function boot() {
         mountApp({ root, store, client: backend.client, locale, ownerControl })
         // The backend emits its initial sync/invite during startup, before the
         // UI listener attaches; ask again now that we are listening.
-        await backend.client.send(RPC_REQUEST_SYNC)
+        const syncRecovery = installSyncRecovery({
+            requestSync: () => backend.client.send(RPC_REQUEST_SYNC),
+        })
+        await syncRecovery.refresh()
         await backend.client.send(RPC_GET_MEMBERS)
         await backend.client.send(RPC_CREATE_INVITE)
         // Leaf-board bridge (Settings → leaf board): resume the TCP listener

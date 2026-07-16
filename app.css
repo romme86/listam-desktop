@@ -1503,6 +1503,10 @@ html.board-drawer-open { overflow: hidden; }
 .settings .choice-row { margin: 0; }
 .settings .switch-row { margin: 0; }
 .settings .analytics-section { margin-top: 0.6rem; }
+.list-identity dl { margin: 0; display: grid; gap: 0.35rem; }
+.list-identity-row { display: grid; grid-template-columns: minmax(7rem, auto) 1fr; gap: 1rem; font-family: var(--font-mono); font-size: 11px; line-height: 16px; }
+.list-identity-row dt { color: var(--ink-faint); }
+.list-identity-row dd { margin: 0; color: var(--ink-mute); overflow-wrap: anywhere; user-select: text; }
 
 /* The 7-day strip: Today + Tomorrow + the next five days. */
 .plan-strip { display: flex; gap: 0.4rem; margin: 0 0 var(--section-gap); }

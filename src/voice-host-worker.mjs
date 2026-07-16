@@ -1,6 +1,6 @@
 // Desktop voice host — runs the leaf-audio → STT → intent → write pipeline
 // INSIDE the Pear worker, writing items into the DESKTOP's own base (via the
-// injected `callBackend`), so a voice "yo aggiungi latte" appears in the desktop
+// injected `callBackend`), so "yo petito, aggiungi latte" appears in the desktop
 // list directly. No separate peer, no second base, no pairing round-trip — this
 // is the whole point of the redesign (the old leaf-hub ran an orphan base).
 //
@@ -13,21 +13,29 @@ import { RPC_ADD, RPC_DELETE } from '@listam/protocol'
 
 export const DEFAULT_VOICE_PORT = 9994
 
-function mutationOk (raw) {
-    if (raw == null) return true
-    try { const p = typeof raw === 'string' ? JSON.parse(raw) : raw; return p?.ok !== false } catch { return true }
+// Green must mean that the backend explicitly acknowledged a committed write.
+// Treating a missing/malformed reply as success creates a dangerous false
+// positive: the leaf confirms the command even though no app can ever show it.
+export function mutationOk (raw) {
+    if (raw == null) return false
+    try {
+        const payload = typeof raw === 'string' ? JSON.parse(raw) : raw
+        return payload?.ok === true
+    } catch {
+        return false
+    }
 }
 
 // Per-locale initial whisper prompt — biases STT toward the command vocabulary
 // AND reinforces the spoken language so Italian audio stops drifting to English.
 // DUPLICATED from listam-headless/src/config.mjs (polyrepo; keep in sync).
 const DEFAULT_VOICE_PROMPTS = {
-    en: 'yo add milk. yo add bread. yo remove eggs. grocery list: milk, bread, eggs, tomatoes, pasta, coffee.',
-    it: 'yo aggiungi latte. yo aggiungi pane. yo togli uova. lista della spesa: latte, pane, uova, pomodori, pasta, caffè.',
-    es: 'yo añade leche. yo añade pan. yo quita huevos. lista de la compra: leche, pan, huevos, tomates, pasta, café.',
-    de: 'yo füge Milch hinzu. yo füge Brot hinzu. yo entferne Eier. Einkaufsliste: Milch, Brot, Eier, Tomaten, Nudeln, Kaffee.',
-    fr: 'yo ajoute du lait. yo ajoute du pain. yo enlève les œufs. liste de courses : lait, pain, œufs, tomates, pâtes, café.',
-    pt: 'yo adiciona leite. yo adiciona pão. yo remove ovos. lista de compras: leite, pão, ovos, tomates, massa, café.',
+    en: 'petito add milk. yo petito add bread. yo petito remove eggs. grocery list: milk, bread, eggs, tomatoes, pasta, coffee.',
+    it: 'petito aggiungi latte. yo petito aggiungi pane. yo petito togli uova. lista della spesa: latte, pane, uova, pomodori, pasta, caffè.',
+    es: 'petito añade leche. yo petito añade pan. yo petito quita huevos. lista de la compra: leche, pan, huevos, tomates, pasta, café.',
+    de: 'petito füge Milch hinzu. yo petito füge Brot hinzu. yo petito entferne Eier. Einkaufsliste: Milch, Brot, Eier, Tomaten, Nudeln, Kaffee.',
+    fr: 'petito ajoute du lait. yo petito ajoute du pain. yo petito enlève les œufs. liste de courses : lait, pain, œufs, tomates, pâtes, café.',
+    pt: 'petito adiciona leite. yo petito adiciona pão. yo petito remove ovos. lista de compras: leite, pão, ovos, tomates, massa, café.',
 }
 
 function buildExtraArgs (config) {
@@ -71,6 +79,7 @@ export function createVoiceHost ({ callBackend, getItems, load, log = null, publ
         if (running) return status()
         lastError = null
         port = Number(config.audioPort) > 0 ? Number(config.audioPort) : DEFAULT_VOICE_PORT
+        let vlog = null
         try {
             const {
                 tcp, subprocess, fs, tmpDir,
@@ -78,7 +87,7 @@ export function createVoiceHost ({ callBackend, getItems, load, log = null, publ
                 parseIntent, detectWake, isRegistryItem, isLabelItem,
             } = await load()
 
-            const vlog = createFileLogger(log, fs, `${tmpDir}/voice.log`)
+            vlog = createFileLogger(log, fs, `${tmpDir}/voice.log`)
             vlog.info(`[voice] starting — model=${config.modelPath || '(unset)'} locale=${config.locale || 'auto'} port=${port}`)
 
             // Resolve the whisper-cli binary. The Settings UI only takes the model
@@ -125,6 +134,7 @@ export function createVoiceHost ({ callBackend, getItems, load, log = null, publ
         } catch (err) {
             lastError = err?.message ?? String(err)
             running = false
+            vlog?.error?.(`[voice] start failed — ${lastError}`)
             log?.error?.('[voice] start failed', { message: lastError })
         }
         publishStatus()

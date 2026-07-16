@@ -12,7 +12,14 @@
 import { createListOperation, createListReduction } from '@listam/domain/list-reducer'
 import { DEFAULT_LIST_ID, normalizeListId } from '@listam/domain/identity'
 import { redactForLog, redactString } from '@listam/logging'
+import { configureStore, createSlice } from '@reduxjs/toolkit'
 import { DEFAULT_LEAF_BRIDGE_PORT } from './leaf-bridge-config.mjs'
+import listsReducer, { initialListsState, listsActions, selectAllItems } from './store/lists-slice.mjs'
+import syncReducer, { initialSyncState, syncActions } from './store/sync-slice.mjs'
+import devicesReducer, { devicesActions, selectMembershipRoster } from './store/devices-slice.mjs'
+import boardConfigReducer, { boardConfigActions } from './store/board-config-slice.mjs'
+import labelsReducer, { labelsActions } from './store/labels-slice.mjs'
+import presenceReducer, { presenceActions } from './store/presence-slice.mjs'
 
 // Rebuild a reduction from a flat, possibly multi-list snapshot. Items are
 // grouped by their normalized listId and replayed as per-list 'list' operations
@@ -33,6 +40,16 @@ export function reductionFromItems(items) {
         reduction.applyOperation(createListOperation('list', group.items, { listId, listType: group.listType }))
     }
     return reduction
+}
+
+function sameSnapshot(left, right) {
+    if (left === right) return true
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+    for (let i = 0; i < left.length; i++) {
+        if (left[i] === right[i]) continue
+        if (JSON.stringify(left[i]) !== JSON.stringify(right[i])) return false
+    }
+    return true
 }
 
 const MAX_DIAGNOSTIC_EVENTS = 50
@@ -98,54 +115,175 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     voicePrompt: '',
 })
 
+const DEFAULT_RUNTIME_STATE = Object.freeze({
+    notices: [],
+    diagnostics: [],
+    leafBridge: null,
+    voice: null,
+})
+
+const RUNTIME_KEYS = [...Object.keys(DEFAULT_RUNTIME_STATE), 'bootError']
+
+const runtimeSlice = createSlice({
+    name: 'runtime',
+    initialState: DEFAULT_RUNTIME_STATE,
+    reducers: {
+        noticePushed(state, action) {
+            state.notices = [...state.notices, action.payload].slice(-MAX_NOTICES)
+        },
+        noticeDismissed(state, action) {
+            state.notices = state.notices.filter((notice) => notice.id !== action.payload)
+        },
+        patched(state, action) {
+            for (const key of RUNTIME_KEYS) {
+                if (Object.prototype.hasOwnProperty.call(action.payload ?? {}, key)) state[key] = action.payload[key]
+            }
+        },
+    },
+})
+
+const preferencesSlice = createSlice({
+    name: 'preferences',
+    initialState: DEFAULT_PREFERENCES,
+    reducers: {
+        patched(state, action) {
+            Object.assign(state, action.payload)
+        },
+    },
+})
+
+export const desktopActions = Object.freeze({
+    lists: listsActions,
+    sync: syncActions,
+    devices: devicesActions,
+    boardConfig: boardConfigActions,
+    labels: labelsActions,
+    presence: presenceActions,
+    runtimePatched: runtimeSlice.actions.patched,
+    preferencesPatched: preferencesSlice.actions.patched,
+    noticePushed: runtimeSlice.actions.noticePushed,
+    noticeDismissed: runtimeSlice.actions.noticeDismissed,
+})
+
+// Public selector for consumers that want the historical flat desktop shape.
+// New code can instead use store.reduxStore.getState() and select a named slice.
+export function selectDesktopState(rootState) {
+    return {
+        items: [
+            ...selectAllItems(rootState),
+            ...Object.values(rootState.labels.itemsById),
+            ...Object.values(rootState.presence.itemsById),
+        ],
+        inviteKey: rootState.sync.autobaseInviteKey,
+        peerCount: rootState.sync.peerCount,
+        baseId: rootState.sync.baseId,
+        epoch: rootState.sync.epoch,
+        joinPhase: rootState.sync.joinPhase,
+        isJoining: rootState.sync.isJoining,
+        backendReady: rootState.sync.isWorkletReady,
+        synced: rootState.sync.hasReceivedSnapshot,
+        roster: selectMembershipRoster(rootState),
+        boardConfig: rootState.boardConfig.config,
+        boardConfigCanAdminister: rootState.boardConfig.canAdminister,
+        recovery: rootState.sync.recovery,
+        writeBlock: rootState.sync.writeBlock,
+        ...rootState.runtime,
+        preferences: rootState.preferences,
+    }
+}
+
 export function createDesktopStore(initial = {}) {
     let noticeId = 0
-    // Persistent id-keyed reduction across all list buckets; the source of
-    // `state.items`. Rebuilt on each full sync and on reset.
-    let reduction = createListReduction()
-    let state = {
-        items: [],
-        inviteKey: '',
-        peerCount: 0,
-        joinPhase: null,
-        isJoining: false,
-        backendReady: false,
-        // True once the backend has delivered at least one full snapshot, so the
-        // reduced registry reflects real synced state (not an empty pre-sync
-        // view). Gates one-time writes like materializing the 'general' group.
-        synced: false,
-        roster: null,
-        // Owner-signed board configuration pushed by the backend
-        // (rigor mode, states, properties, rules, automations). null until the
-        // first board-config message; selectors fall back to defaults.
-        boardConfig: null,
-        boardConfigCanAdminister: false,
-        recovery: null,
-        notices: [],
-        diagnostics: [],
-        // Why local writes are currently refused by the backend, or null when
-        // writes flow. 'not-writable' = this device isn't an accepted writer
-        // (yet); 'sync-stalled' = the local writer can't flush (no reachable
-        // peer). Set from backend messages, cleared by clearWriteBlock() when
-        // a mutation succeeds again. The UI renders it as a persistent banner
-        // so refused writes are never silent.
-        writeBlock: null,
-        // Live leaf-bridge state pushed by the backend worker; null until the
-        // worker reports it. { running, port, controlKey, connections, error }
-        leafBridge: null,
-        // Live desktop voice-host state from the worker. { running, port, error }
-        voice: null,
-        preferences: { ...DEFAULT_PREFERENCES, ...(initial.preferences ?? {}) },
-    }
+    const reduxStore = configureStore({
+        reducer: {
+            lists: listsReducer,
+            sync: syncReducer,
+            devices: devicesReducer,
+            boardConfig: boardConfigReducer,
+            labels: labelsReducer,
+            presence: presenceReducer,
+            runtime: runtimeSlice.reducer,
+            preferences: preferencesSlice.reducer,
+        },
+        preloadedState: {
+            lists: initialListsState,
+            sync: { ...initialSyncState },
+            runtime: { ...DEFAULT_RUNTIME_STATE },
+            preferences: { ...DEFAULT_PREFERENCES, ...(initial.preferences ?? {}) },
+        },
+    })
     const listeners = new Set()
+    let transactionDepth = 0
+    let transactionDirty = false
+    let lastCompatibilityState = selectDesktopState(reduxStore.getState())
+
+    function notifyCompatibilityListeners() {
+        const next = selectDesktopState(reduxStore.getState())
+        if (JSON.stringify(lastCompatibilityState) === JSON.stringify(next)) return
+        lastCompatibilityState = next
+        for (const listener of listeners) listener(next)
+    }
+
+    reduxStore.subscribe(() => {
+        if (transactionDepth > 0) {
+            transactionDirty = true
+            return
+        }
+        notifyCompatibilityListeners()
+    })
+
+    function transaction(callback) {
+        transactionDepth++
+        try {
+            return callback()
+        } finally {
+            transactionDepth--
+            if (transactionDepth === 0 && transactionDirty) {
+                transactionDirty = false
+                notifyCompatibilityListeners()
+            }
+        }
+    }
 
     function getState() {
-        return state
+        return selectDesktopState(reduxStore.getState())
     }
 
     function setState(partial) {
-        state = { ...state, ...partial }
-        for (const listener of listeners) listener(state)
+        transaction(() => {
+            if (Object.prototype.hasOwnProperty.call(partial, 'items')) {
+                reduxStore.dispatch(listsActions.selectedListItemsSynced(partial.items))
+                reduxStore.dispatch(labelsActions.labelsApplied(partial.items))
+                reduxStore.dispatch(presenceActions.presenceApplied(partial.items))
+            }
+            if (Object.prototype.hasOwnProperty.call(partial, 'inviteKey')) reduxStore.dispatch(syncActions.autobaseInviteKeySet(partial.inviteKey))
+            if (Object.prototype.hasOwnProperty.call(partial, 'peerCount')) reduxStore.dispatch(syncActions.peerCountSet(partial.peerCount))
+            if (Object.prototype.hasOwnProperty.call(partial, 'baseId') || Object.prototype.hasOwnProperty.call(partial, 'epoch')) {
+                const sync = reduxStore.getState().sync
+                reduxStore.dispatch(syncActions.baseStateReceived({ baseId: partial.baseId ?? sync.baseId, epoch: partial.epoch ?? sync.epoch }))
+            }
+            if (Object.prototype.hasOwnProperty.call(partial, 'joinPhase')) reduxStore.dispatch(syncActions.joinPhaseSet(partial.joinPhase))
+            if (Object.prototype.hasOwnProperty.call(partial, 'isJoining')) reduxStore.dispatch(syncActions.joiningSet(partial.isJoining))
+            if (Object.prototype.hasOwnProperty.call(partial, 'backendReady')) reduxStore.dispatch(syncActions.workletReadySet(partial.backendReady))
+            if (partial.synced === true) reduxStore.dispatch(syncActions.snapshotReceived())
+            if (partial.synced === false) reduxStore.dispatch(syncActions.syncReset())
+            if (Object.prototype.hasOwnProperty.call(partial, 'writeBlock')) {
+                reduxStore.dispatch(partial.writeBlock ? syncActions.writeBlocked(partial.writeBlock) : syncActions.writeBlockCleared())
+            }
+            if (Object.prototype.hasOwnProperty.call(partial, 'recovery')) {
+                reduxStore.dispatch(partial.recovery ? syncActions.recoveryRequired(partial.recovery) : syncActions.recoveryCleared())
+            }
+            if (Object.prototype.hasOwnProperty.call(partial, 'roster')) reduxStore.dispatch(devicesActions.rosterReceived(partial.roster))
+            if (Object.prototype.hasOwnProperty.call(partial, 'boardConfig') || Object.prototype.hasOwnProperty.call(partial, 'boardConfigCanAdminister')) {
+                const board = reduxStore.getState().boardConfig
+                reduxStore.dispatch(boardConfigActions.boardConfigReceived({
+                    config: partial.boardConfig ?? board.config,
+                    canAdminister: partial.boardConfigCanAdminister ?? board.canAdminister,
+                }))
+            }
+            reduxStore.dispatch(runtimeSlice.actions.patched(partial))
+            if (partial.preferences) reduxStore.dispatch(preferencesSlice.actions.patched(partial.preferences))
+        })
     }
 
     function subscribe(listener) {
@@ -154,22 +292,22 @@ export function createDesktopStore(initial = {}) {
     }
 
     function setPreferences(partial) {
-        setState({ preferences: { ...state.preferences, ...partial } })
+        reduxStore.dispatch(preferencesSlice.actions.patched(partial))
     }
 
     function pushNotice(text, tone = 'info') {
         const notice = { id: ++noticeId, text, tone }
-        setState({ notices: [...state.notices, notice].slice(-MAX_NOTICES) })
+        reduxStore.dispatch(runtimeSlice.actions.noticePushed(notice))
         return notice.id
     }
 
     function dismissNotice(id) {
-        setState({ notices: state.notices.filter((notice) => notice.id !== id) })
+        reduxStore.dispatch(runtimeSlice.actions.noticeDismissed(id))
     }
 
     // A mutation went through again — writes flow, drop the write-block banner.
     function clearWriteBlock() {
-        if (state.writeBlock) setState({ writeBlock: null })
+        if (getState().writeBlock) reduxStore.dispatch(syncActions.writeBlockCleared())
     }
 
     function recordDiagnostic(label, detail, now) {
@@ -178,20 +316,26 @@ export function createDesktopStore(initial = {}) {
             label: redactString(label),
             detail: detail === undefined ? undefined : redactForLog(detail),
         }
-        return [...state.diagnostics, entry].slice(-MAX_DIAGNOSTIC_EVENTS)
+        return [...getState().diagnostics, entry].slice(-MAX_DIAGNOSTIC_EVENTS)
     }
 
     // Reduce one decoded backend event into state. `now` is injected so tests
     // are deterministic. Returns the diagnostic label recorded, or null when
     // the event type is unknown.
     function applyClientEvent(event, now = 0) {
+        const before = getState()
         switch (event.type) {
             case 'sync-list': {
-                // A full snapshot — reset the reduction so a re-sync replaces
-                // rather than appends, then re-project every list bucket.
-                reduction = reductionFromItems(event.items)
-                const items = reduction.allItems()
-                setState({ items, synced: true, diagnostics: recordDiagnostic(`sync-list (${items.length} items)`, undefined, now) })
+                transaction(() => {
+                    reduxStore.dispatch(listsActions.selectedListItemsSynced(event.items ?? []))
+                    reduxStore.dispatch(labelsActions.labelsApplied(event.items ?? []))
+                    reduxStore.dispatch(presenceActions.presenceApplied(event.items ?? []))
+                    reduxStore.dispatch(syncActions.snapshotReceived())
+                    const items = getState().items
+                    if (!before.synced || !sameSnapshot(before.items, items)) {
+                        reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic(`sync-list (${items.length} items)`, undefined, now) }))
+                    }
+                })
                 return 'sync-list'
             }
             case 'add-from-backend':
@@ -205,29 +349,40 @@ export function createDesktopStore(initial = {}) {
                 if (event.item && event.item.listType === 'registry' && event.item.baseKey) {
                     return event.type
                 }
+                const current = event.item?.id
+                    ? before.items.find((entry) => entry?.id === event.item.id)
+                    : null
+                if (event.type === 'delete-from-backend' && !current) return event.type
+                if (event.type !== 'delete-from-backend' && current && JSON.stringify(current) === JSON.stringify(event.item)) {
+                    return event.type
+                }
                 const type = event.type.split('-')[0]
-                reduction.applyOperation({ type, value: event.item })
-                setState({
-                    items: reduction.allItems(),
-                    diagnostics: recordDiagnostic(event.type, undefined, now),
+                const listAction = type === 'add' ? listsActions.listItemAdded : type === 'update' ? listsActions.listItemUpdated : listsActions.listItemDeleted
+                const labelAction = type === 'delete' ? labelsActions.labelItemRemoved : labelsActions.labelItemApplied
+                const presenceAction = type === 'delete' ? presenceActions.presenceItemRemoved : presenceActions.presenceItemApplied
+                transaction(() => {
+                    reduxStore.dispatch(listAction(event.item))
+                    reduxStore.dispatch(labelAction(event.item))
+                    reduxStore.dispatch(presenceAction(event.item))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic(event.type, undefined, now) }))
                 })
                 return event.type
             }
             case 'invite-key':
-                setState({
-                    inviteKey: event.key ?? '',
-                    diagnostics: recordDiagnostic(event.key ? 'invite-key (rotated)' : 'invite-key (cleared)', undefined, now),
+                transaction(() => {
+                    reduxStore.dispatch(syncActions.autobaseInviteKeySet(event.key ?? ''))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic(event.key ? 'invite-key (rotated)' : 'invite-key (cleared)', undefined, now) }))
                 })
                 return 'invite-key'
             case 'reset':
-                reduction = createListReduction()
-                setState({
-                    items: [],
-                    inviteKey: '',
-                    roster: null,
-                    synced: false,
-                    writeBlock: null,
-                    diagnostics: recordDiagnostic('reset', undefined, now),
+                transaction(() => {
+                    reduxStore.dispatch(listsActions.listsCleared())
+                    reduxStore.dispatch(syncActions.syncReset())
+                    reduxStore.dispatch(devicesActions.rosterReceived(null))
+                    reduxStore.dispatch(boardConfigActions.boardConfigReset())
+                    reduxStore.dispatch(labelsActions.labelsCleared())
+                    reduxStore.dispatch(presenceActions.presenceCleared())
+                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic('reset', undefined, now) }))
                 })
                 return 'reset'
             case 'message':
@@ -235,7 +390,7 @@ export function createDesktopStore(initial = {}) {
             case 'message-empty':
                 return null
             default:
-                setState({ diagnostics: recordDiagnostic(`unhandled:${event.type}`, undefined, now) })
+                reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic(`unhandled:${event.type}`, undefined, now) }))
                 return null
         }
     }
@@ -260,6 +415,13 @@ export function createDesktopStore(initial = {}) {
                     isJoining: false,
                     joinPhase: null,
                     diagnostics: recordDiagnostic('join-success', undefined, now),
+                })
+                return type
+            case 'base-state':
+                setState({
+                    baseId: typeof payload.baseId === 'string' ? payload.baseId : null,
+                    epoch: Number.isInteger(payload.epoch) ? payload.epoch : null,
+                    diagnostics: recordDiagnostic(`base-state ${payload.baseId ?? 'unknown'} epoch ${payload.epoch ?? '?'}`, undefined, now),
                 })
                 return type
             case 'join-error':
@@ -322,6 +484,9 @@ export function createDesktopStore(initial = {}) {
     }
 
     return {
+        reduxStore,
+        dispatch: reduxStore.dispatch,
+        getReduxState: reduxStore.getState,
         getState,
         subscribe,
         setState,
