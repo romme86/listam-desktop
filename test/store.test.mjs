@@ -2,12 +2,25 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
     createDesktopStore,
+    decodeSyncListSnapshot,
     desktopActions,
     selectDesktopState,
     selectSummary,
     DEFAULT_PREFERENCES,
 } from '../src/store.mjs'
 import { loadUiPreferences, persistUiPreferences } from '../src/prefs.mjs'
+import {
+    buildItemPlanEntry,
+    buildPeerLabelItem,
+    buildPresenceItem,
+    isPlanItem,
+    PEER_LABEL_LIST_ID,
+    PEER_LABEL_LIST_TYPE,
+    PLAN_LIST_ID,
+    PLAN_LIST_TYPE,
+    PRESENCE_LIST_ID,
+    PRESENCE_LIST_TYPE,
+} from '@listam/domain'
 
 function item(id, text, overrides = {}) {
     return {
@@ -79,6 +92,55 @@ test('store reduces backend item events through the shared id-keyed reduction', 
 
     store.applyClientEvent({ type: 'delete-from-backend', item: item('b', 'Bread') })
     assert.equal(store.getState().items.some((entry) => entry.id === 'b'), false)
+})
+
+test('structured sync snapshots replace stale reserved buckets exactly', () => {
+    const store = createDesktopStore()
+    const oldPlan = buildItemPlanEntry({ listId: 'default', itemId: 'old', plannedFor: '2026-07-10', updatedAt: 1 })
+    const newPlan = buildItemPlanEntry({ listId: 'default', itemId: 'new', plannedFor: '2026-07-17', updatedAt: 2 })
+    const oldPeer = buildPeerLabelItem({ writerKey: 'old-peer', name: 'Old', updatedAt: 1 })
+    const newPeer = buildPeerLabelItem({ writerKey: 'new-peer', name: 'New', updatedAt: 2 })
+    const oldPresence = buildPresenceItem({ writerKey: 'old-peer', lastActiveAt: 1 })
+
+    store.applyClientEvent({ type: 'add-from-backend', item: oldPlan })
+    store.applyClientEvent({ type: 'add-from-backend', item: oldPeer })
+    store.applyClientEvent({ type: 'add-from-backend', item: oldPresence })
+
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: { list: [newPlan], listId: PLAN_LIST_ID, listType: PLAN_LIST_TYPE },
+    })
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: { list: [newPeer], listId: PEER_LABEL_LIST_ID, listType: PEER_LABEL_LIST_TYPE },
+    })
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: { list: [], listId: PRESENCE_LIST_ID, listType: PRESENCE_LIST_TYPE },
+    })
+
+    const state = store.getState()
+    assert.deepEqual(state.items.filter(isPlanItem).map((entry) => entry.id), [newPlan.id])
+    assert.equal(state.items.some((entry) => entry.id === oldPeer.id), false)
+    assert.equal(state.items.some((entry) => entry.id === newPeer.id), true)
+    assert.equal(state.items.some((entry) => entry.id === oldPresence.id), false)
+})
+
+test('sync snapshot decoder preserves arrays and understands structured buckets', () => {
+    assert.deepEqual(decodeSyncListSnapshot([{ id: 'a' }]), {
+        mode: 'legacy',
+        items: [{ id: 'a' }],
+    })
+    assert.deepEqual(decodeSyncListSnapshot({
+        list: [{ id: 'p', listId: PLAN_LIST_ID, listType: PLAN_LIST_TYPE }],
+        listId: PLAN_LIST_ID,
+        listType: PLAN_LIST_TYPE,
+    }), {
+        mode: 'bucket',
+        items: [{ id: 'p', listId: PLAN_LIST_ID, listType: PLAN_LIST_TYPE }],
+        listId: PLAN_LIST_ID,
+        listType: PLAN_LIST_TYPE,
+    })
 })
 
 test('store keeps items across every list bucket, not just default', () => {
@@ -176,6 +238,11 @@ test('store tracks sync, membership, and recovery message payloads', () => {
     store.applyClientEvent({ type: 'message', payload: { type: 'membership-roster', roster } })
     assert.equal(store.getState().roster.canAdminister, true)
     assert.equal(store.getState().roster.writers[0].writerKey, 'aa')
+    const refreshedRoster = { canAdminister: false, writers: [{ writerKey: 'bb', isSelf: true }] }
+    assert.doesNotThrow(() => {
+        store.applyClientEvent({ type: 'message', payload: { type: 'membership-roster', roster: refreshedRoster } })
+    })
+    assert.deepEqual(store.getState().roster.writers.map((writer) => writer.writerKey), ['bb'])
 
     store.applyClientEvent({ type: 'message', payload: { type: 'recovery-required', policy: 'interactive', reason: 'storage-corrupt' } })
     assert.deepEqual(store.getState().recovery, { policy: 'interactive', reason: 'storage-corrupt' })
@@ -201,13 +268,17 @@ test('write refusals set writeBlock; success and reset clear it', () => {
     assert.equal(store.getState().writeBlock, 'sync-stalled')
     assert.equal(store.getState().diagnostics.at(-1).label, 'sync-stalled')
 
+    store.applyClientEvent({ type: 'message', payload: { type: 'epoch-key-stale' } }, 7)
+    assert.equal(store.getState().writeBlock, 'epoch-key-stale')
+    assert.equal(store.getState().diagnostics.at(-1).label, 'epoch-key-stale')
+
     // A successful mutation clears the block (ui.mjs calls this on ok:true).
     store.clearWriteBlock()
     assert.equal(store.getState().writeBlock, null)
 
     // A base reset also drops it — the new base starts unjudged.
-    store.applyClientEvent({ type: 'message', payload: { type: 'not-writable' } }, 7)
-    store.applyClientEvent({ type: 'reset' }, 8)
+    store.applyClientEvent({ type: 'message', payload: { type: 'not-writable' } }, 8)
+    store.applyClientEvent({ type: 'reset' }, 9)
     assert.equal(store.getState().writeBlock, null)
 })
 
@@ -230,6 +301,8 @@ test('notices queue, cap, and dismiss; preferences merge over defaults', () => {
     const store = createDesktopStore({ preferences: { isGridView: true } })
     assert.equal(store.getState().preferences.isGridView, true)
     assert.equal(store.getState().preferences.categoriesEnabled, DEFAULT_PREFERENCES.categoriesEnabled)
+    assert.equal(DEFAULT_PREFERENCES.categoriesEnabled, false)
+    assert.equal(DEFAULT_PREFERENCES.categoryHeaders, false)
 
     const first = store.pushNotice('one')
     for (const text of ['two', 'three', 'four', 'five']) store.pushNotice(text)

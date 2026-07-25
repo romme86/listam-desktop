@@ -5,7 +5,7 @@
 # boots it with `pear run --appling`, ad-hoc signs the bundle, and wraps it
 # in a drag-install DMG. See installer/README.md for the distribution model.
 #
-# Usage: installer/build-macos.sh [--channel <name>] [--release] [--skip-stage]
+# Usage: installer/build-macos.sh [--channel <name>] [--release|--stage-only] [--skip-stage]
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,18 +14,32 @@ DIST="$INSTALLER_DIR/dist"
 BUILD="$DIST/build"
 
 CHANNEL=production
-RELEASE=0
+RELEASE=auto
 SKIP_STAGE=0
 NATIVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) CHANNEL="$2"; shift 2 ;;
     --release) RELEASE=1; shift ;;
+    --stage-only) RELEASE=0; shift ;;
     --skip-stage) SKIP_STAGE=1; shift ;;
     --native) NATIVE=1; shift ;;
     *) echo "unknown flag: $1" >&2; exit 1 ;;
   esac
 done
+
+# Production consumers follow the release pointer, not the staged tip. Make a
+# production build advance that pointer by default so a successful stage cannot
+# silently leave installed apps on the prior checkpoint. Preview unpublished
+# work on a non-production channel; --stage-only is intentionally refused here.
+if [ "$RELEASE" = auto ]; then
+  [ "$CHANNEL" = production ] && RELEASE=1 || RELEASE=0
+fi
+if [ "$CHANNEL" = production ] && [ "$RELEASE" -ne 1 ]; then
+  echo "error: production builds must advance the release pointer" >&2
+  echo "       use --channel beta --stage-only for an unpublished preview" >&2
+  exit 1
+fi
 
 # --ignore REPLACES Pear's default ignore list, so the defaults (.git etc.)
 # must be restated here. Keep in sync with pear.stage.ignore in package.json.
@@ -59,6 +73,26 @@ echo "   link: $LINK"
 if [ "$RELEASE" -eq 1 ]; then
   echo "== marking release on '$CHANNEL'"
   "$PEAR" release "$CHANNEL" "$APP_DIR" --json >> "$STAGE_LOG"
+
+  # Verify the pointer actually moved to the staged tip. A zero exit from the
+  # release command alone is not enough protection against a stale production
+  # channel or an accidentally targeted project key.
+  INFO_JSON="$("$PEAR" info "$CHANNEL" "$APP_DIR" --json --no-ask)"
+  INFO_LINE="$(printf '%s\n' "$INFO_JSON" | grep '"tag":"info"' | tail -1)"
+  INFO_RELEASE="$(printf '%s\n' "$INFO_LINE" | sed -nE 's/.*"release":([0-9]+).*/\1/p')"
+  # The info payload also includes `blobs.length`; select the top-level drive
+  # length by requiring its following `byteLength` field. A greedy bare
+  # `"length"` match picks blobs.length and falsely reports a stale release.
+  INFO_LENGTH="$(printf '%s\n' "$INFO_LINE" | sed -nE 's/.*"length":([0-9]+),"byteLength".*/\1/p')"
+  [ -n "$INFO_RELEASE" ] && [ -n "$INFO_LENGTH" ] || {
+    echo "error: could not verify release metadata for '$CHANNEL'" >&2
+    exit 1
+  }
+  [ "$INFO_RELEASE" = "$INFO_LENGTH" ] || {
+    echo "error: release pointer is stale ($INFO_RELEASE != latest $INFO_LENGTH)" >&2
+    exit 1
+  }
+  echo "   verified release: $INFO_RELEASE"
 fi
 
 # -- app icon -----------------------------------------------------------------

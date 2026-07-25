@@ -516,12 +516,16 @@ button {
 .item-row:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 .item-row .glyph {
     width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     color: var(--ink-mute);
     transition: transform var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
 }
+.item-row .item-toggle { border-radius: var(--r-field); }
+.item-row .item-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .item-row:hover .glyph { transform: scale(1.15); }
 .item-row.done { background: var(--surface-2); color: var(--ink-faint); }
 .item-row.done:hover { background: var(--surface-3); }
@@ -867,6 +871,25 @@ kbd {
 .notice.leaving { opacity: 0; transform: translateY(8px); }
 .notice.success { background: var(--signal); color: var(--on-signal); }
 .notice.error { background: var(--danger); color: var(--on-danger); }
+.notice.update-ready {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: var(--signal);
+    color: var(--on-signal);
+}
+.notice-action {
+    margin-left: auto;
+    padding: 0.35rem 0.65rem;
+    border-radius: var(--r-field);
+    background: var(--ink);
+    color: var(--card);
+    font: inherit;
+    cursor: pointer;
+}
+.notice-action:hover { background: var(--inverse-surface); color: var(--inverse-ink); }
+.notice-action:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.notice-action:disabled { cursor: wait; opacity: 0.65; }
 
 /* Shortcut hint bar: tonal strip, H or its ✕ to hide, sidebar toggle to show */
 .key-hints {

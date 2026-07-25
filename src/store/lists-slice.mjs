@@ -132,6 +132,32 @@ function replaceListItems(state, listId, listType, entries) {
     }
 }
 
+function replaceExactBucket(state, { listId, listType, items }) {
+    // Plan records are a cross-list overlay kept directly in itemsById. They
+    // deliberately have no ListRecord, so an authoritative snapshot must clear
+    // the old overlay refs explicitly before installing the current set.
+    if (isPlanItem({ listType })) {
+        for (const [itemId, item] of Object.entries(state.itemsById)) {
+            if (isPlanItem(item)) delete state.itemsById[itemId]
+        }
+        for (const item of normalizeListEntries(items.map((entry) => ({
+            ...entry,
+            listId: entry?.listId || listId,
+            listType: entry?.listType || listType,
+        })))) {
+            if (!isPlanItem(item) || item.listId !== listId) continue
+            state.itemsById[identityKey(item)] = item
+        }
+        return
+    }
+
+    // Labels (including presence) live in dedicated slices. Do not create a
+    // phantom list record for their reserved buckets here.
+    if (isLabelItem({ listType })) return
+
+    replaceListItems(state, listId, listType, items)
+}
+
 function removeIdentityFromOtherLists(state, identity, targetListId) {
     for (const listId of state.listIds) {
         if (listId === targetListId) continue
@@ -179,7 +205,16 @@ const listsSlice = createSlice({
             state.selectedListId = navId
         },
         selectedListItemsSynced(state, action) {
-            const items = Array.isArray(action.payload) ? action.payload : action.payload.items
+            const exact = !Array.isArray(action.payload)
+                && typeof action.payload?.listId === 'string'
+                && typeof action.payload?.listType === 'string'
+                && Array.isArray(action.payload?.items)
+            if (exact) {
+                replaceExactBucket(state, action.payload)
+                return
+            }
+
+            const items = Array.isArray(action.payload) ? action.payload : action.payload?.items
             const groups = new Map()
             for (const entry of Array.isArray(items) ? items : []) {
                 if (isLabelItem(entry) || isPlanItem(entry)) continue

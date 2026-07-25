@@ -54,8 +54,8 @@ reverts on runtime updates.
 ## Package (macOS installer)
 
 ```sh
-installer/build-macos.sh            # pear stage 'production' + Listam.app shell + DMG
-installer/build-macos.sh --release  # also mark the release pointer
+installer/build-macos.sh            # stage + release 'production' + Listam.app shell + DMG
+installer/build-macos.sh --channel beta --stage-only  # unpublished preview
 ```
 
 Produces `installer/dist/Listam-<version>-<channel>.dmg`: a drag-install

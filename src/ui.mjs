@@ -70,6 +70,7 @@ import {
     groupPlanByDate,
     overduePlanRecords,
     computePlanReorder,
+    computePlanInsert,
     buildItemPlanEntry,
     buildListPlanEntry,
     buildPlanItem,
@@ -369,7 +370,7 @@ function formatUptime(ms) {
     return `${mins}m`
 }
 
-export function mountApp({ root, store, client, locale, ownerControl = null, env = {} }) {
+export function mountApp({ root, store, client, locale, ownerControl = null, appUpdates = null, env = {} }) {
     const ui = {
         // `view` is the surface KIND showing in main: a list surface
         // ('lists' | 'board' | 'todo'), the 'peers' system view, or the
@@ -385,7 +386,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Which week the Overview strip shows: 0 = the week starting today, −1 the
         // previous week, +1 the next, etc. Lets the strip page into past days.
         weekOffset: 0,
-        // Plan row drag (reorder within a day / drop onto a day pill): { ref, fromDate }.
+        // Plan row drag (reorder a tray / insert into a day / drop onto a day pill):
+        // { ref, fromDate }.
         planDrag: null,
         activeListId: null,
         // Hex base key of the active list when it lives in its own SHARED base
@@ -433,6 +435,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // Each entry is one gesture's pre-image; undo replays it as a fresh LWW
         // write. Lost on reload and cleared on a base switch (see renderAll).
         undoStack: [],
+        // Pear releases are immutable checkpoints for a running process. When
+        // the runtime reports a newer release, keep a persistent restart action
+        // visible until the user opts into loading it.
+        updateReady: false,
+        updateRestarting: false,
+        updateRestartFailed: false,
     }
     const now = env.now ?? (() => Date.now())
     // Block ids only need to be unique within a session; the renderer rebuilds
@@ -686,7 +694,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         if (res?.ok === false && res.reason === 'mutation-refused') noticeWriteRefused()
         else if (res?.ok === true) store.clearWriteBlock()
         return raw
-    }).catch(() => {
+    }).catch((error) => {
+        // Never leave a timed-out mutation looking like it succeeded. The
+        // persistent banner survives later renders and distinguishes an
+        // unresponsive worker from an ordinary validation refusal.
+        if (error?.code === 'BACKEND_REQUEST_TIMEOUT') {
+            store.setState({ writeBlock: 'backend-unresponsive' })
+            return
+        }
         store.pushNotice(locale.i18n.t('backend.startFailed'), 'error')
     })
 
@@ -1154,6 +1169,33 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(ref)
             send(RPC_UPDATE, { item: entry })
         },
+        // Move a plan entry from another day into an exact position in a day's
+        // agenda. Usually only the moved record is written; a destination with
+        // exhausted order gaps may also be renormalized by computePlanInsert.
+        movePlanIntoDay(ref, dateKey, dayRecords, toIndex) {
+            const rec = reducePlan(store.getState().items).get(ref)
+            if (!rec) return
+            const records = (Array.isArray(dayRecords) ? dayRecords : []).filter((r) => r?.ref !== ref)
+            const { updates } = computePlanInsert(records, rec, toIndex)
+            if (!updates.length) return
+            const ts = now()
+            for (const u of updates) {
+                const source = u.ref === ref ? rec : records.find((r) => r.ref === u.ref)
+                if (!source) continue
+                const entry = buildPlanItem({
+                    id: source.ref,
+                    kind: source.kind,
+                    refListId: source.refListId,
+                    refItemId: source.refItemId,
+                    refType: source.refType,
+                    plannedFor: source.ref === ref ? dateKey : source.plannedFor,
+                    planOrder: u.planOrder,
+                    updatedAt: ts,
+                })
+                markLocalId(source.ref)
+                send(RPC_UPDATE, { item: entry })
+            }
+        },
         // Remove a plan entry (unflag an item / clear a list-card). An empty
         // plannedFor is the conflict-free clear (reducePlan drops it).
         clearFromPlan(ref) {
@@ -1163,12 +1205,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             markLocalId(ref)
             send(RPC_UPDATE, { item: entry })
         },
-        reorderPlanDay(dayRecords, fromIndex, toIndex) {
-            const { updates } = computePlanReorder(dayRecords, fromIndex, toIndex)
+        reorderPlanRecords(orderedRecords, fromIndex, toIndex) {
+            const { updates } = computePlanReorder(orderedRecords, fromIndex, toIndex)
             if (!updates.length) return
             const ts = now()
             for (const u of updates) {
-                const rec = dayRecords.find((r) => r.ref === u.ref)
+                const rec = orderedRecords.find((r) => r.ref === u.ref)
                 if (!rec) continue
                 const entry = buildPlanItem({ id: rec.ref, kind: rec.kind, refListId: rec.refListId, refItemId: rec.refItemId, refType: rec.refType, plannedFor: rec.plannedFor, planOrder: u.planOrder, updatedAt: ts })
                 markLocalId(rec.ref)
@@ -2354,10 +2396,23 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         const resolveDay = (dateKey) => (byDate.get(dateKey) || []).map(resolve).filter(Boolean)
         // Derived carryover: entries parked on a past day that aren't done yet
-        // surface under Today (oldest first). Their stored plannedFor is never
-        // rewritten — completing writes through to the source; "move to today"
-        // (below) re-homes the entry for real if the user wants it off the past.
-        const carried = overduePlanRecords(reduced, today).map(resolve).filter(Boolean).filter((r) => !r.done)
+        // surface under Today in their shared manual order. Their plannedFor is
+        // retained while reordering, so origin badges remain accurate. Completing
+        // writes through to the source; "move to today" (below) re-homes the entry
+        // for real if the user wants it off the past.
+        const carried = overduePlanRecords(reduced, today)
+            .map(resolve)
+            .filter(Boolean)
+            .filter((r) => !r.done)
+            // The carry-over tray is one reorderable collection even though its
+            // records retain different origin dates. planOrder is therefore the
+            // primary display key here; origin date remains a deterministic tie
+            // breaker for trays that have never been manually ordered.
+            .sort((a, b) => (
+                (a.rec.planOrder - b.rec.planOrder) ||
+                a.rec.plannedFor.localeCompare(b.rec.plannedFor) ||
+                a.rec.ref.localeCompare(b.rec.ref)
+            ))
 
         // Value rollups for the plan strip / rail: sum value + average delay over
         // the rated single items planned into a day (list-cards have no rate).
@@ -2386,13 +2441,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             },
             ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
         })
-        // Within a single day, a row is ALSO a reorder drop target — only wired
-        // when the day holds more than one row (a lone row has nothing to reorder
-        // against). Cross-day moves are handled by the day pill / column drops.
-        const planReorderTarget = (rec, dayRecords, index) => ({
+        // A plan row can be a drop target for either an ordered collection (the
+        // carry-over tray, whose records retain different origin dates) or one
+        // day's agenda. Dropping across days inserts at the indicated row,
+        // whereas dropping within the same collection only changes planOrder.
+        const planReorderTarget = (rec, orderedRecords, index, { collection = false } = {}) => ({
             ondragover: (event) => {
                 const d = ui.planDrag
-                if (!d || d.ref === rec.ref || d.fromDate !== rec.plannedFor) return
+                if (!d || d.ref === rec.ref) return
+                if (collection && !orderedRecords.some((r) => r.ref === d.ref)) return
                 event.preventDefault(); event.stopPropagation()
                 const before = dropBefore(event, 'y')
                 event.currentTarget.classList.toggle('drop-before', before)
@@ -2402,24 +2459,30 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ondrop: (event) => {
                 const d = ui.planDrag
                 event.currentTarget.classList.remove('drop-before', 'drop-after')
-                if (!d || d.fromDate !== rec.plannedFor) return
+                if (!d || d.ref === rec.ref) return
+                if (collection && !orderedRecords.some((r) => r.ref === d.ref)) return
                 event.preventDefault(); event.stopPropagation()
                 ui.planDrag = null
                 const before = dropBefore(event, 'y')
-                const fromIndex = dayRecords.findIndex((r) => r.ref === d.ref)
-                if (fromIndex < 0) return
                 const insertAt = before ? index : index + 1
-                actions.reorderPlanDay(dayRecords, fromIndex, insertAt > fromIndex ? insertAt - 1 : insertAt)
+                const fromIndex = orderedRecords.findIndex((r) => r.ref === d.ref)
+                if (collection || d.fromDate === rec.plannedFor) {
+                    if (fromIndex < 0) return
+                    actions.reorderPlanRecords(orderedRecords, fromIndex, insertAt > fromIndex ? insertAt - 1 : insertAt)
+                    return
+                }
+                actions.movePlanIntoDay(d.ref, rec.plannedFor, orderedRecords, insertAt)
             },
         })
 
         const planRow = (resolved, dayRecords, index, opts = {}) => {
             // Every row is a drag source (drop on a day pill/column to re-plan it to
-            // another day); rows in a multi-row day are additionally reorder targets.
+            // another day) and a drop target, so a carry-over item can be inserted
+            // before/after even when Today currently contains only one item.
             // The whole row is the drag surface — the grip is just the affordance,
             // shown on every row so "move to another day" is always discoverable.
             const records = Array.isArray(dayRecords) ? dayRecords : []
-            const dnd = { ...planDragSource(resolved.rec), ...(records.length > 1 ? planReorderTarget(resolved.rec, records, index) : {}) }
+            const dnd = { ...planDragSource(resolved.rec), ...(records.length > 0 ? planReorderTarget(resolved.rec, records, index) : {}) }
             const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
             if (resolved.kind === 'list') {
                 return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
@@ -2479,10 +2542,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         // as a normal plan row, plus a badge for the past day it slipped from and
         // a one-click "move to today" shortcut. It's a drag source too, so a
         // slipped item can be dropped onto ANY day pill/column — not just today.
-        // Not a reorder target (each carries a different past day of its own).
-        const carryRow = (resolved) => {
+        // Its origin day stays intact while the tray's shared planOrder changes.
+        const carryRow = (resolved, carryRecords, index) => {
             const rec = resolved.rec
-            const dnd = planDragSource(rec)
+            const dnd = {
+                ...planDragSource(rec),
+                ...(carryRecords.length > 1 ? planReorderTarget(rec, carryRecords, index, { collection: true }) : {}),
+            }
             const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
             const badge = h('span', {
                 class: 'plan-carry-badge label-sm',
@@ -2569,7 +2635,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
                     tablerIcon('history', { size: 13 }),
                     h('span', {}, t('plan.carriedOver', { count: carriedHere.length })),
                 ))
-                parts.push(h('div', { class: 'plan-rows plan-carry-rows' }, ...carriedHere.map((r) => carryRow(r))))
+                const carryRecords = carriedHere.map((r) => r.rec)
+                parts.push(h('div', { class: 'plan-rows plan-carry-rows' }, ...carriedHere.map((r, i) => carryRow(r, carryRecords, i))))
             }
             if (pending.length > 0) {
                 parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.now')))
@@ -2974,8 +3041,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
         }
         if (group.length > 1) Object.assign(props, reorderDnd(item, group, index, 'y'))
         const planned = plannedRefs.has(planItemKey(item.listId, item.id))
+        // A todo's square is a real, independent completion control. Previously
+        // it lived inside the row's click target, so opening the Inspector made
+        // the apparent checkbox retarget the Inspector instead of toggling done.
+        // Keep row-click browsing while guaranteeing that the square always
+        // performs the action its visual and accessible label promise.
+        const leading = isTodoItem(item)
+            ? h('button', {
+                class: 'glyph item-toggle',
+                type: 'button',
+                'aria-label': t('main.item.toggle'),
+                'aria-pressed': item.isDone ? 'true' : 'false',
+                onclick: (event) => { event.stopPropagation(); actions.toggleItem(item) },
+                onkeydown: (event) => {
+                    if (event.key === ' ' || event.key === 'Enter') event.stopPropagation()
+                },
+                onfocus: () => { ui.focusedItemId = item.id },
+            }, glyph)
+            : h('span', { class: 'glyph' }, glyph)
         return h('div', props,
-            h('span', { class: 'glyph' }, glyph),
+            leading,
             h('span', { class: 'item-text' }, item.text),
             hasValueRating(item)
                 ? h('div', {
@@ -6054,10 +6139,42 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
             ? h('div', { class: 'notice error', dataset: { writeBlock: state.writeBlock } },
                 locale.i18n.t(state.writeBlock === 'not-writable'
                     ? 'main.notification.writeNotWritable'
-                    : 'main.notification.writeSyncStalled'))
+                    : state.writeBlock === 'epoch-key-stale'
+                        ? 'main.notification.writeEpochStale'
+                        : state.writeBlock === 'backend-unresponsive'
+                            ? 'main.notification.writeBackendUnresponsive'
+                        : 'main.notification.writeSyncStalled'))
+            : null
+        const updateBanner = ui.updateReady
+            ? h('div', { class: 'notice update-ready', dataset: { updateReady: 'true' } },
+                h('span', {}, locale.i18n.t(ui.updateRestartFailed
+                    ? 'desktop.update.restartFailed'
+                    : 'desktop.update.ready')),
+                h('button', {
+                    class: 'notice-action',
+                    type: 'button',
+                    disabled: ui.updateRestarting ? 'true' : null,
+                    onclick: async () => {
+                        if (ui.updateRestarting) return
+                        ui.updateRestarting = true
+                        ui.updateRestartFailed = false
+                        renderNotices(store.getState())
+                        try {
+                            await appUpdates.restart()
+                        } catch {
+                            ui.updateRestarting = false
+                            ui.updateRestartFailed = true
+                            renderNotices(store.getState())
+                        }
+                    },
+                }, locale.i18n.t(ui.updateRestarting
+                    ? 'desktop.update.restarting'
+                    : 'desktop.update.restart')),
+            )
             : null
         replaceChildren(noticesHost,
             ...(writeBlockBanner ? [writeBlockBanner] : []),
+            ...(updateBanner ? [updateBanner] : []),
             ...state.notices.map((notice) => h('div', {
                 class: `notice ${notice.tone}`,
                 dataset: { noticeId: String(notice.id) },
@@ -6209,6 +6326,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, env
     }
 
     maybeSeedDeviceName()
+    try {
+        appUpdates?.subscribe?.(() => {
+            ui.updateReady = true
+            ui.updateRestartFailed = false
+            renderAll()
+        })
+    } catch { /* update notifications are best-effort */ }
     store.subscribe(renderAll)
     renderAll()
 

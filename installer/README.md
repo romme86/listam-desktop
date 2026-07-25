@@ -9,9 +9,9 @@ DMG.
 ## Build
 
 ```sh
-installer/build-macos.sh                  # stage to 'production' + build DMG
-installer/build-macos.sh --release        # also mark the staged tip as the release
-installer/build-macos.sh --channel beta   # different channel = different key/identity
+installer/build-macos.sh                  # stage + release production + build DMG
+installer/build-macos.sh --release        # explicit equivalent for production
+installer/build-macos.sh --channel beta --stage-only  # unpublished preview
 installer/build-macos.sh --skip-stage     # rebuild DMG without restaging
 ```
 
@@ -25,11 +25,14 @@ Steps performed:
    and the secrets file — note that a custom ignore list **replaces** Pear's
    defaults, so `.git` must always be restated (both here and in
    `package.json`'s `pear.stage.ignore`).
-2. Generates `assets/listam.icns` from `assets/icon.png` if stale
+2. For `production`, advances the release pointer and verifies that it equals
+   the staged tip. Production cannot be built with `--stage-only`; use a beta
+   channel for unpublished previews.
+3. Generates `assets/listam.icns` from `assets/icon.png` if stale
    (`make-icns.swift` masks the artwork into the macOS squircle grid).
-3. Assembles `Listam.app`: `launcher.sh` (with the link baked in) as the
+4. Assembles `Listam.app`: `launcher.sh` (with the link baked in) as the
    executable, Info.plist (`ch.saynode.listam.desktop`), the icns.
-4. Ad-hoc codesigns the bundle and wraps it in a UDZO DMG with an
+5. Ad-hoc codesigns the bundle and wraps it in a UDZO DMG with an
    `/Applications` symlink.
 
 ## What the installed app does
@@ -50,8 +53,8 @@ dialog with the `pear run <link>` command to approve it from Terminal once.
 - **Seeding:** installs fetch the drive over the swarm. Keep a seeder
   running, e.g. `pear seed production listam-desktop/` (the Geekom VMs are
   natural hosts). Updates ship by restaging — running apps follow the drive.
-- **Release pointer:** without `--release` consumers run the staged tip
-  (`tier: staging`). Mark releases deliberately: `pear release production .`
+- **Release pointer:** production builds always move and verify the pointer.
+  Use `--channel beta --stage-only` when you need a staged, unpublished tip.
 - **Gatekeeper:** the bundle is ad-hoc signed, not notarized. A DMG that
   arrives with a quarantine flag needs right-click → Open (or
   `xattr -dr com.apple.quarantine /Applications/Listam.app`).

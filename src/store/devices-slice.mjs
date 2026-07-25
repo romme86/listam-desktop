@@ -17,7 +17,15 @@ const devicesSlice = createSlice({
     reducers: {
         rosterReceived(state, action) {
             const roster = action.payload
-            Object.assign(state, initialDevicesState)
+            // Immer freezes the completed Redux state. Reusing the exported
+            // initial arrays/maps here makes the second roster refresh assign
+            // frozen containers and then fail at writerIds.push(). Reset with
+            // fresh draft-owned containers on every refresh instead.
+            Object.assign(state, {
+                ...initialDevicesState,
+                writerIds: [],
+                writersById: {},
+            })
             if (!roster) return
             const writers = Array.isArray(roster.writers) ? roster.writers : Array.isArray(roster.members) ? roster.members : []
             state.hasRoster = true

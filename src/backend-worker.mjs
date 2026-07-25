@@ -41,6 +41,56 @@ let eventId = 0
 let backendHandler = null
 let secretStore = null
 const pendingEventReplies = new Map()
+const EVENT_REPLY_TIMEOUT_MS = 30000
+const requestTrace = []
+const rendererRequestTrace = []
+
+function persistRequestTrace() {
+    try {
+        fs.writeFileSync(
+            join(Pear.config.storage, 'worker-requests.log'),
+            `${JSON.stringify(requestTrace.slice(-100), null, 2)}\n`,
+        )
+    } catch { /* diagnostics are best-effort */ }
+}
+
+function beginRequestTrace(frame) {
+    const entry = {
+        id: frame.id,
+        kind: frame.kind,
+        command: frame.command ?? null,
+        startedAt: nowIso(),
+        status: 'pending',
+    }
+    requestTrace.push(entry)
+    persistRequestTrace()
+    return entry
+}
+
+function finishRequestTrace(entry, status = 'completed') {
+    entry.status = status
+    entry.finishedAt = nowIso()
+    persistRequestTrace()
+}
+
+function recordRendererRequestTrace(frame) {
+    rendererRequestTrace.push({
+        phase: frame.phase ?? null,
+        id: frame.id ?? null,
+        requestKind: frame.requestKind ?? null,
+        command: frame.command ?? null,
+        matched: frame.matched ?? null,
+        subtype: frame.subtype ?? null,
+        errorAt: frame.errorAt ?? null,
+        at: nowIso(),
+    })
+    try {
+        fs.writeFileSync(
+            join(Pear.config.storage, 'renderer-requests.log'),
+            `${JSON.stringify(rendererRequestTrace.slice(-200), null, 2)}\n`,
+        )
+    } catch { /* diagnostics are best-effort */ }
+}
 
 function send(frame) {
     pipe.write(`${JSON.stringify(frame)}\n`)
@@ -131,7 +181,13 @@ function createRpc(handler) {
                         return
                     }
                     const id = ++eventId
-                    firstReply = new Promise((resolve) => pendingEventReplies.set(id, resolve))
+                    firstReply = new Promise((resolve) => {
+                        const timer = setTimeout(() => {
+                            pendingEventReplies.delete(id)
+                            resolve(null)
+                        }, EVENT_REPLY_TIMEOUT_MS)
+                        pendingEventReplies.set(id, { resolve, timer })
+                    })
                     const event = decodeBackendRequest(command, payload)
                     projectVoiceEvent(event)
                     send({ kind: 'event', id, event })
@@ -148,30 +204,43 @@ function createRpc(handler) {
 }
 
 async function handleFrame(frame) {
-    if (frame.kind === 'bridge') {
+    if (frame.kind === 'renderer-trace') {
+        recordRendererRequestTrace(frame)
+    } else if (frame.kind === 'bridge') {
         const status = await bridgeManager.handleAction(frame)
         send({ kind: 'res', id: frame.id, data: JSON.stringify(status) })
     } else if (frame.kind === 'voice') {
         const status = await voiceHost.handleAction(frame)
         send({ kind: 'res', id: frame.id, data: JSON.stringify(status) })
     } else if (frame.kind === 'req') {
+        const trace = beginRequestTrace(frame)
         if (!backendHandler) {
             send({ kind: 'res', id: frame.id, data: null })
+            finishRequestTrace(trace, 'no-backend-handler')
             return
         }
         let replyData = null
-        await backendHandler({
-            command: frame.command,
-            data: b4a.from(frame.data ?? ''),
-            reply(value) {
-                replyData = dataToString(value)
-            },
-        }, null)
-        send({ kind: 'res', id: frame.id, data: replyData })
+        try {
+            await backendHandler({
+                command: frame.command,
+                data: b4a.from(frame.data ?? ''),
+                reply(value) {
+                    replyData = dataToString(value)
+                },
+            }, null)
+            send({ kind: 'res', id: frame.id, data: replyData })
+            finishRequestTrace(trace)
+        } catch (error) {
+            finishRequestTrace(trace, `failed:${error?.message ?? 'unknown'}`)
+            throw error
+        }
     } else if (frame.kind === 'reply') {
-        const resolve = pendingEventReplies.get(frame.id)
+        const pending = pendingEventReplies.get(frame.id)
         pendingEventReplies.delete(frame.id)
-        resolve?.(frame.data)
+        if (pending) {
+            clearTimeout(pending.timer)
+            pending.resolve(frame.data)
+        }
     }
 }
 
@@ -195,6 +264,11 @@ pipe.on('data', (chunk) => {
 })
 
 pipe.on('close', () => {
+    for (const pending of pendingEventReplies.values()) {
+        clearTimeout(pending.timer)
+        pending.resolve(null)
+    }
+    pendingEventReplies.clear()
     globalThis.Bare?.exit?.(0)
 })
 pipe.on('end', () => {
@@ -215,6 +289,7 @@ async function main() {
         fileURLToPath: URL.fileURLToPath,
         createRpc,
         storageNamespace: 'desktop',
+        presenceWrites: false,
         bootSecretPayload: JSON.stringify(prepared.backendPayload),
     })
 

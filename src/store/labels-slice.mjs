@@ -12,6 +12,25 @@ const labelsSlice = createSlice({
                 if (isLabelOnly(item) && item.id) state.itemsById[item.id] = item
             }
         },
+        labelsSnapshotApplied(state, action) {
+            const { listId, listType, items } = action.payload ?? {}
+            if (!listId || !listType || !Array.isArray(items) || !isLabelOnly({ listType })) return
+            for (const [itemId, item] of Object.entries(state.itemsById)) {
+                if (item.listId === listId || (!item.listId && item.listType === listType)) {
+                    delete state.itemsById[itemId]
+                }
+            }
+            for (const item of items) {
+                const normalized = {
+                    ...item,
+                    listId: item?.listId || listId,
+                    listType: item?.listType || listType,
+                }
+                if (isLabelOnly(normalized) && normalized.listId === listId && normalized.id) {
+                    state.itemsById[normalized.id] = normalized
+                }
+            }
+        },
         labelItemApplied(state, action) {
             const item = action.payload
             if (isLabelOnly(item) && item.id) state.itemsById[item.id] = item

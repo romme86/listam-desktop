@@ -42,6 +42,24 @@ export function reductionFromItems(items) {
     return reduction
 }
 
+export function decodeSyncListSnapshot(value) {
+    if (Array.isArray(value)) return { mode: 'legacy', items: value }
+    if (!value || typeof value !== 'object' || !Array.isArray(value.list)) return null
+
+    const first = value.list.find((item) => item && typeof item === 'object')
+    const listId = typeof value.listId === 'string' && value.listId
+        ? value.listId
+        : (typeof first?.listId === 'string' ? first.listId : null)
+    const listType = typeof value.listType === 'string' && value.listType
+        ? value.listType
+        : (typeof first?.listType === 'string' ? first.listType : null)
+
+    // Older shared-base envelopes carried only { list, baseKey }. Infer their
+    // bucket from a non-empty list; otherwise retain the legacy array behavior.
+    if (!listId || !listType) return { mode: 'legacy', items: value.list }
+    return { mode: 'bucket', listId, listType, items: value.list }
+}
+
 function sameSnapshot(left, right) {
     if (left === right) return true
     if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
@@ -58,8 +76,8 @@ const MAX_NOTICES = 4
 export const DEFAULT_PREFERENCES = Object.freeze({
     localeChoice: 'system',
     isGridView: false,
-    categoriesEnabled: true,
-    categoryHeaders: true,
+    categoriesEnabled: false,
+    categoryHeaders: false,
     theme: 'system',
     showKeyHints: true,
     // Per-device gate for the "New board" create option. Off by default; never
@@ -326,10 +344,23 @@ export function createDesktopStore(initial = {}) {
         const before = getState()
         switch (event.type) {
             case 'sync-list': {
+                const snapshot = decodeSyncListSnapshot(event.items)
+                if (!snapshot) return 'sync-list'
                 transaction(() => {
-                    reduxStore.dispatch(listsActions.selectedListItemsSynced(event.items ?? []))
-                    reduxStore.dispatch(labelsActions.labelsApplied(event.items ?? []))
-                    reduxStore.dispatch(presenceActions.presenceApplied(event.items ?? []))
+                    if (snapshot.mode === 'legacy') {
+                        reduxStore.dispatch(listsActions.selectedListItemsSynced(snapshot.items))
+                        reduxStore.dispatch(labelsActions.labelsApplied(snapshot.items))
+                        reduxStore.dispatch(presenceActions.presenceApplied(snapshot.items))
+                    } else {
+                        const bucket = {
+                            listId: snapshot.listId,
+                            listType: snapshot.listType,
+                            items: snapshot.items,
+                        }
+                        reduxStore.dispatch(listsActions.selectedListItemsSynced(bucket))
+                        reduxStore.dispatch(labelsActions.labelsSnapshotApplied(bucket))
+                        reduxStore.dispatch(presenceActions.presenceSnapshotApplied(bucket))
+                    }
                     reduxStore.dispatch(syncActions.snapshotReceived())
                     const items = getState().items
                     if (!before.synced || !sameSnapshot(before.items, items)) {
@@ -433,6 +464,7 @@ export function createDesktopStore(initial = {}) {
                 return type
             case 'not-writable':
             case 'sync-stalled':
+            case 'epoch-key-stale':
                 // The backend refused a mutation (see @listam/backend lib/item.mjs
                 // write gates) — remember why so the UI can say so instead of
                 // dropping the change silently.

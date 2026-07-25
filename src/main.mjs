@@ -51,12 +51,18 @@ async function boot() {
     const onEvent = (event) => store.applyClientEvent(event, Date.now())
 
     if (isPear) {
-        const { bootDesktopBackend } = await import('./backend-boot.mjs')
-        const backend = await bootDesktopBackend({
+        const { bootRecoveringDesktopBackend } = await import('./backend-boot.mjs')
+        const backend = await bootRecoveringDesktopBackend({
             Pear: globalThis.Pear,
             onEvent,
             onBridgeStatus: (status) => store.setState({ leafBridge: status }),
             onVoiceStatus: (status) => store.setState({ voice: status }),
+            onRecovering: () => store.setState({ backendReady: false, writeBlock: 'backend-unresponsive' }),
+            onRecovered: () => {
+                store.setState({ backendReady: true })
+                if (store.getState().writeBlock === 'backend-unresponsive') store.clearWriteBlock()
+            },
+            onRecoveryFailed: () => store.setState({ backendReady: false, writeBlock: 'backend-unresponsive' }),
         })
         store.setState({ backendReady: true })
         if (backend.secretsMode !== 'secure-store') {
@@ -68,7 +74,18 @@ async function boot() {
         const ownerControl = await import('./owner-control.mjs')
             .then(({ createOwnerControlManager }) => createOwnerControlManager({ Pear: globalThis.Pear }))
             .catch(() => null)
-        mountApp({ root, store, client: backend.client, locale, ownerControl })
+        const appUpdates = typeof globalThis.Pear.updates === 'function' && typeof globalThis.Pear.restart === 'function'
+            ? {
+                subscribe(listener) {
+                    const stream = globalThis.Pear.updates(listener)
+                    return () => stream?.destroy?.()
+                },
+                restart() {
+                    return globalThis.Pear.restart()
+                },
+            }
+            : null
+        mountApp({ root, store, client: backend.client, locale, ownerControl, appUpdates })
         // The backend emits its initial sync/invite during startup, before the
         // UI listener attaches; ask again now that we are listening.
         const syncRecovery = installSyncRecovery({
@@ -114,12 +131,29 @@ async function boot() {
     mock.client.onEvent(onEvent)
     mock.client.onBridgeStatus((status) => store.setState({ leafBridge: status }))
     store.setState({ backendReady: true })
-    mountApp({ root, store, client: mock.client, locale })
+    let previewUpdateListener = null
+    const previewUpdates = {
+        subscribe(listener) {
+            previewUpdateListener = listener
+            return () => { previewUpdateListener = null }
+        },
+        restart() {
+            return Promise.reject(new Error('Restart is unavailable in the browser preview'))
+        },
+    }
+    mountApp({ root, store, client: mock.client, locale, appUpdates: previewUpdates })
     mock.start()
     // Design-preview handle (mock boot only, never under Pear): lets browser
     // automation drive store events (e.g. simulate backend messages) to verify
     // UI states the fixtures can't reach.
-    globalThis.__listamPreview = { store, client: mock.client }
+    globalThis.__listamPreview = {
+        store,
+        client: mock.client,
+        showUpdate: () => previewUpdateListener?.({ type: 'app-update' }),
+    }
+    if (new URLSearchParams(globalThis.location?.search ?? '').has('update')) {
+        globalThis.__listamPreview.showUpdate()
+    }
 }
 
 boot().catch((error) => {
