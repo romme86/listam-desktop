@@ -324,8 +324,12 @@ export function createDesktopStore(initial = {}) {
     }
 
     // A mutation went through again — writes flow, drop the write-block banner.
+    // 'storage-fenced' is exempt: it means another process owns this data
+    // directory and the backend has torn itself down. Only relaunching recovers,
+    // so a stray later success must never clear that banner and imply otherwise.
     function clearWriteBlock() {
-        if (getState().writeBlock) reduxStore.dispatch(syncActions.writeBlockCleared())
+        const current = getState().writeBlock
+        if (current && current !== 'storage-fenced') reduxStore.dispatch(syncActions.writeBlockCleared())
     }
 
     function recordDiagnostic(label, detail, now) {
@@ -469,6 +473,18 @@ export function createDesktopStore(initial = {}) {
                 // write gates) — remember why so the UI can say so instead of
                 // dropping the change silently.
                 setState({ writeBlock: type, diagnostics: recordDiagnostic(type, undefined, now) })
+                return type
+            case 'storage-fenced':
+                // Terminal, unlike the write blocks above: another process owns
+                // this data directory now, so this backend has fenced itself and
+                // torn down. Nothing it can do will recover — only relaunching
+                // will — so the block must NOT be cleared by a later successful
+                // reply the way the recoverable ones are.
+                setState({
+                    writeBlock: type,
+                    backendReady: false,
+                    diagnostics: recordDiagnostic(type, payload.reason, now),
+                })
                 return type
             case 'membership-roster':
                 setState({
