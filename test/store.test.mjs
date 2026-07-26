@@ -337,3 +337,63 @@ test('boardEnabled preference defaults off, round-trips, and persists per device
     persistUiPreferences(storage, store.getState().preferences)
     assert.equal(loadUiPreferences(storage).boardEnabled, true)
 })
+
+// Sharing a list PROMOTES it: its items are re-seeded into a new single-list
+// base with the SAME ids, then the personal copies are tombstoned. The two bases
+// replicate independently, so the delete can arrive AFTER the seed — and
+// identityKey (listId + itemId, no base) makes it match. Without a guard the
+// list that was just shared goes empty.
+test('a late personal tombstone cannot empty a list that was just shared', () => {
+    const store = createDesktopStore()
+    const SHARED = 'a1b2c3'
+
+    // The personal registry declares that this list's items now live in a
+    // shared base.
+    store.applyClientEvent({
+        type: 'add-from-backend',
+        item: {
+            id: 'holiday', listId: '__registry__', listType: 'registry',
+            regKind: 'list', regName: 'Holiday', regType: 'todo', regBaseKey: SHARED,
+            text: 'Holiday', isDone: false, timeOfCompletion: 0, updatedAt: 1,
+        },
+    }, 1)
+
+    // The shared base seeds the item.
+    store.applyClientEvent({
+        type: 'add-from-backend',
+        item: {
+            id: 'x1', text: 'Passports', listId: 'holiday', listType: 'todo',
+            baseKey: SHARED, isDone: false, timeOfCompletion: 0, updatedAt: 2,
+        },
+    }, 2)
+    assert.equal(store.getState().items.some((i) => i.id === 'x1'), true, 'the seeded item is present')
+
+    // The personal base's tombstone for the SAME id arrives late, untagged.
+    store.applyClientEvent({
+        type: 'delete-from-backend',
+        item: {
+            id: 'x1', text: 'Passports', listId: 'holiday', listType: 'todo',
+            isDone: false, timeOfCompletion: 0, updatedAt: 3,
+        },
+    }, 3)
+
+    assert.equal(
+        store.getState().items.some((i) => i.id === 'x1'),
+        true,
+        'an event from the base this list was promoted away from must be ignored',
+    )
+})
+
+test('the base guard fails open for a list the registry has not described', () => {
+    // Dropping items because the registry has not replicated yet would turn a
+    // slow sync into data loss.
+    const store = createDesktopStore()
+    store.applyClientEvent({
+        type: 'add-from-backend',
+        item: {
+            id: 'y1', text: 'Milk', listId: 'not-in-registry', listType: 'shopping',
+            baseKey: 'ffff', isDone: false, timeOfCompletion: 0, updatedAt: 1,
+        },
+    }, 1)
+    assert.equal(store.getState().items.some((i) => i.id === 'y1'), true)
+})

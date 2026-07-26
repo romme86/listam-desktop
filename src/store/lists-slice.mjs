@@ -1,6 +1,7 @@
 import { createSlice } from '@reduxjs/toolkit'
 import { isLabelItem, isPlanItem, surfaceLabelKey } from '@listam/domain'
 import { REGISTRY_LIST_TYPE } from '@listam/domain/list-registry'
+import { isFromAuthoritativeBase, listBaseFromRegistryItem } from '@listam/domain/authoritative-base'
 import {
     DEFAULT_LIST_ID,
     DEFAULT_LIST_TYPE,
@@ -48,6 +49,10 @@ export const initialListsState = {
         },
     },
     itemsById: {},
+    // listId -> the base its items must come from (null = the personal base).
+    // Maintained incrementally from personal registry meta-items as they arrive,
+    // so the guard below is an O(1) lookup rather than a re-reduce per event.
+    baseByListId: {},
 }
 
 function ensureProject(state, projectId) {
@@ -172,6 +177,19 @@ function applyItemProjection(state, entry, operation) {
     if (!entry || isLabelItem(entry) || isSharedRegistryItem(entry)) return
     const normalized = normalizeListEntries([entry])[0]
     if (!normalized) return
+
+    // Keep the routing index current: a registry meta-item is what declares
+    // where a list's items live.
+    const routing = listBaseFromRegistryItem(normalized)
+    if (routing) state.baseByListId[routing.listId] = routing.baseKey
+
+    // Sharing a list re-seeds its items into a new base with the SAME ids and
+    // then tombstones the personal copies. Those two bases replicate
+    // independently, so the delete can land AFTER the seed — and identityKey
+    // (listId + itemId, no base) makes it match, emptying the list that was just
+    // shared. Ignore events from a base this list was promoted away from.
+    // Fails open for lists the registry has not described yet.
+    if (!routing && !isFromAuthoritativeBase(normalized, state.baseByListId)) return
     const itemId = identityKey(normalized)
     if (isPlanItem(normalized)) {
         if (operation === 'delete') delete state.itemsById[itemId]
