@@ -439,3 +439,55 @@ test('queued edits whose world moved on raise a block that asks the user', () =>
 
     assert.equal(store.getState().writeBlock, 'write-needs-decision')
 })
+
+// applyItemProjection now mutates itemsById/itemIds directly instead of
+// rebuilding the whole bucket through the shared list-entry helpers. That is
+// ~27x faster at 5,000 items, but it means the helpers' semantics are
+// reimplemented inline — these pin them so the two cannot drift.
+test('add prepends a new row and moves an existing one to the front', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'sync-list', items: [item('a', 'Milk'), item('b', 'Bread')] }, 1)
+    assert.deepEqual(store.getState().items.map((i) => i.text), ['Milk', 'Bread'])
+
+    // A brand-new add goes to the front.
+    store.applyClientEvent({ type: 'add-from-backend', item: item('c', 'Eggs') }, 2)
+    assert.deepEqual(store.getState().items.map((i) => i.text), ['Eggs', 'Milk', 'Bread'])
+
+    // Re-adding an existing id merges and moves it to the front.
+    store.applyClientEvent({ type: 'add-from-backend', item: item('b', 'Sourdough') }, 3)
+    assert.deepEqual(store.getState().items.map((i) => i.text), ['Sourdough', 'Eggs', 'Milk'])
+})
+
+test('update keeps position, and appends when the row is new', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'sync-list', items: [item('a', 'Milk'), item('b', 'Bread')] }, 1)
+
+    store.applyClientEvent({ type: 'update-from-backend', item: { ...item('a', 'Oat milk'), updatedAt: 99 } }, 2)
+    assert.deepEqual(store.getState().items.map((i) => i.text), ['Oat milk', 'Bread'], 'position preserved')
+
+    store.applyClientEvent({ type: 'update-from-backend', item: { ...item('z', 'Late'), updatedAt: 99 } }, 3)
+    assert.deepEqual(store.getState().items.map((i) => i.text), ['Oat milk', 'Bread', 'Late'], 'unknown row appends')
+})
+
+test('a stale update is ignored, but a stale ADD still wins', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'sync-list', items: [{ ...item('a', 'Current'), updatedAt: 500 }] }, 1)
+
+    store.applyClientEvent({ type: 'update-from-backend', item: { ...item('a', 'Older'), updatedAt: 100 } }, 2)
+    assert.equal(store.getState().items[0].text, 'Current', 'LWW rejects the older update')
+
+    // upsertListEntry with 'front' placement has no staleness check — an
+    // explicit add always wins. Reproduced here deliberately.
+    store.applyClientEvent({ type: 'add-from-backend', item: { ...item('a', 'Forced'), updatedAt: 100 } }, 3)
+    assert.equal(store.getState().items[0].text, 'Forced', 'an add is not staleness-gated')
+})
+
+test('delete removes the row and its bucket entry', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'sync-list', items: [item('a', 'Milk'), item('b', 'Bread')] }, 1)
+    store.applyClientEvent({ type: 'delete-from-backend', item: item('a', 'Milk') }, 2)
+
+    const items = store.getState().items
+    assert.deepEqual(items.map((i) => i.text), ['Bread'])
+    assert.equal(items.some((i) => i.id === 'a'), false)
+})

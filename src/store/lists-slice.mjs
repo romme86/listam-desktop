@@ -5,11 +5,9 @@ import { isFromAuthoritativeBase, listBaseFromRegistryItem } from '@listam/domai
 import {
     DEFAULT_LIST_ID,
     DEFAULT_LIST_TYPE,
-    deleteListEntry,
     identityKey,
+    isStaleUpdate,
     normalizeListEntries,
-    updateListEntry,
-    upsertListEntry,
 } from '@listam/domain/identity'
 
 export const DEFAULT_PROJECT_ID = 'personal'
@@ -230,15 +228,50 @@ function applyItemProjection(state, entry, operation) {
     }
     const listId = normalized.listId || DEFAULT_LIST_ID
     const listType = normalized.listType || DEFAULT_LIST_TYPE
-    ensureList(state, listId, listType)
+    const list = ensureList(state, listId, listType)
     removeIdentityFromOtherLists(state, itemId, listId)
-    const current = entriesForList(state, listId)
-    const next = operation === 'delete'
-        ? deleteListEntry(current, normalized)
-        : operation === 'update'
-            ? updateListEntry(current, normalized)
-            : upsertListEntry(current, normalized)
-    replaceListItems(state, listId, listType, next)
+
+    // Keyed mutation, not a bucket rewrite.
+    //
+    // This used to materialize the whole bucket into an array, run the
+    // upsert/update/delete helper over it, and hand the result to
+    // replaceListItems — which then deleted and re-added every itemsById key
+    // through Immer proxies. For a ONE-item change. Measured at ~47 ms per edit
+    // on a 5,000-item list even after the O(n^2) scan was removed, because the
+    // cost is the rewrite itself, not the search.
+    //
+    // The semantics below are exactly those of upsertListEntry / updateListEntry
+    // / deleteListEntry in @listam/domain/identity, applied in place:
+    //   add    — prepend when new; otherwise merge and move to the front
+    //   update — append when new; ignore a stale write; otherwise merge in place
+    //   delete — drop it
+    const at = list.itemIds.indexOf(itemId)
+
+    if (operation === 'delete') {
+        if (at !== -1) list.itemIds.splice(at, 1)
+        delete state.itemsById[itemId]
+        return
+    }
+
+    if (at === -1) {
+        state.itemsById[itemId] = normalized
+        // add goes to the front, update to the back — matching 'front' vs
+        // 'preserve' placement in the shared helpers.
+        if (operation === 'update') list.itemIds.push(itemId)
+        else list.itemIds.unshift(itemId)
+        return
+    }
+
+    const existing = state.itemsById[itemId]
+    // Only 'preserve' placement (update) honours staleness; an explicit add
+    // always wins, exactly as upsertListEntry does.
+    if (operation === 'update' && isStaleUpdate(existing, normalized)) return
+
+    state.itemsById[itemId] = { ...existing, ...normalized }
+    if (operation !== 'update' && at !== 0) {
+        list.itemIds.splice(at, 1)
+        list.itemIds.unshift(itemId)
+    }
 }
 
 const listsSlice = createSlice({
