@@ -397,3 +397,45 @@ test('the base guard fails open for a list the registry has not described', () =
     }, 1)
     assert.equal(store.getState().items.some((i) => i.id === 'y1'), true)
 })
+
+// A write the backend could not flush is now KEPT in its durable outbox and
+// replayed later, so it is not a failure — the row exists and will sync. The UI
+// must say "not synced yet" rather than either losing it or implying it landed.
+test('a queued write marks the row pending without raising a write block', () => {
+    const store = createDesktopStore()
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-queued', id: 'x1', listId: 'default' } }, 1)
+
+    assert.deepEqual(store.getState().pendingWriteIds, ['x1'])
+    assert.equal(store.getState().writeBlock, null, 'a kept write is not a blocked write')
+})
+
+test('queued ids do not duplicate when the same row is refused twice', () => {
+    const store = createDesktopStore()
+    for (let i = 0; i < 3; i++) {
+        store.applyClientEvent({ type: 'message', payload: { type: 'write-queued', id: 'x1' } }, i)
+    }
+    assert.deepEqual(store.getState().pendingWriteIds, ['x1'])
+})
+
+test('a successful replay clears the pending marks', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-queued', id: 'x1' } }, 1)
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-queued', id: 'x2' } }, 2)
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 2 } }, 3)
+
+    assert.deepEqual(store.getState().pendingWriteIds, [])
+})
+
+test('queued edits whose world moved on raise a block that asks the user', () => {
+    // Epoch rotated or the list changed base while the edit sat queued. It is
+    // still held; only the user can say whether a stale edit is still wanted.
+    const store = createDesktopStore()
+    store.applyClientEvent({
+        type: 'message',
+        payload: { type: 'write-needs-decision', blocked: [{ id: 'x1', reason: 'epoch-changed' }] },
+    }, 1)
+
+    assert.equal(store.getState().writeBlock, 'write-needs-decision')
+})

@@ -12,6 +12,10 @@ export const initialSyncState = {
     hasReceivedSnapshot: false,
     writeBlock: null,
     recovery: null,
+    // Ids of mutations the backend kept in its durable outbox because the writer
+    // could not flush. The row still exists locally and will sync later — the UI
+    // marks it rather than pretending the edit was lost or that it landed.
+    pendingWriteIds: [],
 }
 
 const syncSlice = createSlice({
@@ -19,6 +23,18 @@ const syncSlice = createSlice({
     initialState: initialSyncState,
     reducers: {
         autobaseInviteKeySet(state, action) { state.autobaseInviteKey = action.payload || '' },
+        writeQueued(state, action) {
+            const id = action.payload
+            if (typeof id === 'string' && id && !state.pendingWriteIds.includes(id)) {
+                state.pendingWriteIds.push(id)
+            }
+        },
+        // The outbox drained. It reports a count rather than ids, so clear the
+        // whole set: anything still queued re-announces itself on the next
+        // refusal, and showing a stale badge is worse than briefly showing none.
+        writesReplayed(state) {
+            if (state.pendingWriteIds.length) state.pendingWriteIds = []
+        },
         peerCountSet(state, action) { state.peerCount = Number.isFinite(action.payload) ? Math.max(0, action.payload) : 0 },
         workletReadySet(state, action) { state.isWorkletReady = !!action.payload },
         joiningSet(state, action) {

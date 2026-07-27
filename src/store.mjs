@@ -205,6 +205,7 @@ export function selectDesktopState(rootState) {
         boardConfigCanAdminister: rootState.boardConfig.canAdminister,
         recovery: rootState.sync.recovery,
         writeBlock: rootState.sync.writeBlock,
+        pendingWriteIds: rootState.sync.pendingWriteIds,
         ...rootState.runtime,
         preferences: rootState.preferences,
     }
@@ -479,6 +480,27 @@ export function createDesktopStore(initial = {}) {
                     isJoining: false,
                     joinPhase: null,
                     diagnostics: recordDiagnostic('join-error', payload.message, now),
+                })
+                return type
+            case 'write-queued':
+                // Not a failure: the backend KEPT this mutation and will replay
+                // it when a peer is reachable. Mark the row so the user can see
+                // it has not synced yet, and do NOT set a write block — writes
+                // are not being lost.
+                setState({ diagnostics: recordDiagnostic(type, undefined, now) })
+                reduxStore.dispatch(syncActions.writeQueued(payload.id))
+                return type
+            case 'write-replayed':
+                setState({ diagnostics: recordDiagnostic(type, undefined, now) })
+                reduxStore.dispatch(syncActions.writesReplayed())
+                return type
+            case 'write-needs-decision':
+                // Queued edits whose world moved on (epoch rotated, list moved
+                // base). They are still held; only the user can say whether a
+                // stale edit is still wanted.
+                setState({
+                    writeBlock: type,
+                    diagnostics: recordDiagnostic(type, `${payload.blocked?.length ?? 0} queued`, now),
                 })
                 return type
             case 'not-writable':
