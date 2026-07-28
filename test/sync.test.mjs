@@ -21,6 +21,16 @@ import { isLabelItem } from '@listam/domain/labels'
 const contentItems = (items) => items.filter((item) => !isLabelItem(item))
 
 const DRIVER = join(dirname(fileURLToPath(import.meta.url)), 'helpers', 'backend-driver.mjs')
+// Each test here runs two real backends as child processes and waits on actual
+// DHT/swarm progress, so it is the one part of the suite that is sensitive to
+// how much CPU it gets. On a 2-core CI runner it degraded from a tight ~16.5s
+// to 30-51s and then started blowing the backend's own 120s join timeout as the
+// rest of the suite grew around it — starved, not broken (the same commit that
+// failed at 135s re-ran green at 30s, and locally the pairing path is FASTER
+// than it was in the fast era: ~1.38s vs ~2.37s). `npm test` therefore runs test
+// files with --test-concurrency=1 so these never compete with the other 14
+// files; it costs ~0.35s locally. If this starts failing again, check for
+// contention before suspecting the backend.
 const JOIN_TIMEOUT_MS = 120_000
 
 class Driver {

@@ -27,7 +27,7 @@
   },
   "scripts": {
     "dev": "pear run --dev .",
-    "test": "node --test --test-force-exit test/*.test.mjs",
+    "test": "node --test --test-force-exit --test-concurrency=1 test/*.test.mjs",
     "lint": "eslint .",
     "ci": "npm run lint && npm run test"
   },
