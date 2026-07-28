@@ -5,7 +5,7 @@ import { isFromAuthoritativeBase, listBaseFromRegistryItem } from '@listam/domai
 import {
     DEFAULT_LIST_ID,
     DEFAULT_LIST_TYPE,
-    identityKey,
+    baseScopedKey,
     isStaleUpdate,
     normalizeListEntries,
 } from '@listam/domain/identity'
@@ -125,7 +125,7 @@ function bucketUnchanged(state, list, normalized) {
         if (!current) return false
         const next = normalized[i]
         if (current === next) continue
-        if (identityKey(current) !== identityKey(next)) return false
+        if (baseScopedKey(current) !== baseScopedKey(next)) return false
         if (JSON.stringify(current) !== JSON.stringify(next)) return false
     }
     return true
@@ -159,7 +159,7 @@ function replaceListItems(state, listId, listType, entries) {
     list.itemIds = []
     const seen = new Set()
     for (const item of normalized) {
-        const itemId = identityKey(item)
+        const itemId = baseScopedKey(item)
         state.itemsById[itemId] = item
         if (seen.has(itemId)) continue
         seen.add(itemId)
@@ -181,7 +181,7 @@ function replaceExactBucket(state, { listId, listType, items }) {
             listType: entry?.listType || listType,
         })))) {
             if (!isPlanItem(item) || item.listId !== listId) continue
-            state.itemsById[identityKey(item)] = item
+            state.itemsById[baseScopedKey(item)] = item
         }
         return
     }
@@ -215,12 +215,13 @@ function applyItemProjection(state, entry, operation) {
 
     // Sharing a list re-seeds its items into a new base with the SAME ids and
     // then tombstones the personal copies. Those two bases replicate
-    // independently, so the delete can land AFTER the seed — and identityKey
-    // (listId + itemId, no base) makes it match, emptying the list that was just
-    // shared. Ignore events from a base this list was promoted away from.
-    // Fails open for lists the registry has not described yet.
+    // independently, so the delete can land AFTER the seed. Ignore events from a
+    // base this list was promoted away from. Fails open for lists the registry
+    // has not described yet — which is precisely the window the race lives in,
+    // so it is NOT the whole fix: rows are keyed by baseScopedKey below, making
+    // the personal tombstone and the shared copy different rows outright.
     if (!routing && !isFromAuthoritativeBase(normalized, state.baseByListId)) return
-    const itemId = identityKey(normalized)
+    const itemId = baseScopedKey(normalized)
     if (isPlanItem(normalized)) {
         if (operation === 'delete') delete state.itemsById[itemId]
         else state.itemsById[itemId] = normalized

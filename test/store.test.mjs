@@ -491,3 +491,39 @@ test('delete removes the row and its bucket entry', () => {
     assert.deepEqual(items.map((i) => i.text), ['Bread'])
     assert.equal(items.some((i) => i.id === 'a'), false)
 })
+
+// The same promotion race, but inside the window the GUARD cannot cover.
+//
+// isFromAuthoritativeBase fails open for a list the registry has not described
+// yet — deliberately, because dropping items while the registry is still
+// replicating would turn a slow sync into data loss. That fail-open window is
+// exactly when the seed/tombstone race happens, so the guard alone never closed
+// it. Base-scoped keys do: the personal tombstone and the shared copy are not
+// the same row, so the delete cannot reach across.
+test('a personal tombstone deletes only the personal row, not the shared copy', () => {
+    const store = createDesktopStore()
+    const SHARED = 'a1b2c3'
+    const row = {
+        id: 'x1', text: 'Passports', listId: 'holiday', listType: 'todo',
+        isDone: false, timeOfCompletion: 0,
+    }
+    // No registry event at all: the list is unknown, so the guard accepts
+    // everything and cannot be what saves the row below.
+
+    store.applyClientEvent({ type: 'add-from-backend', item: { ...row, updatedAt: 1 } }, 1)
+    store.applyClientEvent({ type: 'add-from-backend', item: { ...row, baseKey: SHARED, updatedAt: 2 } }, 2)
+    assert.equal(
+        store.getState().items.filter((i) => i.id === 'x1').length, 2,
+        'the personal and shared copies are distinct rows while both bases are believed to hold them',
+    )
+
+    // The personal base's tombstone, untagged, arriving after the seed.
+    store.applyClientEvent({ type: 'delete-from-backend', item: { ...row, updatedAt: 3 } }, 3)
+
+    const survivors = store.getState().items.filter((i) => i.id === 'x1')
+    assert.equal(survivors.length, 1, 'the tombstone must remove exactly one row')
+    assert.equal(
+        survivors[0].baseKey, SHARED,
+        'the row it removed must be the personal one — the shared copy is what the user just shared',
+    )
+})
