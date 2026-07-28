@@ -101,6 +101,7 @@ import {
 } from './registry.mjs'
 import { h, replaceChildren } from './dom.mjs'
 import { createServersSection } from './ui/servers.mjs'
+import { createBackupOps } from './ui/backup.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -783,120 +784,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     }
 
     // --- encrypted backup / restore ---------------------------------------
-    // Unlike `send`, these need the worker's reply (the encrypted file or the
-    // import outcome), so they call client.send directly and parse the JSON.
-    async function backupRequest(command, payload) {
-        const raw = await client.send(command, payload)
-        try { return raw ? JSON.parse(raw) : null } catch { return null }
-    }
-    function backupErrorMessage(reason) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        switch (reason) {
-            case 'bad-password': return t('backup.error.badPassword')
-            case 'invalid-file': return t('backup.error.invalidFile')
-            case 'seed-incomplete': return t('backup.error.seedIncomplete')
-            case 'not-writable': return t('backup.error.notWritable')
-            case 'sync-stalled': return t('backup.error.syncStalled')
-            default: return t('backup.error.generic')
-        }
-    }
-    function backupFilename(kind) {
-        const stamp = new Date().toISOString().slice(0, 10)
-        return kind === 'seed' ? `listam-seed-${stamp}.listamseed` : `listam-backup-${stamp}.listam`
-    }
-    function downloadTextFile(filename, text) {
-        const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }))
-        const anchor = h('a', { href: url, download: filename })
-        document.body.append(anchor)
-        anchor.click()
-        anchor.remove()
-        setTimeout(() => URL.revokeObjectURL(url), 1000)
-    }
-    function pickBackupFile() {
-        return new Promise((resolve) => {
-            const input = h('input', {
-                type: 'file',
-                accept: '.listam,.listamseed,application/json,application/octet-stream',
-                style: 'display:none',
-            })
-            input.addEventListener('change', () => {
-                const file = input.files && input.files[0]
-                if (!file) { input.remove(); resolve(null); return }
-                const reader = new FileReader()
-                reader.onload = () => { input.remove(); resolve(String(reader.result || '')) }
-                reader.onerror = () => { input.remove(); resolve(null) }
-                reader.readAsText(file)
-            }, { once: true })
-            document.body.append(input)
-            input.click()
-        })
-    }
-    async function startBackupImport() {
-        const fileText = await pickBackupFile()
-        if (fileText == null) return
-        let fileKind = null
-        try { fileKind = JSON.parse(fileText)?.kind } catch { /* shown as invalid on submit */ }
-        openDialog({ kind: 'backup', mode: 'import', fileText, fileKind })
-    }
-    async function runBackupExport(mode, password) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        closeDialog()
-        store.pushNotice(t('backup.working'), 'info')
-        const res = await backupRequest(mode === 'export-seed' ? RPC_EXPORT_SEED : RPC_EXPORT_DATA, { password })
-        if (res?.ok && res.file) {
-            downloadTextFile(backupFilename(res.kind), res.file)
-            store.pushNotice(t('backup.exported'), 'success')
-        } else {
-            store.pushNotice(backupErrorMessage(res?.reason), 'error')
-        }
-    }
-    async function runBackupImport(fileText, password) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        closeDialog()
-        store.pushNotice(t('backup.working'), 'info')
-        const res = await backupRequest(RPC_IMPORT, { password, file: fileText })
-        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
-        if (res.kind === 'seed') { store.pushNotice(t('backup.seedRestored'), 'success'); return }
-        if (res.reason === 'not-writable') { store.pushNotice(t('backup.error.notWritable'), 'error'); return }
-        store.pushNotice(t('backup.imported', { count: res.applied?.items ?? 0 }), 'success')
-        if (res.applied?.boardConfigSkipped) store.pushNotice(t('backup.boardConfigSkipped'), 'info')
-    }
-    // --- automatic pre-join backups ---------------------------------------
-    async function loadAutoBackups() {
-        const res = await backupRequest(RPC_LIST_BACKUPS)
-        ui.backups = (res && Array.isArray(res.backups)) ? res.backups : []
-        ui.backupPasswordSet = !!(res && res.passwordSet)
-        // The rolling scheduled-backup tiers (15m / 1d / 1w) ride along on the
-        // same reply; null means the backend didn't report one yet.
-        ui.backupSchedule = (res && res.schedule) ? res.schedule : null
-        renderAll()
-    }
-    async function runSetBackupSchedule(enabled) {
-        const res = await backupRequest(RPC_SET_BACKUP_SCHEDULE, { enabled })
-        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
-        // Reuse the returned schedule when present; otherwise re-fetch so the
-        // tier rows and toggle reflect the persisted on/off choice.
-        if (res.schedule) { ui.backupSchedule = res.schedule; renderAll() }
-        else loadAutoBackups()
-    }
-    async function runSetBackupPassword(current, next) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        closeDialog()
-        const res = await backupRequest(RPC_SET_BACKUP_PASSWORD, { current, next })
-        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
-        store.pushNotice(t('backup.auto.passwordSaved'), 'success')
-        loadAutoBackups()
-    }
-    async function runRestoreAutoBackup(file, password) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        closeDialog()
-        store.pushNotice(t('backup.working'), 'info')
-        const res = await backupRequest(RPC_RESTORE_BACKUP, { file, password })
-        if (!res?.ok) { store.pushNotice(backupErrorMessage(res?.reason), 'error'); return }
-        store.pushNotice(t('backup.auto.restored', { count: res.applied?.items ?? 0 }), 'success')
-        if (res.applied?.boardConfigSkipped) store.pushNotice(t('backup.boardConfigSkipped'), 'info')
-        loadAutoBackups()
-    }
+    // Lives in ./ui/backup.mjs. It takes the shared `ui` rather than owning its
+    // state: the backup dialogs read ui.backups/backupPasswordSet/backupSchedule,
+    // and the join flow writes backupPasswordSet before replacing the base.
+    // renderAll/openDialog/closeDialog are function declarations, so they are
+    // already bound here even though they appear later in this file.
+    const {
+        backupRequest,
+        startBackupImport,
+        runBackupExport,
+        runBackupImport,
+        loadAutoBackups,
+        runSetBackupSchedule,
+        runSetBackupPassword,
+        runRestoreAutoBackup,
+    } = createBackupOps({ client, ui, store, locale, renderAll, openDialog, closeDialog })
+
     const actions = {
         // The add-bar entry point. On a value-return todo surface, ratings are
         // mandatory, so defer to a small rating dialog that collects value+delay
