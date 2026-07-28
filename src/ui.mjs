@@ -38,6 +38,15 @@ import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE } from '
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
 import { isRegistryItem, reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
+    shortKey,
+    ticketInitials,
+    nameInitials,
+    formatAgo,
+    formatUptime,
+    resolvePeerDisplay,
+    presenceStatusVerdict,
+} from '@listam/domain/peer-display'
+import {
     isLabelItem,
     surfaceLabelKey,
     buildSurfaceLabelItem,
@@ -351,24 +360,8 @@ function formatBytes(n) {
     while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
     return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
-function formatAgo(ms) {
-    const secs = Math.max(0, Math.round(Number(ms) / 1000))
-    if (secs < 60) return `${secs}s`
-    const mins = Math.round(secs / 60)
-    if (mins < 60) return `${mins}m`
-    const hrs = Math.round(mins / 60)
-    if (hrs < 24) return `${hrs}h`
-    return `${Math.round(hrs / 24)}d`
-}
-function formatUptime(ms) {
-    const secs = Math.max(0, Math.floor(Number(ms) / 1000))
-    const days = Math.floor(secs / 86400)
-    const hrs = Math.floor((secs % 86400) / 3600)
-    const mins = Math.floor((secs % 3600) / 60)
-    if (days > 0) return `${days}d ${hrs}h`
-    if (hrs > 0) return `${hrs}h ${mins}m`
-    return `${mins}m`
-}
+// formatAgo / formatUptime now come from @listam/domain/peer-display — they were
+// duplicated byte-for-byte in listam-mobile's app/util/relativeTime.
 
 export function mountApp({ root, store, client, locale, ownerControl = null, appUpdates = null, env = {} }) {
     const ui = {
@@ -3186,23 +3179,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         send(RPC_GET_BOARD_CONFIG)
     }
 
-    function ticketInitials(value) {
-        const s = String(value || '').replace(/[^a-z0-9]/gi, '')
-        return (s.slice(0, 2) || '?').toUpperCase()
-    }
-
-    // Initials from a human name: first letters of the first two words, else the
-    // first two alphanumerics. ('cassandrina-node' -> 'CN', 'Alessia' -> 'AL')
-    function nameInitials(name) {
-        const parts = String(name || '').trim().split(/[\s._-]+/).filter(Boolean)
-        if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
-        return ticketInitials(name)
-    }
-    // Short, copy-friendly fingerprint for a 64-char writer key: first8…last4.
-    function shortKey(key) {
-        const s = String(key || '')
-        return s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s
-    }
+    // ticketInitials / nameInitials / shortKey are imported from
+    // @listam/domain/peer-display; `shortKey` was duplicated in listam-mobile's
+    // MembersDialog.
+    //
     // Memoize the synced peer-label Map per render pass: store.getState().items is
     // a stable reference until the next state update, so we only re-reduce when it
     // actually changes (the board renders many cards, each resolving names).
@@ -3257,11 +3237,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return parts.join(' · ')
     }
     // Right-aligned live status: "Online now" (acid) or "Seen 2d ago" (muted).
+    // The verdict is decided in @listam/domain/peer-display so both apps agree on
+    // it; this only maps the kind to a catalog string and a class.
     function presenceStatus(key) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const p = peerPresence(key)
-        if (p.online) return h('span', { class: 'presence-status online' }, t('presence.onlineNow'))
-        if (p.lastActiveAt) return h('span', { class: 'presence-status' }, t('presence.lastSeen', { ago: formatAgo(now() - p.lastActiveAt) }))
+        const verdict = presenceStatusVerdict(peerPresence(key), now())
+        if (verdict.kind === 'online') return h('span', { class: 'presence-status online' }, t('presence.onlineNow'))
+        if (verdict.kind === 'lastSeen') return h('span', { class: 'presence-status' }, t('presence.lastSeen', { ago: verdict.ago }))
         return h('span', { class: 'presence-status' }, '')
     }
     // Resolve a writer/device key to a human display. Synced device name when
@@ -3271,16 +3253,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // same label channel the Members pane already trusts.
     function peerDisplay(key) {
         const k = String(key || '')
-        const name = peerLabelMap().get(k) || ''
-        const writers = store.getState().roster?.writers ?? []
-        const w = writers.find((x) => x.writerKey === k)
-        const isSelf = !!(w && w.isSelf)
-        const isOwner = !!(w && w.isOwner)
-        const selfLabel = locale.i18n.t('members.role.self')
-        const display = name || (isSelf ? selfLabel : shortKey(k))
-        const initials = name ? nameInitials(name) : ticketInitials(k)
-        const title = name ? `${name} · ${shortKey(k)}` : (isSelf ? `${selfLabel} · ${shortKey(k)}` : k)
-        return { key: k, name, display, initials, isSelf, isOwner, short: shortKey(k), title }
+        const w = (store.getState().roster?.writers ?? []).find((x) => x.writerKey === k)
+        // Everything past this point is pure shaping, and lives in
+        // @listam/domain/peer-display so mobile resolves a peer identically.
+        return resolvePeerDisplay({
+            key: k,
+            name: peerLabelMap().get(k) || '',
+            isSelf: !!(w && w.isSelf),
+            isOwner: !!(w && w.isOwner),
+            selfLabel: locale.i18n.t('members.role.self'),
+        })
     }
     // A compact, copyable fingerprint of a writer key (first8…last4, mono). Click
     // copies the FULL key. Reuses the existing copyText helper + peers copy strings.
