@@ -80,6 +80,7 @@ const isBare = (spec) => !spec.startsWith('.') && !spec.startsWith('/')
 // importmap does not cover, each with the file that asked for it.
 function walkRendererGraph(imports) {
     const unmapped = new Map()
+    const unresolved = new Map()
     const visited = new Set()
     const queue = [resolve(repoRoot, parseEntryScript())]
 
@@ -93,7 +94,20 @@ function walkRendererGraph(imports) {
 
         for (const spec of specifiersIn(filePath)) {
             if (!isBare(spec)) {
-                queue.push(resolve(dirname(filePath), spec))
+                // A relative specifier needs no importmap entry, but it still has
+                // to EXIST: the renderer fetches it over HTTP, and a 404 refuses
+                // the whole module graph exactly like an unmapped bare specifier
+                // does. Recorded rather than skipped — the loop head below drops
+                // missing files silently, which would make a typo'd path invisible
+                // to this gate. That matters most while modules are being split
+                // out of ui.mjs, since every extraction adds relative imports.
+                const target = resolve(dirname(filePath), spec)
+                if (!existsSync(target)) {
+                    if (!unresolved.has(spec)) unresolved.set(spec, [])
+                    unresolved.get(spec).push(relPath)
+                    continue
+                }
+                queue.push(target)
                 continue
             }
             const mapped = imports[spec]
@@ -108,7 +122,7 @@ function walkRendererGraph(imports) {
             queue.push(resolve(repoRoot, mapped))
         }
     }
-    return { unmapped, visited }
+    return { unmapped, unresolved, visited }
 }
 
 test('every bare specifier the renderer can reach has an importmap entry', () => {
@@ -124,6 +138,24 @@ test('every bare specifier the renderer can reach has an importmap entry', () =>
         unmapped.size,
         0,
         `these bare specifiers would fail to resolve in the renderer; add them to the importmap in index.html:\n${report}`,
+    )
+})
+
+test('every relative import the renderer follows resolves on disk', () => {
+    // The other half of "the renderer has no resolver". The bare-specifier test
+    // above covers imports that go THROUGH the importmap; this covers the ones
+    // that do not. Both failure modes are identical from outside: #app stays
+    // empty and the app does not boot.
+    const imports = parseImportMap()
+    const { unresolved } = walkRendererGraph(imports)
+
+    const report = [...unresolved.entries()]
+        .map(([spec, importers]) => `  ${spec}  <- ${importers.join(', ')}`)
+        .join('\n')
+    assert.equal(
+        unresolved.size,
+        0,
+        `these relative imports do not exist on disk; the renderer would 404 and refuse the whole graph:\n${report}`,
     )
 })
 
