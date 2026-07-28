@@ -95,13 +95,23 @@ class Driver {
         return Promise.race([response, exitRejection])
     }
 
-    async waitFor(predicate, { timeoutMs = JOIN_TIMEOUT_MS, intervalMs = 1000 } = {}) {
+    // `peer` is the OTHER side of the exchange, included in the failure message.
+    // A join failure is never fully explained by the waiting side: "timed out
+    // waiting for write access" says the guest never became writable, but only
+    // the host's log says whether it ever accepted the candidate and appended
+    // the membership record. Diagnosing the CI-only failures from the guest's
+    // stderr alone was guesswork.
+    async waitFor(predicate, { timeoutMs = JOIN_TIMEOUT_MS, intervalMs = 1000, peer = null } = {}) {
         const deadline = Date.now() + timeoutMs
         for (;;) {
             const dump = await this.request('dump')
             if (predicate(dump)) return dump
             if (Date.now() > deadline) {
-                throw new Error(`waitFor timed out; last dump: ${JSON.stringify(dump)}\nstderr tail: ${this.stderr.slice(-2000)}`)
+                const peerTail = peer ? `\n--- peer stderr tail ---\n${peer.stderr.slice(-4000)}` : ''
+                throw new Error(
+                    `waitFor timed out; last dump: ${JSON.stringify(dump)}`
+                    + `\n--- own stderr tail ---\n${this.stderr.slice(-4000)}${peerTail}`,
+                )
             }
             await new Promise((resolve) => setTimeout(resolve, intervalMs))
         }
@@ -148,7 +158,7 @@ test('desktop contract: two instances pair via invite on a private testnet and c
     // Guest joins through the invite and must become a writable member that
     // sees the host's items.
     await guest.request('join', { invite })
-    const joined = await guest.waitFor((dump) => dump.joined)
+    const joined = await guest.waitFor((dump) => dump.joined, { peer: host })
     assert.ok(joined.joined, 'guest reported join-success')
 
     const guestSynced = await guest.waitFor((dump) => contentItems(dump.items).length >= 2)
@@ -331,7 +341,7 @@ test('desktop contract: a paired device auto-joins your shared list (no invite)'
     const invite = (await a.request('invite')).inviteKey
     assert.ok(invite.length > 0)
     await b.request('join', { invite })
-    await b.waitFor((d) => d.joined, { timeoutMs: JOIN_TIMEOUT_MS })
+    await b.waitFor((d) => d.joined, { timeoutMs: JOIN_TIMEOUT_MS, peer: a })
 
     // With no invite for the SHARED list, B auto-opens it from the propagated
     // creds and replicates its items (tagged with the shared base key).
