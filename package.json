@@ -1,6 +1,6 @@
 {
   "name": "listam-desktop",
-  "version": "0.19.8",
+  "version": "0.19.9",
   "private": true,
   "type": "module",
   "main": "index.html",
