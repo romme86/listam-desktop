@@ -1,160 +1,149 @@
-// Desktop owner-control client (H1): pairs this desktop with the user's
-// headless instances and sends signed, capability-scoped commands over an
-// encrypted hyperdht connection. Pear-only (bare module graph) — the browser
-// preview shows the pane in its unavailable state instead.
+// Desktop owner-control bridge.
 //
-// The device key seed and the paired-server list live in the shared file
-// secret store under the app's private storage directory.
-import fs from 'bare-fs'
-import { join } from 'bare-path'
-import DHT from 'hyperdht'
-import b4a from 'b4a'
-import { randomBytes } from 'hypercore-crypto'
-import { createFileSecretStore } from '@listam/secrets'
-import {
-    createDeviceKeyPair,
-    createOwnerControlSession,
-    parsePairingCode,
-} from '@listam/owner-control'
+// This used to be a client in its own right: it imported hyperdht, bare-fs and
+// bare-path and dialled paired headless instances straight from the renderer.
+// That cannot work — Pear's DOM loader rejects bare-* exactly as it does for the
+// backend, which is why the backend runs in a worker at all. main.mjs imported
+// it under a `.catch(() => null)`, so the failure was silent and the Servers
+// pane simply rendered its "unavailable" note forever. Verified in the live Pear
+// app on 2026-07-28, not just the browser preview.
+//
+// The engine already existed on the other side of the pipe: @listam/backend runs
+// the shared owner-control client inside the worker (the same one mobile drives),
+// reachable over RPC_CONTROL_LIST / _PAIR / _COMMAND. So this file is now a thin
+// renderer-side adapter that keeps the exact shape ui.mjs consumes —
+// listServers() / pair() / request() — and holds no transport of its own.
+//
+// The paired-server list is non-secret metadata the worker keeps in memory; the
+// device seed stays behind the backend's secure-storage boundary and is never
+// seen here. We persist the list locally and hydrate the worker on boot, the
+// same division of labour mobile uses.
+import { RPC_CONTROL_LIST, RPC_CONTROL_PAIR, RPC_CONTROL_COMMAND } from '@listam/protocol'
 
-const DEVICE_SEED_KEY = 'listam.control.v1.deviceSeed'
-const PAIRED_SERVERS_KEY = 'listam.control.v1.pairedServers'
+const SERVERS_KEY = 'listam.desktop.controlServers'
 const REQUEST_TIMEOUT_MS = 30_000
-// The dial gets its own (shorter) budget so a slow open + a slow request can't
-// stack into a ~60s cold-path wait on REQUEST_TIMEOUT_MS twice.
-const OPEN_TIMEOUT_MS = 15_000
 
-export async function createOwnerControlManager({ Pear }) {
-    const storageDir = Pear?.config?.storage
-    if (!storageDir) throw new Error('Pear storage directory unavailable')
-
-    const store = createFileSecretStore({ fs, path: join(storageDir, 'owner-control-keys.json') })
-    let seedHex = await store.getItem(DEVICE_SEED_KEY)
-    if (!seedHex) {
-        seedHex = randomBytes(32).toString('hex')
-        await store.setItem(DEVICE_SEED_KEY, seedHex)
-    }
-    const deviceKeyPair = createDeviceKeyPair(seedHex)
-
-    let servers = []
+function loadServers(storage) {
     try {
-        servers = JSON.parse(await store.getItem(PAIRED_SERVERS_KEY) ?? '[]')
-        if (!Array.isArray(servers)) servers = []
+        const parsed = JSON.parse(storage?.getItem?.(SERVERS_KEY) ?? '[]')
+        if (!Array.isArray(parsed)) return []
+        return parsed.filter((entry) => /^[0-9a-f]{64}$/.test(entry?.serverPublicKeyHex ?? ''))
     } catch {
-        servers = []
-    }
-
-    const dht = new DHT()
-
-    // ONE persistent encrypted connection per server, reused for every command.
-    // hyperdht will not let us reconnect to a server key once a connection to it
-    // has been torn down (a fresh dht.connect to the same key closes before it
-    // opens — verified on a private testnet AND against a live mainnet peer), so
-    // the previous connect-and-destroy-per-request pattern made the very first
-    // command after pairing fail. Keep the socket open across requests instead;
-    // the Servers pane's 20s poll holds it warm. Map values are the in-flight
-    // open promise so concurrent first calls (auto-fetch + poll) share one dial.
-    const connections = new Map() // serverPublicKeyHex -> Promise<{ socket, session }>
-
-    function openConnection(serverPublicKeyHex) {
-        const socket = dht.connect(b4a.from(serverPublicKeyHex, 'hex'))
-        socket.on('error', () => {})
-        const slot = new Promise((resolve, reject) => {
-            const timer = setTimeout(() => { socket.destroy(); reject(new Error('control connection timed out')) }, OPEN_TIMEOUT_MS)
-            socket.once('open', () => {
-                clearTimeout(timer)
-                const session = createOwnerControlSession({
-                    keyPair: deviceKeyPair,
-                    write: (line) => socket.write(line + '\n'),
-                })
-                let buffered = ''
-                socket.on('data', (chunk) => {
-                    buffered += b4a.toString(chunk)
-                    let newline = buffered.indexOf('\n')
-                    while (newline >= 0) {
-                        session.handleLine(buffered.slice(0, newline))
-                        buffered = buffered.slice(newline + 1)
-                        newline = buffered.indexOf('\n')
-                    }
-                })
-                resolve({ socket, session })
-            })
-            socket.once('close', () => { clearTimeout(timer); reject(new Error('control connection closed')) })
-        })
-        // Drop the cached slot the moment the socket dies (or the dial fails) so
-        // the next call dials afresh rather than reusing a dead session.
-        socket.once('close', () => { if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex) })
-        slot.catch(() => { if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex) })
-        connections.set(serverPublicKeyHex, slot)
-        return slot
-    }
-
-    function getConnection(serverPublicKeyHex) {
-        return connections.get(serverPublicKeyHex) ?? openConnection(serverPublicKeyHex)
-    }
-
-    async function runOnServer(serverPublicKeyHex, run) {
-        const slot = getConnection(serverPublicKeyHex)
-        let entry = await slot
-        if (entry.socket.destroyed) {
-            // Only evict the exact slot we observed dead: a concurrent caller may
-            // already have installed a fresh connection between our await and now
-            // (same `=== slot` guard the close handler and slot.catch use).
-            if (connections.get(serverPublicKeyHex) === slot) connections.delete(serverPublicKeyHex)
-            entry = await getConnection(serverPublicKeyHex)
-        }
-        // A request that times out leaves its entry in the reused session's
-        // pending map until the socket closes (the session has no cancel API).
-        // We deliberately don't destroy the socket on timeout — a fresh dial to
-        // the same key would fail (hyperdht won't reconnect), so we'd rather keep
-        // the warm connection and accept a tiny, close-bounded pending residue.
-        return withTimeout(run(entry.session), REQUEST_TIMEOUT_MS)
-    }
-
-    return {
-        deviceId: createOwnerControlSession({ keyPair: deviceKeyPair, write: () => {} }).deviceId,
-        listServers() {
-            return [...servers]
-        },
-        async pair(code, name) {
-            const parsed = parsePairingCode(code)
-            if (!parsed) return { ok: false, reason: 'invalid-code' }
-            const result = await runOnServer(parsed.serverPublicKeyHex, (session) => session.pair(parsed.secretHex, name))
-            if (result?.ok) {
-                servers = [
-                    ...servers.filter((entry) => entry.serverPublicKeyHex !== parsed.serverPublicKeyHex),
-                    {
-                        serverPublicKeyHex: parsed.serverPublicKeyHex,
-                        name: typeof name === 'string' && name.trim() ? name.trim() : 'Headless device',
-                        capabilities: result.capabilities ?? [],
-                        pairedAt: Date.now(),
-                    },
-                ]
-                await store.setItem(PAIRED_SERVERS_KEY, JSON.stringify(servers))
-            }
-            return result
-        },
-        request(serverPublicKeyHex, command, payload) {
-            return runOnServer(serverPublicKeyHex, (session) => session.request(command, payload))
-        },
-        async close() {
-            for (const slot of connections.values()) {
-                slot.then(({ socket }) => socket.destroy(), () => {})
-            }
-            connections.clear()
-            try {
-                await dht.destroy()
-            } catch {}
-        },
+        return []
     }
 }
 
-function withTimeout(promise, ms) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('owner-control request timed out')), ms)
-        Promise.resolve(promise).then(
-            (value) => { clearTimeout(timer); resolve(value) },
-            (error) => { clearTimeout(timer); reject(error) },
-        )
+function persistServers(storage, servers) {
+    try {
+        storage?.setItem?.(SERVERS_KEY, JSON.stringify(servers))
+    } catch { /* a full or unavailable store must not break the pane */ }
+}
+
+export function createOwnerControlBridge({ client, storage, timeoutMs = REQUEST_TIMEOUT_MS }) {
+    if (!client) return null
+
+    let servers = loadServers(storage)
+    let deviceId = null
+
+    // The worker answers over the one-way message channel, not as a reply to the
+    // request frame, so replies are correlated by what they carry: pair results
+    // by 'pair', command results by command+server. Waiters are a FIFO queue per
+    // key — ui.mjs's busy flags keep duplicates rare, but two identical in-flight
+    // requests must still each get an answer rather than one stealing the other's.
+    const waiters = new Map()
+
+    function waitFor(key) {
+        return new Promise((resolve, reject) => {
+            const entry = { resolve, reject }
+            entry.timer = setTimeout(() => {
+                dropWaiter(key, entry)
+                reject(new Error('owner-control request timed out'))
+            }, timeoutMs)
+            if (!waiters.has(key)) waiters.set(key, [])
+            waiters.get(key).push(entry)
+        })
+    }
+
+    function dropWaiter(key, entry) {
+        const queue = waiters.get(key)
+        if (!queue) return
+        const index = queue.indexOf(entry)
+        if (index >= 0) queue.splice(index, 1)
+        if (queue.length === 0) waiters.delete(key)
+    }
+
+    function settle(key, value) {
+        const queue = waiters.get(key)
+        if (!queue || queue.length === 0) return
+        const entry = queue.shift()
+        if (queue.length === 0) waiters.delete(key)
+        clearTimeout(entry.timer)
+        entry.resolve(value)
+    }
+
+    function adoptServers(next) {
+        if (!Array.isArray(next)) return
+        servers = next.filter((entry) => /^[0-9a-f]{64}$/.test(entry?.serverPublicKeyHex ?? ''))
+        persistServers(storage, servers)
+    }
+
+    const unsubscribe = client.onEvent((event) => {
+        if (event?.type !== 'message') return
+        const payload = event.payload
+        switch (payload?.type) {
+            case 'owner-control-servers':
+                adoptServers(payload.servers)
+                if (payload.deviceId) deviceId = payload.deviceId
+                settle('list', servers)
+                break
+            case 'owner-control-paired':
+                adoptServers(payload.servers)
+                settle('pair', { ok: payload.ok === true, reason: payload.reason, servers })
+                break
+            case 'owner-control-result':
+                settle(`cmd:${payload.command}:${payload.serverPublicKeyHex}`, payload.result)
+                break
+            default:
+                break
+        }
     })
+
+    // Hand the worker the list this device already knows about. Without it a
+    // restart would show no paired servers until the user paired again — the
+    // worker's copy is in-memory only, by design.
+    const hydrated = client
+        .send(RPC_CONTROL_LIST, { servers })
+        .catch(() => null)
+
+    return {
+        get deviceId() { return deviceId },
+        hydrated,
+        listServers() {
+            return servers.map((entry) => ({ ...entry }))
+        },
+        async pair(code, name) {
+            const reply = waitFor('pair')
+            try {
+                await client.send(RPC_CONTROL_PAIR, { code, name })
+            } catch (error) {
+                return { ok: false, reason: error?.message ?? 'send-failed' }
+            }
+            return reply
+        },
+        async request(serverPublicKeyHex, command, payload) {
+            const reply = waitFor(`cmd:${command}:${serverPublicKeyHex}`)
+            await client.send(RPC_CONTROL_COMMAND, { serverPublicKeyHex, command, payload })
+            return reply
+        },
+        close() {
+            unsubscribe?.()
+            for (const queue of waiters.values()) {
+                for (const entry of queue) {
+                    clearTimeout(entry.timer)
+                    entry.reject(new Error('owner-control bridge closed'))
+                }
+            }
+            waiters.clear()
+        },
+    }
 }

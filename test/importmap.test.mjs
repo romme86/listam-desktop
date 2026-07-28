@@ -22,16 +22,14 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const indexHtml = readFileSync(join(repoRoot, 'index.html'), 'utf8')
 
 // Modules the renderer loads dynamically and is written to survive WITHOUT.
-// Their bare specifiers are deliberately unmapped, so exempt them — but only
-// these, and only while that stays true.
+// Their bare specifiers would be deliberately unmapped, so they get exempted —
+// but only while that is actually true of them.
 //
-// src/owner-control.mjs pulls hyperdht + bare-fs (the bare module graph), which
-// cannot load in a DOM context at all; main.mjs imports it under a `.catch(() =>
-// null)` and the Servers pane renders an unavailable note. VERIFIED 2026-07-28
-// against the live Pear app, not just the browser preview: the pane shows the
-// `!ownerControl` branch, i.e. the import really does fail in production.
-// Release 5 moves this client into a worker; DELETE this exemption then.
-const OPTIONAL_MODULES = new Set(['src/owner-control.mjs'])
+// Empty since Release 5: src/owner-control.mjs was the only entry, and it now
+// drives the worker's owner-control client over RPC instead of importing
+// hyperdht and bare-fs into the DOM context. Keep it empty if you can — an entry
+// here is a renderer module the boot check cannot vouch for.
+const OPTIONAL_MODULES = new Set([])
 
 function parseImportMap() {
     const match = indexHtml.match(/<script type="importmap">\s*(\{[\s\S]*?\})\s*<\/script>/)

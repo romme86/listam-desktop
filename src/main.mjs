@@ -9,6 +9,7 @@ import { loadUiPreferences, persistUiPreferences, createThemeController } from '
 import { mountApp } from './ui.mjs'
 import { createMockBackend } from './mock-backend.mjs'
 import { installSyncRecovery } from './sync-recovery.mjs'
+import { createOwnerControlBridge } from './owner-control.mjs'
 
 const root = document.getElementById('app')
 const storage = globalThis.localStorage
@@ -68,12 +69,15 @@ async function boot() {
         if (backend.secretsMode !== 'secure-store') {
             store.pushNotice(locale.i18n.t('backend.secureStorage.legacy'), 'info')
         }
-        // Owner-control needs hyperdht (bare graph) — like the backend it
-        // cannot load in the renderer. Until it gets its own worker bridge,
-        // failure here must not take the backend down with it.
-        const ownerControl = await import('./owner-control.mjs')
-            .then(({ createOwnerControlManager }) => createOwnerControlManager({ Pear: globalThis.Pear }))
-            .catch(() => null)
+        // Owner-control runs in the backend worker, where hyperdht already
+        // lives; this is only the renderer-side adapter over its RPC surface,
+        // so it imports nothing bare and cannot fail the way the old in-renderer
+        // client silently did. Still tolerant of a failure here — a dead Servers
+        // pane must not take the backend down with it.
+        const ownerControl = createOwnerControlBridge({
+            client: backend.client,
+            storage: globalThis.localStorage,
+        })
         const appUpdates = typeof globalThis.Pear.updates === 'function' && typeof globalThis.Pear.restart === 'function'
             ? {
                 subscribe(listener) {
