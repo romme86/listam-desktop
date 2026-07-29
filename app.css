@@ -52,6 +52,16 @@
     --gutter-base: 2rem;
     --section-gap: 4rem;
     --element-gap: 1rem;
+    /* Readable measure for the content column. The column is CENTRED in the
+       canvas left of the sidebar (see .shell/.main) and this cap widens in two
+       steps on large windows, so a stretched window gains room instead of
+       growing a dead right margin. Panes that are structurally wide (board,
+       planner, card grids) get the extra width for free. */
+    --content-max: 64rem;
+    /* Frameless Pear chrome: the drag strip the traffic lights sit in. Both the
+       sidebar and the content column must clear it even when --section-gap
+       tightens on small windows. */
+    --titlebar-h: 44px;
 
     --t-fast: 120ms;
     --t-base: 200ms;
@@ -185,8 +195,14 @@ button {
     -webkit-app-region: no-drag;
 }
 
-/* Shell: fixed sidebar + content canvas */
-.shell { display: flex; min-height: 100vh; }
+/* Shell: fixed sidebar + content canvas.
+   The sidebar is position:fixed, so .main is the shell's ONLY in-flow child —
+   justify-content:center therefore centres the content column (its 240px left
+   margin included in the margin box, which lands the column dead-centre of the
+   canvas right of the rail). When the window is too narrow for the cap there is
+   no free space to distribute and the column simply fills, so this never
+   pushes content under the sidebar. */
+.shell { display: flex; min-height: 100vh; justify-content: center; }
 
 .sidebar {
     position: fixed;
@@ -195,8 +211,11 @@ button {
     background: var(--surface-1);
     display: flex;
     flex-direction: column;
-    padding: var(--section-gap) 0;
+    padding: max(var(--section-gap), calc(var(--titlebar-h) + 0.75rem)) 0 var(--section-gap);
     z-index: 20;
+    /* Short windows: the rail scrolls rather than clipping its bottom nav. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
     transition: background-color var(--t-base) var(--ease);
 }
 
@@ -366,9 +385,12 @@ button {
 .main {
     margin-left: var(--sidebar-width);
     flex: 1;
+    /* Without this a flex item refuses to shrink below its content's intrinsic
+       width — the reason narrow windows used to overflow instead of reflow. */
+    min-width: 0;
     min-height: 100vh;
-    padding: var(--section-gap) var(--gutter-base);
-    max-width: 64rem;
+    padding: max(var(--section-gap), calc(var(--titlebar-h) + 0.75rem)) var(--gutter-base) var(--section-gap);
+    max-width: calc(var(--content-max) + 2 * var(--gutter-base));
 }
 .shell.has-hints .main { padding-bottom: calc(var(--section-gap) + 2.5rem); }
 
@@ -382,10 +404,13 @@ button {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 1rem;
     margin-bottom: 3rem;
 }
-.page-title { color: var(--ink); margin: 0; }
-.header-actions { display: flex; align-items: center; gap: 1rem; }
+.page-header > *:first-child { min-width: 0; }
+.page-title { color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+.header-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
 
 .btn {
     display: inline-flex;
@@ -440,7 +465,8 @@ button {
 .summary-bar {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
     margin-bottom: 2rem;
     color: var(--ink-mute);
 }
@@ -592,7 +618,9 @@ button {
 /* Grid view: denser desktop layout */
 .grid-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    /* min(…, 100%) keeps the track from exceeding the column on very narrow
+       windows, where a bare 180px floor would force a horizontal overflow. */
+    grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
     gap: var(--element-gap);
 }
 @media (min-width: 1600px) { .grid-cards { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); } }
@@ -629,22 +657,36 @@ button {
 .kv-rows { display: flex; flex-direction: column; gap: var(--element-gap); }
 .kv-row {
     display: grid;
-    grid-template-columns: 200px 1fr;
+    /* The key track gives ground before the value does, then the pair stacks. */
+    grid-template-columns: minmax(0, 200px) minmax(0, 1fr);
+    gap: 0 1rem;
     align-items: center;
     padding: 0.75rem 1rem;
     background: var(--card);
     border-radius: var(--r-row);
 }
+@media (max-width: 640px) {
+    .kv-row { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
+}
 .kv-row .k { color: var(--ink-mute); }
 .kv-row .v { overflow-wrap: anywhere; }
 .member-row {
     display: grid;
-    grid-template-columns: auto 1fr auto auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     gap: 1rem;
     align-items: center;
     padding: 0.75rem 1rem;
     background: var(--card);
     border-radius: var(--r-row);
+}
+/* Narrow: the trailing chips (role, self-id, actions) drop under the identity
+   instead of squeezing the name to a couple of characters. */
+@media (max-width: 720px) {
+    .member-row, .device-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+    /* 60% basis, not 100%: the identity still shares its line with the leading
+       presence dot, and only the trailing chips wrap to a second line. */
+    .member-row .who, .device-main { flex: 1 1 60%; }
+    .self-id { margin-left: 0; }
 }
 .member-row .who { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
 .member-row .who-name { font-family: var(--font-sans); font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
@@ -668,7 +710,7 @@ button {
 }
 .role-chip.owner { background: var(--signal); color: var(--on-signal); }
 .device-rows { display: flex; flex-direction: column; gap: 0.5rem; }
-.device-row { display: grid; grid-template-columns: auto auto 1fr auto auto; gap: 0.75rem; align-items: center; padding: 0.5rem 0.25rem; }
+.device-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; gap: 0.75rem; align-items: center; padding: 0.5rem 0.25rem; }
 .device-main { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
 .device-name { font-family: var(--font-sans); font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
 
@@ -687,7 +729,7 @@ button {
 .event-log { display: flex; flex-direction: column; gap: 0.25rem; }
 .event-line {
     display: grid;
-    grid-template-columns: 90px 1fr;
+    grid-template-columns: 90px minmax(0, 1fr);
     gap: 1rem;
     padding: 0.375rem 1rem;
     font-family: var(--font-mono);
@@ -848,8 +890,10 @@ kbd {
     position: fixed;
     bottom: 1.5rem;
     left: calc(var(--sidebar-width) + var(--gutter-base));
+    max-width: calc(100vw - var(--sidebar-width) - 2 * var(--gutter-base));
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
     gap: 0.5rem;
     z-index: 60;
 }
@@ -900,8 +944,11 @@ kbd {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 1.5rem;
-    padding: 0.5rem var(--gutter-base);
+    /* Each hint is nowrap, so without wrapping the strip simply overflowed the
+       window; it now stacks into extra rows and clears its own close button. */
+    flex-wrap: wrap;
+    gap: 0.35rem 1.5rem;
+    padding: 0.5rem 2.5rem;
     background: var(--surface-1);
     color: var(--ink-mute);
     font-family: var(--font-mono);
@@ -918,6 +965,7 @@ kbd {
 .key-hints kbd { background: var(--surface-2); color: var(--ink-mute); }
 .key-hints .hints-close {
     position: absolute;
+    top: 0.5rem;
     right: 0.75rem;
     padding: 0.125rem 0.5rem;
     color: var(--ink-faint);
@@ -935,12 +983,41 @@ kbd {
     50% { opacity: 0.45; }
 }
 
+/* ===== Window-size ladder ==============================================
+   The shell keeps ONE structure at every size — a fixed rail plus a centred
+   content column — and scales the tokens that drive it. The rail never becomes
+   a horizontal strip (it used to below 900px, which reflowed the nav into a
+   full-width row and pushed the content column off-screen entirely).
+
+   Going up, the measure widens in two steps so a stretched window earns room.
+   Going down, the rail and the vertical rhythm tighten, and the panes that are
+   grids reorganise into fewer columns (see the per-pane rules below). */
+@media (min-width: 1500px) { :root { --content-max: 74rem; } }
+@media (min-width: 1800px) { :root { --content-max: 84rem; } }
+
+@media (max-width: 1180px) {
+    :root { --sidebar-width: 208px; --gutter-base: 1.5rem; --section-gap: 3rem; }
+}
 @media (max-width: 900px) {
-    :root { --section-gap: 2rem; }
-    .sidebar { position: static; width: 100%; flex-direction: row; padding: 0; }
-    .main { margin-left: 0; }
-    .key-hints { left: 0; }
-    .notices { left: var(--gutter-base); }
+    :root { --sidebar-width: 176px; --gutter-base: 1.15rem; --section-gap: 2.25rem; --element-gap: 0.65rem; }
+    /* Title and its action cluster stack instead of colliding. */
+    .page-header { flex-direction: column; align-items: stretch; gap: 0.85rem; margin-bottom: 2rem; }
+    .header-actions { flex-wrap: wrap; gap: 0.5rem; }
+    .add-bar { gap: 0.65rem; margin-bottom: 2rem; }
+    .add-hint { display: none; }
+    .category-heading { margin-bottom: 1rem; }
+    .item-row, .kv-row, .member-row { padding: 0.6rem 0.75rem; }
+    /* The hint strip wraps to two or three rows here — reserve room for it so
+       the last content row is not parked underneath. */
+    .key-hints { gap: 0.3rem 0.9rem; }
+    .shell.has-hints .main { padding-bottom: calc(var(--section-gap) + 6.5rem); }
+    .shell.has-hints ~ .notices { bottom: 7rem; }
+    .pane-note, .pane-section-head, .category-heading,
+    .main[data-view="peers"] .page-header, .main[data-view="peers"] .summary-bar { padding-inline: 0.75rem; }
+}
+@media (max-width: 720px) {
+    :root { --sidebar-width: 150px; --gutter-base: 0.9rem; }
+    .nav-item { padding-block: 0.6rem; }
 }
 
 /* Motion is feedback, not requirement */
@@ -973,6 +1050,12 @@ kbd {
     transition: box-shadow var(--t-fast) var(--ease);
 }
 .board-column.drag-over { box-shadow: inset 0 0 0 2px var(--signal); }
+/* The board keeps scrolling horizontally (that IS its design) — narrower
+   columns just keep two of them on screen instead of one and a half. */
+@media (max-width: 900px) {
+    .board-grid { gap: 0.65rem; }
+    .board-column { flex: 1 1 200px; min-width: 190px; }
+}
 .board-col-head {
     display: flex;
     align-items: center;
@@ -1251,7 +1334,10 @@ html.board-drawer-open { overflow: hidden; }
 .detail-split-scroll.two-col > .ticket-body { grid-area: body; }
 .detail-split-scroll.two-col > .prop-rail { grid-area: rail; position: sticky; top: 0; }
 @media (max-width: 920px) {
-    .detail-split-scroll.two-col { display: flex; flex-direction: column; }
+    /* align-items:start comes from the grid rule above; in a COLUMN flexbox it
+       is the cross (horizontal) axis, so without this reset the stacked
+       summary/body/rail shrink-wrap their text and leave the drawer half empty. */
+    .detail-split-scroll.two-col { display: flex; flex-direction: column; align-items: stretch; }
     .detail-split-scroll.two-col > .prop-rail { position: static; }
 }
 .detail-drawer .prop-rail.compact .prop-row { grid-template-columns: 96px 1fr; }
@@ -1468,8 +1554,11 @@ html.board-drawer-open { overflow: hidden; }
 
 @media (max-width: 920px) {
     .detail-drawer { width: 100vw; }
-    .ticket-doc { grid-template-columns: 1fr; grid-template-areas: "summary" "rail" "body"; }
+    .ticket-doc { grid-template-columns: minmax(0, 1fr); grid-template-areas: "summary" "rail" "body"; }
     .ticket-doc-rail { position: static; }
+    /* The drawer is the whole viewport here, so its own resize grip is inert
+       and only steals the leftmost 7px of every click. */
+    .detail-drawer .drawer-resizer { display: none; }
 }
 
 /* ---- Overview (the cross-list day plan) -------------------------------- */
@@ -1531,10 +1620,19 @@ html.board-drawer-open { overflow: hidden; }
 .list-identity-row dt { color: var(--ink-faint); }
 .list-identity-row dd { margin: 0; color: var(--ink-mute); overflow-wrap: anywhere; user-select: text; }
 
-/* The 7-day strip: Today + Tomorrow + the next five days. */
-.plan-strip { display: flex; gap: 0.4rem; margin: 0 0 var(--section-gap); }
+/* The 7-day strip: Today + Tomorrow + the next five days.
+   The pills share the row equally while there is room and WRAP onto a second
+   row when there isn't — the day cells stay legible at every width instead of
+   being crushed under their own "TOMORROW" label. 5rem is the basis, so all
+   seven fit one row down to ~36rem of content. */
+.plan-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(5rem, 100%), 1fr));
+    gap: 0.4rem;
+    margin: 0 0 var(--section-gap);
+}
 .plan-pill {
-    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1547,7 +1645,10 @@ html.board-drawer-open { overflow: hidden; }
     transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 .plan-pill:hover { background: var(--surface-3); }
-.plan-pill .pill-dow { color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.08em; }
+.plan-pill .pill-dow {
+    color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.08em;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .plan-pill .pill-day { font-size: 1.05rem; font-weight: 600; color: var(--ink); }
 .plan-pill .pill-count { color: var(--ink-faint); }
 .plan-pill .pill-count.zero { opacity: 0.6; }
@@ -1559,7 +1660,7 @@ html.board-drawer-open { overflow: hidden; }
 /* Week paging above the day strip (reach past days / future weeks). */
 .plan-strip-wrap { margin: 0 0 var(--section-gap); }
 .plan-strip-wrap .plan-strip { margin: 0; }
-.plan-strip-nav { display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.5rem; }
+.plan-strip-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.5rem; }
 .plan-week-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.7rem; height: 1.7rem; padding: 0;
@@ -1600,7 +1701,12 @@ html.board-drawer-open { overflow: hidden; }
     background: var(--surface-2);
     padding: 0.1rem 0.5rem;
     border-radius: var(--r-pill);
-    flex: none;
+    /* Shrinkable, but never past a readable stub — the row text yields first. */
+    flex: 0 1 auto;
+    min-width: 2.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .plan-row .plan-remove, .plan-row .plan-open {
     opacity: 0; background: none; border: none; cursor: pointer; color: var(--ink-faint);
@@ -1672,7 +1778,9 @@ html.board-drawer-open { overflow: hidden; }
 .plan-empty-tip-or { color: var(--ink-faint); }
 
 /* Planner layout: today agenda on the left, the week rail on the right. */
-.plan-planner { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: var(--section-gap); align-items: start; }
+/* minmax(0, …) rather than bare fr: an fr track floors at its content's min
+   size, so a long agenda row would otherwise blow the grid past the column. */
+.plan-planner { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); gap: var(--element-gap) var(--section-gap); align-items: start; }
 .plan-week-rail { display: flex; flex-direction: column; gap: 0.5rem; }
 .plan-week-day {
     background: var(--card);
@@ -1699,8 +1807,8 @@ html.board-drawer-open { overflow: hidden; }
 .plan-day-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem; }
 .plan-day-custom { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 
-@media (max-width: 920px) {
-    .plan-planner { grid-template-columns: 1fr; }
+@media (max-width: 980px) {
+    .plan-planner { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* Drag handle on reorderable plan rows (the whole row is the drag source). */
@@ -1795,14 +1903,16 @@ html.board-drawer-open { overflow: hidden; }
 .value-swatch.delay { background: #EF9F27; }
 .value-axis { display: flex; justify-content: space-between; color: var(--ink-faint); margin-top: 0.4rem; }
 .value-empty { color: var(--ink-faint); text-align: center; padding: 2rem 0; }
-.value-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+/* auto-fit rather than a fixed 4: the cards re-flow 4 → 3 → 2 → 1 on their own
+   as the column narrows, with no breakpoint to keep in sync. */
+.value-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr)); gap: 1rem; }
 .value-stat-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-row); padding: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }
 .value-stat-label { color: var(--ink-mute); text-transform: uppercase; letter-spacing: 0.04em; }
 .value-stat-num { font-size: 1.8rem; font-weight: 600; letter-spacing: -0.02em; display: inline-flex; align-items: center; gap: 0.4rem; }
 .value-stat-num svg { color: var(--signal); }
 .value-stat-sub { color: var(--ink-mute); display: inline-flex; align-items: center; gap: 0.3rem; }
 .value-stat-sub svg { color: #EF9F27; }
-@media (max-width: 920px) { .value-stats { grid-template-columns: repeat(2, 1fr); } }
+.value-legend { flex-wrap: wrap; row-gap: 0.35rem; }
 
 /* Value-return enable switch (list/board settings) */
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; cursor: pointer; margin-top: 0.5rem; }
