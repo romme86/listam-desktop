@@ -18,6 +18,7 @@ import {
     RPC_IMPORT,
     RPC_SHARE_LIST,
     RPC_JOIN_LIST,
+    RPC_COMPACT_HISTORY,
 } from '@listam/protocol'
 import { normalizeListItem } from '@listam/domain/list-reducer'
 import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-registry'
@@ -284,6 +285,20 @@ export function createMockBackend() {
                 items = reduction.allItems()
                 emit({ type: 'add-from-backend', item: meta, raw: JSON.stringify(meta) })
                 return JSON.stringify({ ok: true, baseKey, listId, writable: true })
+            } else if (command === RPC_COMPACT_HISTORY) {
+                // Both readiness states are previewable without a mesh:
+                // ?mock=1 reports ready, ?mock=1&compactionBlocked=1 reports the
+                // blocked one — which is the state actually worth eyeballing,
+                // since its whole job is naming the device holding it back.
+                const blocked = new URLSearchParams(globalThis.location?.search || '').has('compactionBlocked')
+                const readiness = blocked
+                    ? { ready: false, total: 2, readyCount: 1, blockers: [{ writerKey: 'b2'.repeat(32), reason: 'outdated' }] }
+                    : { ready: true, total: 2, readyCount: 2, blockers: [] }
+                if (payload?.dryRun) {
+                    return JSON.stringify({ ok: false, reason: 'dry-run', canCompact: readiness.ready, compacted: false, readiness })
+                }
+                if (!readiness.ready) return JSON.stringify({ ok: false, reason: 'mesh-not-ready', readiness })
+                return JSON.stringify({ ok: true, sequence: 1, buckets: 3, items: items.length, readiness })
             } else if (command === RPC_REQUEST_SYNC) {
                 syncList()
             } else if (command === RPC_GET_BOARD_CONFIG) {

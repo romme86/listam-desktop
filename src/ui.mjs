@@ -102,6 +102,7 @@ import {
 import { h, replaceChildren } from './dom.mjs'
 import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
+import { createCompactionOps } from './ui/compaction.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -799,6 +800,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         runSetBackupPassword,
         runRestoreAutoBackup,
     } = createBackupOps({ client, ui, store, locale, renderAll, openDialog, closeDialog })
+
+    // --- flatten history (owner only) --------------------------------------
+    // Lives in ./ui/compaction.mjs. Same shared-`ui` argument as backup: the
+    // readiness reply is read by the settings dialog and refreshed when it opens.
+    const {
+        refreshCompactionReadiness,
+        runCompaction,
+        renderCompactionSection,
+    } = createCompactionOps({ client, ui, store, locale, renderAll, closeDialog })
+
+    // Flattening is irreversible and affects every device on the project, so it
+    // goes through a confirm step like the other destructive actions rather than
+    // firing on the first click.
+    function confirmCompaction() {
+        openDialog({ kind: 'compaction-confirm' })
+    }
 
     const actions = {
         // The add-bar entry point. On a value-return todo surface, ratings are
@@ -1528,6 +1545,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (info && info.passwordSet === false) {
                 store.pushNotice(locale.i18n.t('backup.auto.joinNeedsPassword'), 'error')
                 openDialog({ kind: 'settings' })
+                void refreshCompactionReadiness()
                 loadAutoBackups()
                 return
             }
@@ -1603,7 +1621,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // + Activity live in Settings → Analytics.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
-        { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => { openDialog({ kind: 'settings' }); loadAutoBackups() } },
+        { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => { openDialog({ kind: 'settings' }); loadAutoBackups(); void refreshCompactionReadiness() } },
     ]
     // Map a list type to its pane/view key. System views sit outside this.
     const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
@@ -5257,6 +5275,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                             )),
                         )
                     })(),
+                // Flatten history. Owner-only, and rendered only once the backend
+                // has reported readiness — the section's whole value is naming
+                // which device is holding it back, so an unanswered one says
+                // nothing worth showing.
+                renderCompactionSection({
+                    onConfirm: confirmCompaction,
+                    isOwner: !!state.roster?.canAdminister,
+                }),
                 // Analytics: congruency calibration + recent backend activity,
                 // relocated here from their former top-level nav views.
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.analytics.title')),
@@ -5493,6 +5519,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
                 h('button', { class: 'btn btn-danger', onclick: () => actions.confirmRemoveMember(ui.dialog.member) }, t('common.remove')),
+            ], { trust: true })
+        } else if (kind === 'compaction-confirm') {
+            content = dialogFrame(t('compaction.title'), [
+                h('p', { class: 'dialog-body warning' }, t('compaction.confirm')),
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-danger', onclick: () => { void runCompaction() } }, t('compaction.action')),
             ], { trust: true })
         } else if (kind === 'server-shutdown') {
             content = dialogFrame(t('desktop.servers.shutdown'), [
