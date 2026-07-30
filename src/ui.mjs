@@ -106,6 +106,8 @@ import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
+import { createDrawerDomState } from './ui/drawer-dom-state.mjs'
+import { shouldHandleAppShortcut } from './ui/keyboard-shortcuts.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -3290,11 +3292,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // Which drawer kind is currently mounted — the slide-in animation replays
     // only when this changes (opening), never on routine re-renders.
     let mountedDrawerKind = null
+    const drawerDom = createDrawerDomState()
     function renderDrawerHost(state) {
         const show = ui.view === 'board' && !ui.ticketDocId && ui.activeListId != null
         const item = show ? selectedTicket(state) : null
         document.documentElement.classList.toggle('board-drawer-open', !!item)
         if (item) {
+            const drawerKey = `ticket:${item.listId || ''}:${item.id}`
+            // Capture while the old subtree is still attached. Restoration after
+            // the swap is synchronous so several store notifications in one turn
+            // can never leave a gap where the next keystroke lands on <body>.
+            const snapshot = drawerDom.capture(drawerHost, drawerKey)
             const drawer = renderTicketDrawer(item, state)
             if (mountedDrawerKind !== 'ticket') drawer.classList.add('enter')
             mountedDrawerKind = 'ticket'
@@ -3302,6 +3310,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
                 drawer,
             )
+            drawerDom.commit(drawerKey)
+            drawerDom.restore(drawerHost, snapshot, {
+                restoreContentEditable: (field) => {
+                    if (ui.blockCaret != null) setRichCaretOffset(field, ui.blockCaret)
+                },
+            })
             return
         }
         // Non-modal list-item Inspector (grocery/todo). No scrim — the list stays
@@ -3310,13 +3324,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ? state.items.find((it) => it && it.id === ui.inspectorItemId)
             : null
         if (inspItem) {
+            const drawerKey = `inspector:${inspItem.listId || ''}:${inspItem.id}`
+            const snapshot = drawerDom.capture(drawerHost, drawerKey)
             const insp = renderItemInspector(inspItem, state)
             if (mountedDrawerKind !== 'insp') insp.classList.add('enter')
             mountedDrawerKind = 'insp'
             replaceChildren(drawerHost, insp)
+            drawerDom.commit(drawerKey)
+            drawerDom.restore(drawerHost, snapshot, {
+                restoreContentEditable: (field) => {
+                    if (ui.blockCaret != null) setRichCaretOffset(field, ui.blockCaret)
+                },
+            })
             return
         }
         mountedDrawerKind = null
+        drawerDom.clear()
         drawerHost.replaceChildren()
     }
 
@@ -5976,13 +5999,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (ui.ticketDocId || ui.selectedTicketId) { actions.closeTicket(); return }
             return
         }
-        // ⌘K / Ctrl+K opens the command palette from anywhere (even while typing).
-        if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
+        const commandPaletteKey = (event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')
+        if (!shouldHandleAppShortcut({
+            drawerOpen: mountedDrawerKind !== null,
+            dialogOpen: !!ui.dialog,
+            typingTarget: isTypingTarget(event.target),
+            commandPaletteKey,
+        })) return
+
+        // ⌘K / Ctrl+K opens the command palette from anywhere except a drawer,
+        // where the local editing surface owns the keyboard until Escape closes it.
+        if (commandPaletteKey) {
             event.preventDefault()
             openDialog({ kind: 'command-palette' })
             return
         }
-        if (isTypingTarget(event.target) || ui.dialog) return
 
         // ⌘Z / Ctrl+Z undoes the last content change (delete / edit / toggle).
         // Deliberately BELOW the typing guard so native char-undo wins inside
