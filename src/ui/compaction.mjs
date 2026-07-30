@@ -43,6 +43,24 @@ export function createCompactionOps ({ client, ui, store, locale, renderAll, clo
         return ui.compaction
     }
 
+    // A readiness result is only a point-in-time observation. A peer may report
+    // support while Settings is open, so a blocked-looking control must still be
+    // useful: re-check on press and continue to the irreversible confirmation as
+    // soon as the mesh is ready. This also gives an explicit notice when it is
+    // still blocked instead of letting a disabled button silently swallow clicks.
+    async function requestCompactionConfirmation (onConfirm) {
+        const info = await refreshCompactionReadiness()
+        if (info?.canCompact) {
+            onConfirm?.()
+            return true
+        }
+        store.pushNotice(
+            info ? compactionStatusText() : compactionErrorMessage(),
+            'error',
+        )
+        return false
+    }
+
     // Name the devices that are not ready, using the same synced peer labels the
     // Peers list shows — a raw writer key here would be unactionable.
     function blockerNames (blockers) {
@@ -142,14 +160,15 @@ export function createCompactionOps ({ client, ui, store, locale, renderAll, clo
             h('div', { class: 'choice-row' },
                 h('button', {
                     class: 'btn btn-secondary',
-                    ...(ready ? { onclick: onConfirm } : { disabled: 'disabled' }),
-                }, t('compaction.action')),
+                    onclick: () => { void requestCompactionConfirmation(onConfirm) },
+                }, t(ready ? 'compaction.action' : 'compaction.checkAgain')),
             ),
         )
     }
 
     return {
         refreshCompactionReadiness,
+        requestCompactionConfirmation,
         runCompaction,
         renderCompactionSection,
         // Exported for the settings dialog and for tests.

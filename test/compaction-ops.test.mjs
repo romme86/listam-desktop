@@ -143,6 +143,81 @@ test('a ready mesh reports ready rather than an empty blocker list', async () =>
     assert.equal(ops.compactionStatusText(), 'compaction.ready')
 })
 
+test('pressing a stale blocked action re-checks and opens confirmation once ready', async () => {
+    let checks = 0
+    let confirms = 0
+    const { ops, sent } = harness(() => {
+        checks++
+        return checks === 1
+            ? { ok: false, reason: 'dry-run', canCompact: false, readiness: { ready: false, total: 2, readyCount: 1, blockers: [{ writerKey: PI, reason: 'no-presence' }] } }
+            : { ok: false, reason: 'dry-run', canCompact: true, readiness: { ready: true, total: 2, readyCount: 2, blockers: [] } }
+    })
+    await ops.refreshCompactionReadiness()
+
+    const opened = await ops.requestCompactionConfirmation(() => { confirms++ })
+
+    assert.equal(opened, true)
+    assert.equal(confirms, 1)
+    assert.equal(sent.length, 2)
+    assert.deepEqual(sent[1].payload, { dryRun: true }, 'the press must re-check without writing')
+})
+
+test('pressing while still blocked explains why instead of doing nothing', async () => {
+    const { ops, notices } = harness({
+        ok: false,
+        reason: 'dry-run',
+        canCompact: false,
+        readiness: { ready: false, total: 2, readyCount: 1, blockers: [{ writerKey: PI, reason: 'outdated' }] },
+    }, { peerLabels: { [PI]: 'pi-headless' } })
+
+    const opened = await ops.requestCompactionConfirmation(() => assert.fail('confirmation must stay gated'))
+
+    assert.equal(opened, false)
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].kind, 'error')
+    assert.match(notices[0].text, /pi-headless/)
+})
+
+test('the blocked section offers a readiness check, not an inert disabled button', async () => {
+    const { ops } = harness({
+        ok: false,
+        reason: 'dry-run',
+        canCompact: false,
+        readiness: { ready: false, total: 2, readyCount: 1, blockers: [{ writerKey: PI, reason: 'outdated' }] },
+    })
+    await ops.refreshCompactionReadiness()
+
+    const previousDocument = globalThis.document
+    globalThis.document = {
+        createElement: (tag) => ({
+            tag,
+            className: '',
+            dataset: {},
+            attributes: {},
+            listeners: {},
+            children: [],
+            nodeType: 1,
+            setAttribute (key, value) { this.attributes[key] = value },
+            addEventListener (type, listener) { this.listeners[type] = listener },
+            append (child) { this.children.push(child) },
+        }),
+        createTextNode: (text) => ({ nodeType: 3, text }),
+    }
+    try {
+        const section = ops.renderCompactionSection({ onConfirm: () => {}, isOwner: true })
+        const find = (node, tag) => node?.tag === tag
+            ? node
+            : (node?.children || []).map((child) => find(child, tag)).find(Boolean)
+        const button = find(section, 'button')
+        assert.ok(button)
+        assert.equal(button.attributes.disabled, undefined)
+        assert.equal(button.children[0].text, 'compaction.checkAgain')
+        assert.equal(typeof button.listeners.click, 'function')
+    } finally {
+        globalThis.document = previousDocument
+    }
+})
+
 test('running a flatten reports what it actually compacted', async () => {
     const { ops, notices, sent } = harness((payload) => (
         payload?.dryRun
