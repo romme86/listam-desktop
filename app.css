@@ -761,6 +761,7 @@ button {
 .main[data-view="peers"] .summary-bar { padding: 0 1rem; }
 .main[data-view="peers"] .pane-section { margin-bottom: 2.5rem; }
 
+
 /* Servers section (inside Peers & Devices): full-bleed cards on the same --card
    fill as the member rows above them (card edge at the pane margin, text at
    1rem); nested stat rows take the subtler --surface-1 tint for an inner lift. */
@@ -874,6 +875,37 @@ button {
     overflow-wrap: anywhere;
     user-select: all;
 }
+.invite-share-layout {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 1rem;
+}
+.invite-share-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+}
+/* QR contrast is machine-readable data, so its white field stays constant in
+   both themes and square; rounding/clipping would eat into the quiet zone. */
+.invite-qr-frame {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    max-width: 100%;
+    background: #ffffff;
+}
+.invite-qr {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+}
+.dialog .invite-share-layout { margin-top: 0.25rem; }
+.dialog .invite-share-layout .invite-code { align-self: stretch; }
 .dialog .warning { color: var(--on-danger-container); background: var(--danger-container); padding: 0.75rem 1rem; border-radius: var(--r-field); }
 .shortcut-rows { display: flex; flex-direction: column; gap: 0.5rem; }
 .shortcut-rows .kv-row { grid-template-columns: 120px 1fr; padding: 0.5rem 1rem; }
@@ -1017,6 +1049,7 @@ kbd {
 }
 @media (max-width: 720px) {
     :root { --sidebar-width: 150px; --gutter-base: 0.9rem; }
+    .invite-share-layout { grid-template-columns: minmax(0, 1fr); justify-items: start; }
     .nav-item { padding-block: 0.6rem; }
 }
 

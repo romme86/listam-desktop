@@ -137,6 +137,24 @@ test('.main can shrink below its content width', () => {
     assert.match(rule[1], /margin-left:\s*var\(--sidebar-width\)/, '.main must clear the fixed rail')
 })
 
+test('invite QR layouts shrink and stack before narrow server cards overflow', () => {
+    const base = css.match(/\.invite-share-layout\s*\{([^}]*)\}/)
+    assert.ok(base, 'share invites must declare a reusable QR/code layout')
+    assert.match(base[1], /grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)/,
+        'the invite-code column must be allowed to shrink beside the QR')
+
+    const narrow = mediaBlocks().filter((block) => block.kind === 'max' && block.px === 720)
+    assert.ok(narrow.length > 0, 'the narrow-window tier must exist')
+    assert.ok(
+        narrow.some((block) => /\.invite-share-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(block.body)),
+        'share invites must stack to one shrinkable column at 720px',
+    )
+
+    const qr = css.match(/\.invite-qr\s*\{([^}]*)\}/)
+    assert.ok(qr)
+    assert.match(qr[1], /max-width:\s*100%/, 'the QR must scale inside a narrow dialog or server card')
+})
+
 test('the layout tokens the ladder scales are declared on :root', () => {
     // The ladder only re-declares tokens; if one is never defined at :root the
     // overrides land on nothing and the default tier silently has no styling.

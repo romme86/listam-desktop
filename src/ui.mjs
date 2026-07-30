@@ -25,6 +25,7 @@ import {
     RPC_SET_BACKUP_SCHEDULE,
     RPC_SHARE_LIST,
     RPC_JOIN_LIST,
+    createInviteQrPayload,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
 import {
@@ -100,6 +101,7 @@ import {
     detectExtraLists,
 } from './registry.mjs'
 import { h, replaceChildren } from './dom.mjs'
+import { createInviteQr } from './qr-code.mjs'
 import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
@@ -4502,9 +4504,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             h('section', { class: 'pane-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.peers.invite.title')),
                 state.inviteKey
-                    ? h('div', {},
-                        h('div', { class: 'invite-code' }, state.inviteKey),
-                        h('div', { style: 'margin-top: 1rem;' },
+                    ? h('div', { class: 'invite-share-layout' },
+                        createInviteQr(createInviteQrPayload(state.inviteKey, 'project'), t('share.project.dialogTitle')),
+                        h('div', { class: 'invite-share-copy' },
+                            h('div', { class: 'invite-code' }, state.inviteKey),
                             h('button', { class: 'btn btn-primary', onclick: copyInvite }, t('desktop.peers.copy'))),
                     )
                     : h('p', { class: 'body-md pane-note' }, t('desktop.peers.invite.none')),
@@ -5032,7 +5035,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             content = dialogFrame(t('share.project.dialogTitle'), [
                 h('p', { class: 'dialog-body' }, t('share.project.dialogMessage')),
                 state.inviteKey
-                    ? h('div', { class: 'invite-code' }, state.inviteKey)
+                    ? h('div', { class: 'invite-share-layout' },
+                        createInviteQr(createInviteQrPayload(state.inviteKey, 'project'), t('share.project.dialogTitle')),
+                        h('div', { class: 'invite-code' }, state.inviteKey),
+                    )
                     : h('p', { class: 'dialog-body' }, t('invite.share.notReady')),
             ], [
                 state.inviteKey ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy')) : null,
@@ -5047,7 +5053,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             }
             content = dialogFrame(t('shareList.title'), [
                 h('p', { class: 'dialog-body' }, t('shareList.message')),
-                h('div', { class: 'invite-code' }, invite),
+                h('div', { class: 'invite-share-layout' },
+                    createInviteQr(createInviteQrPayload(invite, 'list'), t('shareList.title')),
+                    h('div', { class: 'invite-code' }, invite),
+                ),
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: copyShareInvite }, t('desktop.peers.copy')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),

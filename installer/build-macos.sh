@@ -43,7 +43,7 @@ fi
 
 # --ignore REPLACES Pear's default ignore list, so the defaults (.git etc.)
 # must be restated here. Keep in sync with pear.stage.ignore in package.json.
-STAGE_IGNORE="/.git,/.github,/.gitignore,/.DS_Store,/test,/design-guide,/installer,/listam-desktop-secrets.json"
+STAGE_IGNORE="/.git,/.github,/.gitignore,/.DS_Store,/test,/design-guide,/installer,/data-local,/lista.lock,/listam-desktop-secrets.json"
 
 PEAR=""
 for candidate in "$HOME/Library/Application Support/pear/bin/pear" /usr/local/bin/pear; do

@@ -17,6 +17,8 @@
 // so `ownerControl` is null there and the fallback branch is the ONLY thing a
 // mock snapshot can ever exercise.
 import { h } from '../dom.mjs'
+import { createInviteQr } from '../qr-code.mjs'
+import { createInviteQrPayload } from '@listam/protocol'
 import { formatAgo, formatUptime } from '@listam/domain/peer-display'
 
 function formatBytes (n) {
@@ -194,9 +196,10 @@ export function createServersSection ({
                 ? h('p', { class: 'body-md warning' }, t('desktop.servers.error', { message: entry.error }))
                 : null,
             entry.invite
-                ? h('div', {},
-                    h('div', { class: 'invite-code' }, entry.invite),
-                    h('div', { style: 'margin-top: 0.75rem;' },
+                ? h('div', { class: 'invite-share-layout server-invite' },
+                    createInviteQr(createInviteQrPayload(entry.invite, 'project'), t('share.project.dialogTitle')),
+                    h('div', { class: 'invite-share-copy' },
+                        h('div', { class: 'invite-code' }, entry.invite),
                         h('button', { class: 'btn btn-secondary', onclick: () => copyText(entry.invite, 'desktop.peers.copied') }, t('desktop.peers.copy'))),
                 )
                 : null,
