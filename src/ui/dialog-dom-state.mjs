@@ -1,4 +1,4 @@
-// The two pieces of dialog state that live in the DOM, not in `ui`.
+// The pieces of dialog state that live in the DOM/render lifecycle, not in `ui`.
 //
 // There is no VDOM in this renderer (see ../dom.mjs): a dialog is rebuilt
 // wholesale on every render, and renderAll runs on every store notify — a
@@ -9,10 +9,13 @@
 //   • the scroll offset  — an open Settings dialog snapped back to the top while
 //     it was being read, which is the "it glitches like it re-renders" report;
 //   • the focused field  — a device name being typed lost focus, caret, and the
-//     half-typed text with it, mid-word.
+//     half-typed text with it, mid-word;
+//   • whether this is a real open — the rebuilt nodes otherwise replayed their
+//     entrance animation on every background update, making the dialog flicker.
 //
-// Neither is a re-render bug. They are state that only the DOM was holding, so
-// carry them across a rebuild instead. Two rules keep that from causing worse
+// Scroll/focus are state that only the DOM was holding, so carry them across a
+// rebuild. Entrance motion belongs to the mount lifecycle, so replay it only
+// when the dialog kind changes. Two restore rules keep that from causing worse
 // problems than it fixes:
 //
 //   1. SAME KIND ONLY. A scroll offset or caret from the Settings dialog means
@@ -46,6 +49,11 @@ export function createDialogDomState () {
     }
 
     return {
+        /** Animate a dialog only when it is first mounted or changes kind. */
+        shouldEnter (kind) {
+            return renderedKind !== kind
+        },
+
         /**
          * Snapshot the on-screen dialog, or null when there is nothing to carry.
          * Field identity is POSITIONAL: a dialog of a given kind builds the same

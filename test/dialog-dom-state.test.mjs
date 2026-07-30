@@ -52,6 +52,17 @@ test('a same-kind rebuild carries the scroll offset across', () => {
     assert.equal(after.body.scrollTop, 900, 'the dialog snapped back to the top')
 })
 
+test('entrance motion runs only for a real open or a dialog-kind change', () => {
+    const dom = createDialogDomState()
+
+    assert.equal(dom.shouldEnter('settings'), true, 'the first open must animate')
+    dom.commit('settings')
+    assert.equal(dom.shouldEnter('settings'), false, 'a background rebuild replayed the entrance')
+    assert.equal(dom.shouldEnter('backup'), true, 'a different dialog should still animate in')
+    dom.clear()
+    assert.equal(dom.shouldEnter('settings'), true, 'reopening after close must animate')
+})
+
 test('the FIRST render of a dialog carries nothing — there is no earlier state to keep', () => {
     const dom = createDialogDomState()
     assert.equal(dom.capture(fakeHost({ scrollTop: 900 }), 'settings'), null)

@@ -44,6 +44,7 @@ import {
     nameInitials,
     formatAgo,
     formatUptime,
+    isDeviceOnline,
     resolvePeerDisplay,
     presenceStatusVerdict,
 } from '@listam/domain/peer-display'
@@ -61,7 +62,6 @@ import {
 } from '@listam/domain/labels'
 import {
     reducePresence,
-    isOnlineNow,
     averageOnlineMs,
 } from '@listam/domain/presence'
 import {
@@ -3111,10 +3111,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function peerPresence(key) {
         const k = String(key || '')
         const entry = presenceMap().get(k) || null
-        const w = (store.getState().roster?.writers ?? []).find((x) => x.writerKey === k)
+        const roster = store.getState().roster
+        const w = (roster?.writers ?? []).find((x) => x.writerKey === k)
+        const isSelf = !!w?.isSelf || (!!roster?.localWriterKey && roster.localWriterKey === k)
         return {
             entry,
-            online: isOnlineNow(entry, now()),
+            online: isDeviceOnline({ isSelf, presence: entry, now: now() }),
             lastActiveAt: entry?.lastActiveAt || 0,
             lastInteractionAt: entry?.lastInteractionAt || 0,
             avgOnlineMs: averageOnlineMs(entry),
@@ -5840,9 +5842,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         }
 
         // Capture BEFORE the swap, restore AFTER it — the whole fix is that order.
+        // The DOM subtree is still rebuilt for fresh state, but the entrance
+        // animation belongs only to a real open. Replaying it on every store
+        // update made idle dialogs visibly fade/shift as though they flickered.
         const snapshot = dialogDom.capture(dialogHost, kind)
+        const enterClass = dialogDom.shouldEnter(kind) ? ' enter' : ''
         replaceChildren(dialogHost,
-            h('div', { class: 'dialog-backdrop', onclick: (event) => { if (event.target === event.currentTarget) closeDialog() } }, content),
+            h('div', { class: `dialog-backdrop${enterClass}`, onclick: (event) => { if (event.target === event.currentTarget) closeDialog() } }, content),
         )
         dialogDom.commit(kind)
         dialogDom.restore(dialogHost, snapshot)

@@ -813,6 +813,8 @@ button {
     align-items: center;
     justify-content: center;
     z-index: 50;
+}
+.dialog-backdrop.enter {
     animation: backdrop-in 150ms ease-out backwards;
 }
 @keyframes backdrop-in { from { opacity: 0; } }
@@ -827,6 +829,8 @@ button {
     background: var(--surface-0);
     border-radius: var(--r-dialog);
     padding: 2rem;
+}
+.dialog-backdrop.enter > .dialog {
     animation: dialog-in var(--t-base) var(--ease) backwards;
 }
 @keyframes dialog-in {
