@@ -72,6 +72,56 @@ test('a blocked flatten names the device holding it back, by its synced label', 
     assert.match(text, /"total":3/)
 })
 
+test('an outdated blocker is told to update; a silent one is not', async () => {
+    // The reason used to be discarded, so every blocker got "update them first" —
+    // wrong, and unfalsifiable, for a device that is current but simply has not
+    // published a heartbeat yet (offline, or only just started).
+    const { ops } = harness(
+        {
+            ok: false,
+            reason: 'dry-run',
+            canCompact: false,
+            readiness: {
+                ready: false,
+                total: 4,
+                readyCount: 2,
+                blockers: [{ writerKey: PI, reason: 'outdated' }, { writerKey: PHONE, reason: 'no-presence' }],
+            },
+        },
+        { peerLabels: { [PI]: 'pi-headless', [PHONE]: 'gioieiere' } },
+    )
+    await ops.refreshCompactionReadiness()
+
+    // The stub `t` echoes `key:{params}`, so each reason line carries exactly the
+    // device names it was handed — which is the property under test.
+    const lines = ops.compactionStatusText().split(' compaction.').map((part, i) => (i === 0 ? part : `compaction.${part}`))
+    const outdated = lines.find((line) => line.startsWith('compaction.notReady.outdated'))
+    const silent = lines.find((line) => line.startsWith('compaction.notReady.silent'))
+    assert.ok(outdated, 'the out-of-date device must get its own instruction')
+    assert.ok(silent, 'the silent device must get its own instruction')
+    assert.match(outdated, /pi-headless/)
+    assert.doesNotMatch(outdated, /gioieiere/, 'a silent device must not be reported as out of date')
+    assert.match(silent, /gioieiere/)
+    assert.doesNotMatch(silent, /pi-headless/)
+})
+
+test('an owner-attested blocker reads as silence, not as an old build', async () => {
+    // `attested` means the owner vouched for a device that never spoke for itself.
+    // For the user that is the same situation as no presence at all — there is
+    // nothing to update.
+    const { ops } = harness({
+        ok: false,
+        reason: 'dry-run',
+        canCompact: false,
+        readiness: { ready: false, total: 2, readyCount: 1, blockers: [{ writerKey: PHONE, reason: 'attested' }] },
+    })
+    await ops.refreshCompactionReadiness()
+
+    const text = ops.compactionStatusText()
+    assert.match(text, /compaction\.notReady\.silent:/)
+    assert.doesNotMatch(text, /compaction\.notReady\.outdated/)
+})
+
 test('a blocker with no synced label still gets a usable name, never a bare key', async () => {
     const { ops } = harness({
         ok: false,

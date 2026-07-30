@@ -71,13 +71,27 @@ export function createCompactionOps ({ client, ui, store, locale, renderAll, clo
         if (!info) return ''
         const { readiness } = info
         if (readiness?.ready) return t('compaction.ready')
-        const names = blockerNames(readiness?.blockers)
-        if (!names.length) return t('compaction.notReadyUnknown')
-        return t('compaction.notReady', {
+        const blockers = readiness?.blockers || []
+        if (!blockers.length) return t('compaction.notReadyUnknown')
+
+        // The reason MATTERS, and the first version of this message threw it away:
+        // it said "N of M devices are up to date… update them first" for all three
+        // cases. For `no-presence` / `attested` that is wrong advice — the device
+        // may be perfectly up to date and simply not have published a heartbeat
+        // yet (it is offline, or was only just started). Sending someone to
+        // re-update a current device is exactly the kind of unfalsifiable
+        // instruction this whole surface exists to avoid.
+        const outdated = blockers.filter((b) => b.reason === 'outdated')
+        // 'attested' means the owner vouched for a device that never spoke for
+        // itself, which for the user is the same situation as silence.
+        const silent = blockers.filter((b) => b.reason !== 'outdated')
+        const lines = [t('compaction.notReady', {
             ready: readiness?.readyCount ?? 0,
             total: readiness?.total ?? 0,
-            devices: names.join(', '),
-        })
+        })]
+        if (outdated.length) lines.push(t('compaction.notReady.outdated', { devices: blockerNames(outdated).join(', ') }))
+        if (silent.length) lines.push(t('compaction.notReady.silent', { devices: blockerNames(silent).join(', ') }))
+        return lines.join(' ')
     }
 
     // Every refusal the user can act on gets its own message; anything else falls

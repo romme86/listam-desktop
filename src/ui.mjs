@@ -105,6 +105,7 @@ import { createInviteQr } from './qr-code.mjs'
 import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
+import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -1618,11 +1619,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // --- skeleton ----------------------------------------------------------
     // Sidebar zones: brand, the dynamic list rail (groups + lists from the
     // synced registry, rebuilt each render), then status strip + system nav.
-    // Servers, Congruency and Activity no longer have their own nav entries:
-    // Servers is now a section inside the Peers & Devices pane, and Congruency
-    // + Activity live in Settings → Analytics.
+    // Servers is a section inside the Peers & Devices pane. Analytics sits
+    // directly under Peers & Devices as its own pane again — folding it into
+    // Settings buried it in a scrolling dialog. Activity (the backend event log)
+    // does NOT get a sidebar entry: it is a Settings sub-page, since it is a
+    // diagnostic you open on purpose, not a place you navigate to.
     const SYSTEM_DEFS = [
         { key: 'peers', icon: 'users', label: (t) => t('desktop.nav.peers') },
+        { key: 'analytics', icon: 'activity', label: (t) => t('desktop.analytics.title') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => { openDialog({ kind: 'settings' }); loadAutoBackups(); void refreshCompactionReadiness() } },
     ]
     // Map a list type to its pane/view key. System views sit outside this.
@@ -2097,6 +2101,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (ui.view === 'board') return renderBoardPane(state)
         if (ui.view === 'todo') return renderTodoPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
+        if (ui.view === 'analytics') return renderAnalyticsPane(state)
         return renderListsPane(state)
     }
     // Shown when no list is selected. The rail still lists every list/group; this
@@ -4423,8 +4428,24 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         )
     }
 
-    // Congruency analytics body (used inside Settings → Analytics). Returns the
-    // nodes; the caller supplies the surrounding heading and container.
+    // Congruency analytics as its own pane, sitting directly under Peers &
+    // Devices in the sidebar. It lived in Settings → Analytics for a while, and
+    // that was the wrong shape: this is something you go and READ, and inside a
+    // scrolling dialog it was both buried and cramped.
+    function renderAnalyticsPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        replaceChildren(main,
+            h('header', { class: 'page-header' },
+                h('h1', { class: 'page-title title-lg' }, t('desktop.analytics.title')),
+            ),
+            h('section', { class: 'pane-section' },
+                h('h3', { class: 'category-heading label-sm' }, t('congruency.title')),
+                ...congruencyContent(state),
+            ),
+        )
+    }
+
+    // The pane's body, kept split out so it can be built without a pane around it.
     function congruencyContent(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
@@ -4501,6 +4522,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
             ),
             buildServersSection(t),
+            // Whole-project sharing, moved here out of Settings: this is the pane
+            // where a user is already thinking about who else is on the project,
+            // and the invite the button mints renders in the next section down.
+            // Per-list sharing stays in that list's own settings dialog, so a
+            // reflex reach for "share" still cannot hand over every list at once.
+            h('section', { class: 'pane-section' },
+                h('h3', { class: 'category-heading label-sm' }, t('lists.menu.sectionSharing')),
+                h('p', { class: 'body-md pane-note' }, t('share.project.hint')),
+                h('div', { class: 'choice-row', style: 'padding: 0.75rem 1rem 0;' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => actions.shareProject() }, t('share.project.button')),
+                ),
+            ),
             h('section', { class: 'pane-section' },
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.peers.invite.title')),
                 state.inviteKey
@@ -4907,6 +4940,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         act('info-circle', t('desktop.shortcuts.help'), () => openDialog({ kind: 'shortcuts' }))
         jmp('layout-dashboard', t('desktop.nav.overview'), '', () => { closeDialog(); ui.view = 'overview'; renderAll() })
         jmp('users', t('desktop.nav.peers'), '', () => { closeDialog(); ui.view = 'peers'; renderAll() })
+        jmp('activity', t('desktop.analytics.title'), '', () => { closeDialog(); ui.view = 'analytics'; renderAll() })
         for (const g of buildRail(state).groups) {
             for (const s of g.surfaces) {
                 jmp(iconForType(s.type), s.name, g.name || '', () => { closeDialog(); selectSurface(store.getState(), s) })
@@ -4986,6 +5020,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         )
     }
 
+    // Scroll offset + focused field are the only dialog state the DOM owns, and a
+    // dialog is rebuilt wholesale on every render (no VDOM), which used to throw
+    // both away several times a minute on a live mesh. See ./ui/dialog-dom-state.mjs.
+    const dialogDom = createDialogDomState()
+
     function renderDialog(state) {
         if (!ui.dialog && state.recovery) {
             // Phase 11 parity: surface the storage-recovery decision as soon as
@@ -4994,6 +5033,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         }
         if (!ui.dialog) {
             dialogHost.replaceChildren()
+            dialogDom.clear()
             return
         }
         const t = locale.i18n.t.bind(locale.i18n)
@@ -5211,14 +5251,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('settings.board.help')),
                 h('h3', { class: 'category-heading label-sm' }, t('header.section.language')),
                 languageRow,
-                // Whole-project sharing lives here (Settings) only — never a
-                // page-header button. To share a single list, use that list's
-                // settings dialog.
-                h('h3', { class: 'category-heading label-sm' }, t('lists.menu.sectionSharing')),
-                h('div', { class: 'choice-row' },
-                    h('button', { class: 'btn btn-secondary', onclick: () => { closeDialog(); actions.shareProject() } }, t('share.project.button')),
-                ),
-                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.project.hint')),
+                // Whole-project sharing is NOT here: it lives in the Peers &
+                // Devices pane, next to the roster and the invite it mints, which
+                // is where a user goes when they are thinking about who else is on
+                // this project. Per-list sharing stays in that list's settings.
                 h('h3', { class: 'category-heading label-sm' }, t('backup.section')),
                 h('div', { class: 'choice-row' },
                     h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'backup', mode: 'export-data' }) }, t('backup.exportData')),
@@ -5292,15 +5328,27 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     onConfirm: confirmCompaction,
                     isOwner: !!state.roster?.canAdminister,
                 }),
-                // Analytics: congruency calibration + recent backend activity,
-                // relocated here from their former top-level nav views.
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.analytics.title')),
-                h('div', { class: 'analytics-section' },
-                    h('h4', { class: 'analytics-subhead label-sm' }, t('congruency.title')),
-                    ...congruencyContent(state),
-                    ...activityContent(state),
+                // Diagnostics is a LINK, not a block. The health summary plus the
+                // rolling backend event log is a wall of monospace nobody scrolls
+                // Settings to read, and it pushed everything below it out of
+                // reach; it now opens as its own page and comes back here on Back.
+                // Congruency analytics left Settings entirely — it is a pane under
+                // Peers & Devices in the sidebar.
+                h('h3', { class: 'category-heading label-sm' }, t('desktop.diagnostics.title')),
+                h('div', { class: 'choice-row' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'diagnostics' }) }, t('desktop.diagnostics.open')),
                 ),
+                h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.diagnostics.hint')),
             )], [
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
+            ])
+        } else if (kind === 'diagnostics') {
+            // The Settings sub-page. Back returns to Settings rather than closing
+            // outright, so opening it is not a dead end that costs a re-navigation.
+            content = dialogFrame(t('desktop.diagnostics.title'), [
+                h('div', { class: 'analytics-section' }, ...activityContent(state)),
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: () => openDialog({ kind: 'settings' }) }, t('common.back')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
         } else if (kind === 'backup') {
@@ -5791,9 +5839,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             )
         }
 
+        // Capture BEFORE the swap, restore AFTER it — the whole fix is that order.
+        const snapshot = dialogDom.capture(dialogHost, kind)
         replaceChildren(dialogHost,
             h('div', { class: 'dialog-backdrop', onclick: (event) => { if (event.target === event.currentTarget) closeDialog() } }, content),
         )
+        dialogDom.commit(kind)
+        dialogDom.restore(dialogHost, snapshot)
     }
 
     function fieldLabel(text, required) {

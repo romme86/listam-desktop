@@ -761,6 +761,11 @@ button {
 .main[data-view="peers"] .summary-bar { padding: 0 1rem; }
 .main[data-view="peers"] .pane-section { margin-bottom: 2.5rem; }
 
+/* Analytics pane: same insets as Peers & Devices, which it sits under in the
+   sidebar. The congruency cards/legend already carry their own 1rem; only the
+   title and the subtitle prose (shared with no pane of its own) need it here. */
+.main[data-view="analytics"] .page-header { padding: 0 1rem; margin-bottom: 2rem; }
+.main[data-view="analytics"] .analytics-note { padding: 0 1rem; }
 
 /* Servers section (inside Peers & Devices): full-bleed cards on the same --card
    fill as the member rows above them (card edge at the pane margin, text at
@@ -1646,6 +1651,11 @@ html.board-drawer-open { overflow: hidden; }
 .settings > .category-heading:first-child { margin-top: 0; }
 .settings .label-md { margin: 0.5rem 0 0; }
 .settings .choice-row { margin: 0; }
+/* Body text has no bottom margin and a control row has no top one, so a section
+   shaped heading → prose → button (Flatten history, Diagnostics, the seed
+   export) used to sit its button flush against the last line of text. Restore
+   the gap on that adjacency only, so heading → control stays tight. */
+.settings .label-md + .choice-row { margin-top: 0.9rem; }
 .settings .switch-row { margin: 0; }
 .settings .analytics-section { margin-top: 0.6rem; }
 .list-identity dl { margin: 0; display: grid; gap: 0.35rem; }
