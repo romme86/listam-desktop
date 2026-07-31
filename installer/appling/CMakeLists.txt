@@ -9,7 +9,7 @@ project(listam_appling C CXX ASM)
 
 set(LISTAM_ID "h1jwexik1m9c75rqng8hico4oxqgmm8xskws684skmjepksq5r3o"
     CACHE STRING "z32 drive key the appling boots (production channel)")
-set(LISTAM_VERSION "0.12.0" CACHE STRING "App version (kept in sync with package.json)")
+set(LISTAM_VERSION "0.19.12" CACHE STRING "App version (kept in sync with package.json)")
 
 add_pear_appling(
   listam_appling
