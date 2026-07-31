@@ -282,6 +282,22 @@ async function main() {
     })
     const prepared = await prepareDesktopSecrets(secretStore)
 
+    // Key material that exists but could not be READ must not boot the backend.
+    // Starting with no base key is not a fresh start — the Corestore is still on
+    // disk, so the backend adopts whatever identity it points at and this device
+    // silently stops being the peer it was. Surfaced through the normal
+    // boot-error frame, so the renderer shows it instead of an empty project.
+    // (`?? []` keeps an older @listam/secrets from throwing on undefined.)
+    const secretReadFailures = prepared.readFailures ?? []
+    if (secretReadFailures.length > 0) {
+        log.error('refusing to start the backend: key material unreadable', { readFailures: secretReadFailures })
+        throw new Error(
+            `Listam could not read its stored keys (${secretReadFailures.join(', ')}). ` +
+            'The key file may be damaged — restore it from a backup before continuing, ' +
+            'so this device keeps its project instead of starting over.'
+        )
+    }
+
     const platform = createPearPlatform({
         Pear,
         fs,
