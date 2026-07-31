@@ -81,8 +81,8 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     theme: 'system',
     showKeyHints: true,
     // Per-device gate for the "New board" create option. Off by default; never
-    // replicated (prefs are device-local). Hides board *creation*, not existing
-    // boards synced from other peers.
+    // replicated (prefs are device-local). It does not synthesize an empty Board
+    // surface; legacy default-bucket boards remain visible when they have content.
     boardEnabled: false,
     // Overview (day plan) layout: 'focus' (spotlight + today) or 'planner'
     // (today agenda + week rail). Device-local, never replicated.
@@ -92,10 +92,10 @@ export const DEFAULT_PREFERENCES = Object.freeze({
     // preference blobs round-trip cleanly through prefs.mjs.
     defaultListId: DEFAULT_LIST_ID,
     defaultSurfaceKey: '',
-    // The former built-in surfaces (Groceries/Board/Todo) are now ordinary
-    // deletable lists inside the 'general' group. Since they share the legacy
-    // 'default' listId and so have no registry meta-item to tombstone, deleting
-    // one records its surfaceKey here (device-local) to hide it from this rail.
+    // Legacy Board/Todo surfaces have no registry meta-item to tombstone, so the
+    // old delete path records their surfaceKey here (device-local). Grocery now
+    // uses the synced BUILTIN-VISIBILITY label channel instead; any stale grocery
+    // key in this array is deliberately ignored by the rail.
     hiddenBuiltins: [],
     // A built-in's group placement now syncs via the BUILTIN-GROUP label channel
     // (@listam/domain/labels). This map stays as a device-local cache + fallback

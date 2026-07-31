@@ -9,9 +9,10 @@
 // reduceRegistry(state.items), so a rebuild preserves the current name / type /
 // group / order / view unless the patch overrides them.
 import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
-import { isLabelItem } from '@listam/domain/labels'
+import { isLabelItem, isBuiltinSurfaceHidden, surfaceLabelKey } from '@listam/domain/labels'
 import { isPlanItem } from '@listam/domain/plan'
-import { BOARD_WRITE_TYPE, isBoardType } from '@listam/domain/board'
+import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, TODO_LIST_TYPE, isTodoType } from '@listam/domain/identity'
+import { BOARD_LIST_TYPE, BOARD_WRITE_TYPE, isBoardType } from '@listam/domain/board'
 
 // Board lists travel under the legacy wire type for mesh dual-read;
 // reduceRegistry normalizes it back to 'board' on read.
@@ -102,4 +103,29 @@ export function detectExtraLists(items, registry, nameFor = (id) => id) {
         seen.set(id, { id, type: typeof item.listType === 'string' ? item.listType : '', name: nameFor(id, item.listType) })
     }
     return [...seen.values()]
+}
+
+// The reserved default bucket is a compatibility container, not three lists a
+// new user owns automatically. Groceries is the sole starter surface. Legacy
+// Board / Todo surfaces remain reachable only while their respective content is
+// present; newly-created boards and todos are ordinary registry-backed lists.
+//
+// Grocery deletion is synced through the built-in visibility channel. The
+// domain helper deliberately lets same/newer live content resurrect it, so a
+// later voice/quick add can never become invisible. Board/Todo keep honoring the
+// desktop's older device-local hiddenBuiltins preference until their lifecycle
+// is migrated separately.
+export function visibleBuiltinSurfaceTypes(items, localHiddenBuiltins = []) {
+    const rows = Array.isArray(items) ? items : []
+    const locallyHidden = new Set(Array.isArray(localHiddenBuiltins) ? localHiddenBuiltins : [])
+    const hidden = (type) => isBuiltinSurfaceHidden(rows, DEFAULT_LIST_ID, type)
+        || ((isBoardType(type) || isTodoType(type)) && locallyHidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type)))
+    const hasBoard = rows.some((item) => item?.listId === DEFAULT_LIST_ID && isBoardType(item.listType))
+    const hasTodo = rows.some((item) => item?.listId === DEFAULT_LIST_ID && isTodoType(item.listType))
+
+    const visible = []
+    if (!hidden(DEFAULT_LIST_TYPE)) visible.push(DEFAULT_LIST_TYPE)
+    if (hasBoard && !hidden(BOARD_LIST_TYPE)) visible.push(BOARD_LIST_TYPE)
+    if (hasTodo && !hidden(TODO_LIST_TYPE)) visible.push(TODO_LIST_TYPE)
+    return visible
 }

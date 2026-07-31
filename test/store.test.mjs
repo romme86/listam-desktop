@@ -9,10 +9,16 @@ import {
     DEFAULT_PREFERENCES,
 } from '../src/store.mjs'
 import { loadUiPreferences, persistUiPreferences } from '../src/prefs.mjs'
+import labelsReducer, { labelsActions } from '../src/store/labels-slice.mjs'
 import {
+    buildBuiltinGroupItem,
+    buildBuiltinVisibilityItem,
     buildItemPlanEntry,
     buildPeerLabelItem,
     buildPresenceItem,
+    buildSurfaceLabelItem,
+    buildValueReturnItem,
+    isBuiltinSurfaceHidden,
     isPlanItem,
     PEER_LABEL_LIST_ID,
     PEER_LABEL_LIST_TYPE,
@@ -20,6 +26,11 @@ import {
     PLAN_LIST_TYPE,
     PRESENCE_LIST_ID,
     PRESENCE_LIST_TYPE,
+    reduceBuiltinGroups,
+    reduceSurfaceLabels,
+    reduceValueReturn,
+    SURFACE_LABEL_LIST_ID,
+    SURFACE_LABEL_LIST_TYPE,
 } from '@listam/domain'
 
 function item(id, text, overrides = {}) {
@@ -124,6 +135,65 @@ test('structured sync snapshots replace stale reserved buckets exactly', () => {
     assert.equal(state.items.some((entry) => entry.id === oldPeer.id), false)
     assert.equal(state.items.some((entry) => entry.id === newPeer.id), true)
     assert.equal(state.items.some((entry) => entry.id === oldPresence.id), false)
+})
+
+test('surface metadata channels with the same item id stay independent', () => {
+    const store = createDesktopStore()
+    const name = buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Groceries', updatedAt: 1 })
+    const group = buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'home', updatedAt: 2 })
+    const visibility = buildBuiltinVisibilityItem({ listId: 'default', type: 'shopping', hidden: true, updatedAt: 3 })
+    const valueReturn = buildValueReturnItem({ listId: 'default', type: 'shopping', enabled: true, updatedAt: 4 })
+
+    store.applyClientEvent({ type: 'sync-list', items: [name, group, visibility, valueReturn] })
+
+    const items = store.getState().items
+    assert.equal(items.filter((entry) => entry.id === 'default:shopping').length, 4)
+    assert.equal(reduceSurfaceLabels(items).get('default:shopping'), 'Groceries')
+    assert.equal(reduceBuiltinGroups(items).get('default:shopping'), 'home')
+    assert.equal(isBuiltinSurfaceHidden(items, 'default', 'shopping'), true)
+    assert.equal(reduceValueReturn(items).get('default:shopping'), true)
+
+    // An incremental rename replaces only the surface-name row; the other
+    // channels deliberately reuse the same item id and must survive unchanged.
+    store.applyClientEvent({
+        type: 'update-from-backend',
+        item: buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Pantry', updatedAt: 5 }),
+    })
+    const updated = store.getState().items
+    assert.equal(updated.filter((entry) => entry.id === 'default:shopping').length, 4)
+    assert.equal(reduceSurfaceLabels(updated).get('default:shopping'), 'Pantry')
+    assert.equal(reduceBuiltinGroups(updated).get('default:shopping'), 'home')
+    assert.equal(isBuiltinSurfaceHidden(updated, 'default', 'shopping'), true)
+    assert.equal(reduceValueReturn(updated).get('default:shopping'), true)
+})
+
+test('label hydration normalizes bucket envelopes and migrates legacy bare keys', () => {
+    const store = createDesktopStore()
+    const unscopedName = buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Pantry', updatedAt: 1 })
+    delete unscopedName.listId
+    delete unscopedName.listType
+
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: {
+            list: [unscopedName],
+            listId: SURFACE_LABEL_LIST_ID,
+            listType: SURFACE_LABEL_LIST_TYPE,
+        },
+    })
+    assert.equal(reduceSurfaceLabels(store.getState().items).get('default:shopping'), 'Pantry')
+
+    // Compatibility for a preloaded/hot state written by the former reducer:
+    // applying another channel migrates the bare key instead of clobbering it.
+    const oldName = buildSurfaceLabelItem({ listId: 'default', type: 'shopping', name: 'Groceries', updatedAt: 2 })
+    const group = buildBuiltinGroupItem({ listId: 'default', type: 'shopping', groupId: 'home', updatedAt: 3 })
+    const migrated = labelsReducer(
+        { itemsById: { [oldName.id]: oldName } },
+        labelsActions.labelItemApplied(group),
+    )
+    assert.equal(Object.values(migrated.itemsById).length, 2)
+    assert.equal(reduceSurfaceLabels(Object.values(migrated.itemsById)).get('default:shopping'), 'Groceries')
+    assert.equal(reduceBuiltinGroups(Object.values(migrated.itemsById)).get('default:shopping'), 'home')
 })
 
 test('sync snapshot decoder preserves arrays and understands structured buckets', () => {

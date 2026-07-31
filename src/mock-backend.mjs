@@ -21,10 +21,10 @@ import {
     RPC_COMPACT_HISTORY,
 } from '@listam/protocol'
 import { normalizeListItem } from '@listam/domain/list-reducer'
-import { buildListMetaItem, buildGroupMetaItem } from '@listam/domain/list-registry'
+import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
 import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
-import { TODO_LIST_TYPE } from '@listam/domain/identity'
+import { TODO_LIST_TYPE, isTodoType } from '@listam/domain/identity'
 import { buildValueReturnItem } from '@listam/domain/labels'
 import { buildPresenceItem } from '@listam/domain/presence'
 import { buildItemPlanEntry, buildListPlanEntry, toDateKey, shiftDateKey } from '@listam/domain/plan'
@@ -57,6 +57,7 @@ export function createMockBackend() {
     let bridgeStatus = { running: false, port: 0, controlKey: null, hubAddr: null, connections: 0, error: null }
     let bridgeTimer = null
     let nextId = 0
+    let nextShareId = 0
     let items = FIXTURE_TEXTS.map(([text, isDone]) => normalizeListItem({
         id: `mock-${++nextId}`,
         text,
@@ -255,26 +256,45 @@ export function createMockBackend() {
             } else if (command === RPC_CREATE_INVITE) {
                 emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
             } else if (command === RPC_SHARE_LIST) {
-                // Simulate promoting a list to its own base: stamp the registry
-                // meta-item with a baseKey (drives the shared badge) and return an
-                // invite. No real P2P — the real flow is proven by backend tests.
-                const listId = payload?.listId
-                if (!listId) return JSON.stringify({ ok: false, reason: 'bad-list' })
-                const baseKey = `mockbase${listId}`.padEnd(64, '0').slice(0, 64)
-                const existing = items.find((i) => i.listType === 'registry' && i.id === listId)
+                // Simulate promoting a list to its own base. The reserved default
+                // grocery surface is re-ID'd into an ordinary registry list, just
+                // like the real backend, so a recipient can add it alongside
+                // their own default groceries without an id collision.
+                const sourceListId = payload?.listId
+                if (!sourceListId) return JSON.stringify({ ok: false, reason: 'bad-list' })
+                const requestedType = payload?.type || payload?.listType || 'shopping'
+                const isDefaultGrocery = sourceListId === DEFAULT_LIST && !isBoardType(requestedType) && !isTodoType(requestedType)
+                const baseKey = (++nextShareId).toString(16).padStart(64, '0')
+                // Match the real backend's canonical promotion id exactly so
+                // mock navigation and owner selection exercise the same shape.
+                const listId = isDefaultGrocery ? `list-${baseKey}` : sourceListId
+                const existing = items.find((i) => isRegistryItem(i) && i.id === sourceListId)
                 const meta = buildListMetaItem({
                     id: listId,
-                    name: existing?.regName || existing?.text || listId,
-                    type: existing?.regType || 'shopping',
+                    name: payload?.name || existing?.regName || existing?.text || listId,
+                    type: existing?.regType || requestedType,
                     groupId: existing?.regGroupId ?? null,
                     order: existing?.regOrder ?? 0,
                     baseKey,
                     updatedAt: Date.now(),
                 })
+
+                if (isDefaultGrocery) {
+                    const sourceItems = items.filter((item) => item?.listId === DEFAULT_LIST && !isRegistryItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType))
+                    for (const source of sourceItems) {
+                        const promoted = { ...source, listId, listType: requestedType, baseKey, updatedAt: Date.now() }
+                        reduction.applyOperation({ type: 'add', value: promoted })
+                        emit({ type: 'add-from-backend', item: promoted, raw: JSON.stringify(promoted) })
+                    }
+                    for (const source of sourceItems) {
+                        reduction.applyOperation({ type: 'delete', value: source })
+                        emit({ type: 'delete-from-backend', item: source, raw: JSON.stringify(source) })
+                    }
+                }
                 reduction.applyOperation({ type: 'update', value: meta })
                 items = reduction.allItems()
                 emit({ type: 'update-from-backend', item: meta, raw: JSON.stringify(meta) })
-                return JSON.stringify({ ok: true, invite: `mockShareInvite${listId}`.padEnd(52, 'x'), baseKey })
+                return JSON.stringify({ ok: true, invite: `mockShareInvite${listId}`.padEnd(52, 'x'), baseKey, listId })
             } else if (command === RPC_JOIN_LIST) {
                 const invite = payload?.invite
                 if (!invite) return JSON.stringify({ ok: false, reason: 'bad-invite' })

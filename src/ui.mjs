@@ -54,6 +54,7 @@ import {
     buildSurfaceLabelItem,
     buildPeerLabelItem,
     buildBuiltinGroupItem,
+    buildBuiltinVisibilityItem,
     buildValueReturnItem,
     reduceSurfaceLabels,
     reducePeerLabels,
@@ -99,6 +100,7 @@ import {
     nextListOrder,
     nextGroupOrder,
     detectExtraLists,
+    visibleBuiltinSurfaceTypes,
 } from './registry.mjs'
 import { h, replaceChildren } from './dom.mjs'
 import { createInviteQr } from './qr-code.mjs'
@@ -320,10 +322,8 @@ function setRichCaretOffset (root, target) {
 // Grocery surfaces (the lists pane, its count, clear-done) operate on ordinary
 // grocery list items only. Board tickets live on their own board, and to-do
 // items are plain text with no grocery intelligence — both are excluded so they
-// are never shown, counted, categorized, or cleared alongside groceries. The
-// desktop has no dedicated to-do surface yet (the rail's "todo" entry is still
-// "soon"), so to-do lists synced from mobile are simply not surfaced here rather
-// than corrupting the grocery view with category grouping.
+// are never shown, counted, categorized, or cleared alongside groceries. Each
+// has its own dedicated surface when its list exists.
 function isGroceryItem(item) {
     // Registry meta-items (listType 'registry') describe lists/groups, not
     // grocery entries — they share state.items but must never render as rows.
@@ -822,6 +822,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         openDialog({ kind: 'compaction-confirm' })
     }
 
+    // Persist the lifecycle of a built-in surface through the same replicated
+    // label channel as its name and group. The domain reducer lets matching
+    // content at the same/newer timestamp resurrect a hidden surface, which is
+    // essential for untargeted voice/quick adds to the default grocery bucket.
+    function setBuiltinVisibility(listId, type, hidden, updatedAt = now()) {
+        const item = buildBuiltinVisibilityItem({ listId, type, hidden, updatedAt })
+        markLocalId(item.id)
+        return send(RPC_UPDATE, { item })
+    }
+
     const actions = {
         // The add-bar entry point. On a value-return todo surface, ratings are
         // mandatory, so defer to a small rating dialog that collects value+delay
@@ -968,21 +978,25 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             send(RPC_UPDATE, { item })
         },
         // Delete a former built-in surface. With no registry meta-item to
-        // tombstone, deletion (a) cascades away its items on (default,type) and
-        // (b) records the surfaceKey in the device-local `hiddenBuiltins` so the
-        // surface drops off this rail.
+        // tombstone, deletion cascades only its items on (default,type). Grocery
+        // visibility is synced; Board/Todo retain their legacy device-local hide.
         deleteBuiltin(listId, type) {
-            // The built-in grocery list is undeletable by design (it is the
-            // always-there landing list for voice/quick adds); board/todo
-            // surfaces remain hideable.
-            if (!isBoardType(type) && !isTodoType(type)) return
             const pred = typePredicate(type)
-            for (const item of store.getState().items.filter((i) => i.listId === listId && pred(i))) {
+            const surfaceItems = store.getState().items.filter((i) => i.listId === listId && pred(i))
+            for (const item of surfaceItems) {
                 send(RPC_DELETE, { item })
             }
-            const key = surfaceLabelKey(listId, type)
-            const hidden = Array.isArray(store.getState().preferences.hiddenBuiltins) ? store.getState().preferences.hiddenBuiltins : []
-            if (!hidden.includes(key)) store.setPreferences({ hiddenBuiltins: [...hidden, key] })
+            if (!isBoardType(type) && !isTodoType(type)) {
+                const newestItemWrite = surfaceItems.reduce(
+                    (max, item) => Math.max(max, Number(item?.updatedAt) || 0),
+                    0,
+                )
+                setBuiltinVisibility(listId, type, true, Math.max(now(), newestItemWrite + 1))
+            } else {
+                const key = surfaceLabelKey(listId, type)
+                const hidden = Array.isArray(store.getState().preferences.hiddenBuiltins) ? store.getState().preferences.hiddenBuiltins : []
+                if (!hidden.includes(key)) store.setPreferences({ hiddenBuiltins: [...hidden, key] })
+            }
             if (ui.activeListId === listId && surfaceForType(ui.activeType) === surfaceForType(type)) {
                 ui.activeListId = null
                 ui.activeType = null
@@ -1501,18 +1515,39 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // Promote ONE list to its own shared base and show its co-edit invite.
         // Distinct from share() (the whole-project invite): others who join this
         // invite get only this list, not the rest.
-        async shareList(listId) {
+        async shareList(listId, { type = null, name = null, builtin = false } = {}) {
             if (!listId) return
             let result = null
             try {
-                const reply = await send(RPC_SHARE_LIST, { listId })
+                const reply = await send(RPC_SHARE_LIST, {
+                    listId,
+                    ...(type ? { type: canonicalSurfaceType(type) } : {}),
+                    ...(name ? { name } : {}),
+                })
                 result = reply ? JSON.parse(reply) : null
             } catch { result = null }
             if (result && result.ok && result.invite) {
+                // Sharing the reserved grocery surface promotes it to a new,
+                // ordinary canonical list id. Hide the now-empty source surface
+                // through the synced lifecycle channel; recipients then see the
+                // promoted list alongside their own default groceries.
+                if (builtin && listId === DEFAULT_LIST_ID && !isBoardType(type) && !isTodoType(type)
+                    && typeof result.listId === 'string' && result.listId && result.listId !== DEFAULT_LIST_ID) {
+                    await setBuiltinVisibility(listId, type || DEFAULT_LIST_TYPE, true)
+                    // Promotion moved the owner's rows too. Keep them on that
+                    // same list instead of leaving a now-hidden default surface
+                    // selected (which would collapse to the empty-list screen).
+                    ui.activeListId = result.listId
+                    ui.activeType = canonicalSurfaceType(type || DEFAULT_LIST_TYPE)
+                    ui.activeBaseKey = result.baseKey || null
+                    ui.view = surfaceForType(ui.activeType)
+                    ui.selectedTicketId = null
+                    ui.ticketDocId = null
+                }
                 openDialog({ kind: 'share-list', invite: result.invite })
             } else if (result && result.reason === 'cannot-share-builtin') {
-                // The built-in Groceries/Board/Todo surfaces multiplex listId
-                // 'default'; sharing it would strand all three. Explain why.
+                // Legacy built-in Board/Todo surfaces still multiplex listId
+                // 'default' and cannot be promoted independently.
                 store.pushNotice(locale.i18n.t('shareList.builtinBlocked'), 'error')
             } else {
                 store.pushNotice(locale.i18n.t('shareList.failed'), 'error')
@@ -1726,12 +1761,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // --- list navigation ----------------------------------------------------
     // A rail *surface* is a (listId, type) pair. Desktop's legacy data lives on
     // a single list (listId 'default') differentiated only by listType, so that
-    // list yields three "built-in" surfaces — Groceries / Board / Todo — sharing
-    // listId 'default'. These are now presented as ordinary deletable lists
-    // inside the "general" group. Each registry-declared list is one surface on
-    // its own listId. The active surface is (ui.activeListId, ui.activeType), and
-    // item filtering keys on BOTH so board/todo on the default list never bleed
-    // into the grocery view (and vice-versa).
+    // list can still yield three compatibility surfaces — Groceries / Board /
+    // Todo — sharing listId 'default'. Only Groceries exists on a fresh project;
+    // legacy Board/Todo appear when matching content exists. User-created lists
+    // are registry-backed on their own listId. The active surface is
+    // (ui.activeListId, ui.activeType), and item filtering keys on BOTH so legacy
+    // board/todo rows never bleed into the grocery view (and vice-versa).
     const GROCERY_TYPE = 'shopping'
     // The localized default label key for a built-in surface type.
     function builtinFallbackKey(type) {
@@ -1764,27 +1799,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (navCacheState === state && navCacheRail) return navCacheRail
         const t = locale.i18n.t.bind(locale.i18n)
         const items = state.items
-        const hasOnDefault = (pred) => items.some((item) => item.listId === DEFAULT_LIST_ID && pred(item))
         // Synced rename overrides for the built-in surfaces (reduced once).
         const surfaceLabels = reduceSurfaceLabels(items)
         // Synced group placement for the built-in surfaces (surfaceKey -> groupId).
         const syncedBuiltinGroups = reduceBuiltinGroups(items)
-        // Built-ins the user has deleted on THIS device are hidden (device-local).
-        // The built-in GROCERY surface is exempt: it is undeletable AND unhideable
-        // (the always-there landing list for voice/quick adds), so a leftover
-        // hiddenBuiltins entry written by an older build is ignored.
-        const hidden = new Set(Array.isArray(state.preferences.hiddenBuiltins) ? state.preferences.hiddenBuiltins : [])
-        const builtinVisible = (type) => (!isBoardType(type) && !isTodoType(type)) || !hidden.has(surfaceLabelKey(DEFAULT_LIST_ID, type))
-
-        // The former built-ins on the default list, now general-group lists.
-        // Board follows the gate-creation-only rule: shown when boardEnabled OR a
-        // board already has tickets, so synced/existing boards stay reachable.
-        const builtins = []
-        if (builtinVisible(GROCERY_TYPE)) builtins.push({ listId: DEFAULT_LIST_ID, type: GROCERY_TYPE, name: builtinDisplayName(GROCERY_TYPE, surfaceLabels), builtin: true })
-        if (builtinVisible(BOARD_LIST_TYPE) && (state.preferences.boardEnabled || hasOnDefault((item) => isBoardType(item.listType)))) {
-            builtins.push({ listId: DEFAULT_LIST_ID, type: BOARD_LIST_TYPE, name: builtinDisplayName(BOARD_LIST_TYPE, surfaceLabels), builtin: true })
-        }
-        if (builtinVisible(TODO_LIST_TYPE)) builtins.push({ listId: DEFAULT_LIST_ID, type: TODO_LIST_TYPE, name: builtinDisplayName(TODO_LIST_TYPE, surfaceLabels), builtin: true })
+        // Groceries is the only starter surface. Board/Todo on the reserved
+        // default bucket are legacy compatibility surfaces and appear only while
+        // matching content exists. Grocery deletion is synced and content-aware;
+        // Board/Todo retain their older device-local hidden preference.
+        const builtins = visibleBuiltinSurfaceTypes(items, state.preferences.hiddenBuiltins)
+            .map((type) => ({
+                listId: DEFAULT_LIST_ID,
+                type,
+                name: builtinDisplayName(type, surfaceLabels),
+                builtin: true,
+            }))
 
         const registry = reduceRegistry(items)
         // Lists with items but no meta-item (legacy/stray) — filed under general.
@@ -5472,10 +5501,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings' && ui.dialog.builtinType) {
             // Former built-in surface (Groceries/Board/Todo): synced rename via a
-            // surface label. It lives in "general"; delete clears its items and
-            // hides it from this device (no registry meta-item to tombstone).
+            // surface label. It lives in "general" and has no registry meta-item
+            // of its own. Grocery can be promoted into an ordinary shared list;
+            // deleting it writes the synced built-in visibility marker.
             const type = ui.dialog.builtinType
             const listId = ui.dialog.listId
+            const isGroceryBuiltin = !isBoardType(type) && !isTodoType(type)
             const resolvedName = builtinDisplayName(type, reduceSurfaceLabels(state.items))
             const nameInput = h('input', { class: 'input', value: resolvedName })
             // Empty clears the override (reverts to the localized default).
@@ -5487,18 +5518,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
                 listIdentityBlock(listId, type),
+                isGroceryBuiltin ? h('h3', { class: 'category-heading label-sm' }, t('shareList.title')) : null,
+                isGroceryBuiltin ? h('div', {},
+                    h('button', {
+                        class: 'btn btn-secondary',
+                        onclick: () => {
+                            const name = nameInput.value.trim() || resolvedName
+                            closeDialog()
+                            actions.shareList(listId, { type, name, builtin: true })
+                        },
+                    }, t('shareList.button')),
+                    h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
+                ) : null,
                 valueReturnToggleRow(listId, type),
             ], [
-                // The built-in grocery surface is undeletable (the always-there
-                // landing list for voice/quick adds) — no delete affordance.
-                (isBoardType(type) || isTodoType(type)) ? h('button', {
+                h('button', {
                     class: 'btn btn-danger',
                     onclick: () => {
                         if (!ui.dialog.confirmDelete) { ui.dialog.confirmDelete = true; renderAll(); return }
                         actions.deleteBuiltin(listId, type)
                         closeDialog()
                     },
-                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')) : null,
+                }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
             queueMicrotask(() => nameInput.focus())
