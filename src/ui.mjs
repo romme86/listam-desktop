@@ -1561,12 +1561,24 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 store.pushNotice(locale.i18n.t('invite.notification.emptyManual'), 'error')
                 return
             }
+            if (store.getState().isJoining) {
+                store.pushNotice(locale.i18n.t('invite.notification.alreadyJoining'), 'error')
+                return
+            }
             closeDialog()
+            // Shared-list discovery can take as long as a project join. Keep the
+            // existing join overlay visible until the request settles so this
+            // path gives the same progress feedback as confirmJoin below.
+            store.setState({ isJoining: true })
             let result = null
             try {
                 const reply = await send(RPC_JOIN_LIST, { invite: value })
                 result = reply ? JSON.parse(reply) : null
-            } catch { result = null }
+            } catch {
+                result = null
+            } finally {
+                store.setState({ isJoining: false })
+            }
             store.pushNotice(
                 result && result.ok ? locale.i18n.t('joinList.joined') : locale.i18n.t('joinList.failed'),
                 result && result.ok ? 'success' : 'error',
@@ -1578,9 +1590,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 store.pushNotice(locale.i18n.t('invite.notification.emptyManual'), 'error')
                 return
             }
+            if (store.getState().isJoining) {
+                store.pushNotice(locale.i18n.t('invite.notification.alreadyJoining'), 'error')
+                return
+            }
             // Require a backup password so the current lists are backed up before
             // joining replaces the local base. (A backend hiccup → don't block.)
             const info = await backupRequest(RPC_LIST_BACKUPS)
+            // The password check is asynchronous; another join may have started
+            // while it was in flight.
+            if (store.getState().isJoining) {
+                store.pushNotice(locale.i18n.t('invite.notification.alreadyJoining'), 'error')
+                return
+            }
             ui.backupPasswordSet = !!(info && info.passwordSet)
             if (info && info.passwordSet === false) {
                 store.pushNotice(locale.i18n.t('backup.auto.joinNeedsPassword'), 'error')
@@ -1594,6 +1616,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             openDialog({ kind: 'join-confirm', invite: value })
         },
         confirmJoin(invite) {
+            if (store.getState().isJoining) {
+                closeDialog()
+                store.pushNotice(locale.i18n.t('invite.notification.alreadyJoining'), 'error')
+                return
+            }
             store.setState({ isJoining: true })
             send(RPC_JOIN_KEY, { key: invite })
             closeDialog()
@@ -2122,6 +2149,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // Expose the active view so panes can scope layout rules without a
         // wrapper element (children render directly into `main`).
         main.dataset.view = ui.ticketDocId ? 'doc' : ui.view
+        // Joining is a workspace-wide operation. Render the same loading pane
+        // regardless of which surface launched it (list joins normally start
+        // from Peers, while project joins may start from any pane).
+        if (state.isJoining) return replaceChildren(main, renderJoinOverlay(state))
         if (ui.ticketDocId) return renderTicketFull(state)
         if (ui.view === 'overview') return renderOverviewPane(state)
         // A list surface ('lists' | 'board' | 'todo') needs an active list; with
@@ -2809,7 +2840,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ? h('button', { class: 'btn btn-secondary', onclick: actions.clearDone }, t('main.summary.clearDone'))
                     : null,
             ),
-            state.isJoining ? renderJoinOverlay(state) : null,
             items.length === 0 ? renderEmptyState() : renderItems(state, items),
         )
     }
@@ -2861,7 +2891,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ? h('button', { class: 'btn btn-secondary', onclick: actions.clearDone }, t('main.summary.clearDone'))
                     : null,
             ),
-            state.isJoining ? renderJoinOverlay(state) : null,
             items.length === 0
                 ? renderEmptyState()
                 : h('div', { class: 'item-rows' },
@@ -6040,6 +6069,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (ui.ticketDocId || ui.selectedTicketId) { actions.closeTicket(); return }
             return
         }
+        // The loading pane owns the workspace until the non-cancellable join
+        // settles. In particular, do not let the command palette start another
+        // join behind it.
+        if (store.getState().isJoining) return
         const commandPaletteKey = (event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')
         if (!shouldHandleAppShortcut({
             drawerOpen: mountedDrawerKind !== null,
