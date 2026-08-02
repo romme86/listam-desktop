@@ -200,6 +200,7 @@ test('sync snapshot decoder preserves arrays and understands structured buckets'
     assert.deepEqual(decodeSyncListSnapshot([{ id: 'a' }]), {
         mode: 'legacy',
         items: [{ id: 'a' }],
+        baseKey: null,
     })
     assert.deepEqual(decodeSyncListSnapshot({
         list: [{ id: 'p', listId: PLAN_LIST_ID, listType: PLAN_LIST_TYPE }],
@@ -210,7 +211,54 @@ test('sync snapshot decoder preserves arrays and understands structured buckets'
         items: [{ id: 'p', listId: PLAN_LIST_ID, listType: PLAN_LIST_TYPE }],
         listId: PLAN_LIST_ID,
         listType: PLAN_LIST_TYPE,
+        baseKey: null,
     })
+})
+
+test('shared restart snapshot restores base-scoped rows and later mutations hit them', () => {
+    const store = createDesktopStore()
+    const SHARED = 'ab'.repeat(32)
+    const sharedRow = item('same-id', 'Milk', {
+        listId: 'spesa-2',
+        listType: 'shopping',
+        updatedAt: 2,
+    })
+
+    // The durable shared view stores ordinary rows; the transport carries the
+    // base key once on the exact snapshot envelope during restart catch-up.
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: {
+            list: [sharedRow],
+            listId: 'spesa-2',
+            listType: 'shopping',
+            baseKey: SHARED,
+        },
+    })
+    assert.equal(store.getState().items[0].baseKey, SHARED)
+
+    // Before the personal registry route arrives, a late untagged tombstone for
+    // the pre-share copy must not match the restored shared-base identity.
+    store.applyClientEvent({ type: 'delete-from-backend', item: { ...sharedRow, updatedAt: 3 } })
+    assert.equal(store.getState().items.some((entry) => entry.baseKey === SHARED), true)
+
+    store.applyClientEvent({
+        type: 'update-from-backend',
+        item: { ...sharedRow, text: 'Oat milk', baseKey: SHARED, updatedAt: 4 },
+    })
+    assert.equal(store.getState().items.find((entry) => entry.baseKey === SHARED)?.text, 'Oat milk')
+
+    // An empty exact snapshot clears only this shared named bucket.
+    store.applyClientEvent({
+        type: 'add-from-backend',
+        item: item('personal', 'Bread', { updatedAt: 5 }),
+    })
+    store.applyClientEvent({
+        type: 'sync-list',
+        items: { list: [], listId: 'spesa-2', listType: 'shopping', baseKey: SHARED },
+    })
+    assert.equal(store.getState().items.some((entry) => entry.listId === 'spesa-2'), false)
+    assert.equal(store.getState().items.some((entry) => entry.text === 'Bread'), true)
 })
 
 test('store keeps items across every list bucket, not just default', () => {

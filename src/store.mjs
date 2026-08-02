@@ -43,21 +43,32 @@ export function reductionFromItems(items) {
 }
 
 export function decodeSyncListSnapshot(value) {
-    if (Array.isArray(value)) return { mode: 'legacy', items: value }
+    if (Array.isArray(value)) return { mode: 'legacy', items: value, baseKey: null }
     if (!value || typeof value !== 'object' || !Array.isArray(value.list)) return null
 
+    const nonEmptyString = (candidate) => (
+        typeof candidate === 'string' && candidate.length > 0 ? candidate : null
+    )
+    const baseKey = nonEmptyString(value.baseKey)
     const first = value.list.find((item) => item && typeof item === 'object')
-    const listId = typeof value.listId === 'string' && value.listId
-        ? value.listId
-        : (typeof first?.listId === 'string' ? first.listId : null)
-    const listType = typeof value.listType === 'string' && value.listType
-        ? value.listType
-        : (typeof first?.listType === 'string' ? first.listType : null)
+    const listId = nonEmptyString(value.listId) ?? nonEmptyString(first?.listId)
+    const listType = nonEmptyString(value.listType) ?? nonEmptyString(first?.listType)
 
     // Older shared-base envelopes carried only { list, baseKey }. Infer their
     // bucket from a non-empty list; otherwise retain the legacy array behavior.
-    if (!listId || !listType) return { mode: 'legacy', items: value.list }
-    return { mode: 'bucket', listId, listType, items: value.list }
+    if (!listId || !listType) return { mode: 'legacy', items: value.list, baseKey }
+    return { mode: 'bucket', listId, listType, items: value.list, baseKey }
+}
+
+// A shared SYNC_LIST envelope carries its base identity once, outside the row
+// array. Materialize it onto every row before Redux keys the item by
+// (baseKey,listId,id); otherwise a later tagged update/delete cannot find the
+// row restored during restart catch-up.
+function materializeSnapshotBase(snapshot) {
+    if (!snapshot?.baseKey) return snapshot?.items ?? []
+    return snapshot.items.map((item) => (
+        item && typeof item === 'object' ? { ...item, baseKey: snapshot.baseKey } : item
+    ))
 }
 
 function sameSnapshot(left, right) {
@@ -366,16 +377,17 @@ export function createDesktopStore(initial = {}) {
             case 'sync-list': {
                 const snapshot = decodeSyncListSnapshot(event.items)
                 if (!snapshot) return 'sync-list'
+                const snapshotItems = materializeSnapshotBase(snapshot)
                 transaction(() => {
                     if (snapshot.mode === 'legacy') {
-                        reduxStore.dispatch(listsActions.selectedListItemsSynced(snapshot.items))
-                        reduxStore.dispatch(labelsActions.labelsApplied(snapshot.items))
-                        reduxStore.dispatch(presenceActions.presenceApplied(snapshot.items))
+                        reduxStore.dispatch(listsActions.selectedListItemsSynced(snapshotItems))
+                        reduxStore.dispatch(labelsActions.labelsApplied(snapshotItems))
+                        reduxStore.dispatch(presenceActions.presenceApplied(snapshotItems))
                     } else {
                         const bucket = {
                             listId: snapshot.listId,
                             listType: snapshot.listType,
-                            items: snapshot.items,
+                            items: snapshotItems,
                         }
                         reduxStore.dispatch(listsActions.selectedListItemsSynced(bucket))
                         reduxStore.dispatch(labelsActions.labelsSnapshotApplied(bucket))

@@ -320,11 +320,78 @@ test('desktop contract: share one list to its own base, peer joins and co-edits'
     )
     assert.equal(joined.listId, 'groceries', 'guest adopted the canonical shared listId')
 
+    // The owner can keep editing immediately after a writer joins. Deliberately
+    // omit baseKey: this is the stale selected-surface state older desktops sent
+    // after sharing a named list, so the backend must recover from listId.
+    const ownerAdd = await host.request('add', {
+        text: 'Owner after join',
+        listId: 'groceries',
+        listType: 'shopping',
+    })
+    assert.equal(ownerAdd.ok, true, `owner add after join was refused: ${JSON.stringify(ownerAdd)}`)
+    const ownerAfterJoin = await host.waitFor(
+        (d) => d.items.some((i) => i.baseKey === baseKey && i.text === 'Owner after join'),
+        { timeoutMs: 30_000 },
+    )
+    assert.ok(ownerAfterJoin.items.some((i) => i.baseKey === baseKey && i.text === 'Owner after join'),
+        'owner write landed in the shared base')
+
     if (process.env.LISTAM_SYNC_FULL === '1') {
         await guest.request('add', { text: 'Eggs', listId: joined.listId, listType: 'shopping', baseKey })
         const hostConverged = await host.waitFor((d) => d.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'))
         assert.ok(hostConverged.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), 'host converged on the guest co-edit')
     }
+})
+
+test('desktop contract: explicit catch-up restores a shared list after backend restart', { timeout: 180_000 }, async (t) => {
+    const testnet = await createTestnet(1)
+    const dir = mkdtempSync(join(tmpdir(), 'listam-share-restart-'))
+    const drivers = []
+    t.after(async () => {
+        for (const driver of drivers) await driver.stop()
+        await testnet.destroy()
+        rmSync(dir, { recursive: true, force: true })
+    })
+
+    const first = new Driver(dir, testnet.bootstrap)
+    drivers.push(first)
+    await first.ready()
+
+    await first.request('add', { text: 'Milk', listId: 'spesa-2', listType: 'shopping' })
+    const shared = await first.request('share-list', { listId: 'spesa-2' })
+    assert.equal(shared.ok, true, `share-list failed: ${JSON.stringify(shared)}`)
+    await first.request('add', {
+        text: 'Bread',
+        listId: 'spesa-2',
+        listType: 'shopping',
+        baseKey: shared.baseKey,
+    })
+    await first.waitFor((dump) => (
+        dump.items.filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2').length >= 2
+    ), { timeoutMs: 30_000 })
+    await first.stop()
+
+    const restarted = new Driver(dir, testnet.bootstrap)
+    drivers.push(restarted)
+    await restarted.ready()
+
+    // Discard every one-shot boot event, exactly as a renderer/mobile listener
+    // that attaches late would. RPC_REQUEST_SYNC alone must fully hydrate it.
+    await restarted.request('clear-view')
+    await restarted.request('sync')
+    const caughtUp = await restarted.request('dump')
+    const restored = caughtUp.items
+        .filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2')
+        .map((item) => item.text)
+        .sort()
+    assert.deepEqual(restored, ['Bread', 'Milk'])
+
+    const sharedSnapshot = caughtUp.syncSnapshots.find((snapshot) => (
+        snapshot && !Array.isArray(snapshot) && snapshot.baseKey === shared.baseKey
+    ))
+    assert.equal(sharedSnapshot?.listId, 'spesa-2')
+    assert.equal(sharedSnapshot?.listType, 'shopping')
+    assert.deepEqual(sharedSnapshot.list.map((item) => item.text).sort(), ['Bread', 'Milk'])
 })
 
 // Cross-device auto-join: your TWO devices share one personal base (B joins A's

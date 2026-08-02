@@ -110,6 +110,7 @@ import { createCompactionOps } from './ui/compaction.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createDrawerDomState } from './ui/drawer-dom-state.mjs'
 import { shouldHandleAppShortcut } from './ui/keyboard-shortcuts.mjs'
+import { adoptSharedListRoute } from './ui/shared-route.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -1527,6 +1528,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 result = reply ? JSON.parse(reply) : null
             } catch { result = null }
             if (result && result.ok && result.invite) {
+                // A named list is already selected while its registry row still
+                // describes the personal base. Adopt the authoritative route
+                // from this reply now, so an immediate add cannot fall through
+                // a not-yet-reconciled listId index in the backend.
+                adoptSharedListRoute(ui, { sourceListId: listId, result })
                 // Sharing the reserved grocery surface promotes it to a new,
                 // ordinary canonical list id. Hide the now-empty source surface
                 // through the synced lifecycle channel; recipients then see the
