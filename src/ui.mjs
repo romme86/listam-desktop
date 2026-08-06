@@ -108,8 +108,8 @@ import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
-import { createDrawerDomState } from './ui/drawer-dom-state.mjs'
-import { shouldHandleAppShortcut } from './ui/keyboard-shortcuts.mjs'
+import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
+import { shouldHandleAppShortcut, isTypingKeystroke, isTypingTarget } from './ui/keyboard-shortcuts.mjs'
 import { adoptSharedListRoute } from './ui/shared-route.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
@@ -2141,11 +2141,41 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     }
 
     let prevPane = null
+    // Identity of the pane on screen. Both the entrance animation and the
+    // focus/caret carry below key off it: a swap is a different surface (no
+    // entrance replay is owed to a re-render, no draft is owed to a new pane).
+    function mainPaneKey(state) {
+        if (state.isJoining) return 'joining'
+        const surface = ui.ticketDocId ? `doc:${ui.ticketDocId}` : `${ui.view}:${ui.activeListId}`
+        return `${surface}:${state.preferences.isGridView}`
+    }
+    // The main pane is rebuilt wholesale on every store notify, exactly like the
+    // drawer and the dialog — and its panes hold real fields (the leaf-bridge
+    // port, the voice model/port/locale, the Wi-Fi SSID/passphrase, the server
+    // pairing code and name). Without this, a background peer or presence update
+    // detached the field being typed into mid-word: focus fell to <body>, the
+    // draft was replaced by the canonical value, and the NEXT keystroke was read
+    // as a global shortcut instead of text. See ./ui/surface-dom-state.mjs.
+    // No scrollSelector: the main pane scrolls the document, not a child of it.
+    const mainDom = createSurfaceDomState()
     function renderMain(state) {
+        const paneKey = mainPaneKey(state)
+        // Capture while the outgoing subtree is still attached. Restoration after
+        // the swap is synchronous, so several store notifications in one turn can
+        // never leave a gap where the next keystroke lands on <body>.
+        const snapshot = mainDom.capture(main, paneKey)
+        renderMainPane(state, paneKey)
+        mainDom.commit(paneKey)
+        mainDom.restore(main, snapshot, {
+            restoreContentEditable: (field) => {
+                if (ui.blockCaret != null) setRichCaretOffset(field, ui.blockCaret)
+            },
+        })
+    }
+    function renderMainPane(state, paneKey) {
         // Pane swaps (view change, list/grid flip, entering the full-screen
         // ticket doc) get an entrance; ordinary state updates re-render in place
         // without re-animating.
-        const paneKey = `${ui.ticketDocId ? `doc:${ui.ticketDocId}` : `${ui.view}:${ui.activeListId}`}:${state.preferences.isGridView}`
         if (prevPane !== paneKey) {
             prevPane = paneKey
             main.classList.remove('pane-enter')
@@ -3356,7 +3386,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // Which drawer kind is currently mounted — the slide-in animation replays
     // only when this changes (opening), never on routine re-renders.
     let mountedDrawerKind = null
-    const drawerDom = createDrawerDomState()
+    const drawerDom = createSurfaceDomState({ scrollSelector: '.detail-split-scroll, .inspector-body' })
     function renderDrawerHost(state) {
         const show = ui.view === 'board' && !ui.ticketDocId && ui.activeListId != null
         const item = show ? selectedTicket(state) : null
@@ -6056,17 +6086,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     }
 
     // --- keyboard-first actions ----------------------------------------------
-    function isTypingTarget(target) {
-        if (!(target instanceof HTMLElement)) return false
-        // contentEditable surfaces (the WYSIWYG markdown/callout block editors)
-        // are typing targets too — without this the global single-key shortcuts
-        // (t→theme, ?→help, [ ]→switch list, n/g/… ) fire while the user is
-        // typing into a block, flipping the theme or navigating away from the
-        // ticket mid-edit. isContentEditable is also true for any node nested
-        // inside an editable host, so a click into a child element still counts.
-        return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-    }
-
     root.ownerDocument.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
             if (ui.dialog) { closeDialog(); return }
@@ -6083,7 +6102,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (!shouldHandleAppShortcut({
             drawerOpen: mountedDrawerKind !== null,
             dialogOpen: !!ui.dialog,
-            typingTarget: isTypingTarget(event.target),
+            typingTarget: isTypingKeystroke(event, root.ownerDocument.activeElement),
             commandPaletteKey,
         })) return
 
@@ -6176,8 +6195,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         migrateBuiltinGroups()
         // Materialize the mandated default "general" group once we're writable.
         maybeEnsureGeneralGroup()
-        // If a field inside the drawer/inspector holds focus (editing the title,
-        // note, etc.), don't let the row focus-restore below yank focus (and the
+        // If anything inside the drawer/inspector holds focus (a button as much
+        // as a field), don't let the row focus-restore below yank focus (and the
         // scroll position) back to the list row on a background re-render.
         const keepDrawerFocus = drawerHost.contains(main.ownerDocument.activeElement)
         renderNav(state)
@@ -6186,7 +6205,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         renderHints(state)
         renderDialog(state)
         renderNotices(state)
-        if (ui.focusedItemId && !ui.editingItemId && !keepDrawerFocus) {
+        // Same rule for every OTHER field in the app — the add bar, an inline
+        // rename in the rail, a dialog input, a block editor. Each of those
+        // surfaces restores its own focus across a rebuild; the row restore runs
+        // after all of them, so without this check it would take focus straight
+        // back off the user mid-word. Read AFTER the renders: the field that
+        // holds focus now is the rebuilt one, not the detached original.
+        const keepFieldFocus = isTypingTarget(main.ownerDocument.activeElement)
+        if (ui.focusedItemId && !ui.editingItemId && !keepDrawerFocus && !keepFieldFocus) {
             // preventScroll: re-rendering the list must never scroll it.
             root.querySelector(`[data-item-id="${CSS.escape(ui.focusedItemId)}"]`)?.focus?.({ preventScroll: true })
         }

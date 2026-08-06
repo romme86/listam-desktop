@@ -1,13 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createDrawerDomState } from '../src/ui/drawer-dom-state.mjs'
+import { createSurfaceDomState } from '../src/ui/surface-dom-state.mjs'
 
-function fakeField ({ tagName = 'INPUT', type = 'text', value = '', checked } = {}) {
+const DRAWER_SCROLL = '.detail-split-scroll, .inspector-body'
+
+function fakeField ({ tagName = 'INPUT', type = 'text', value = '', checked, id, placeholder } = {}) {
     return {
         tagName,
         type,
         value,
         ...(checked == null ? {} : { checked }),
+        ...(id == null ? {} : { id }),
+        ...(placeholder == null ? {} : { placeholder }),
         selectionStart: value.length,
         selectionEnd: value.length,
         focusCount: 0,
@@ -37,7 +41,7 @@ function fakeHost ({ fields = [], focused = null, scrollTops = [0] } = {}) {
 }
 
 test('a same-item drawer rebuild keeps the focused value, caret and scroll', () => {
-    const dom = createDrawerDomState()
+    const dom = createSurfaceDomState({ scrollSelector: DRAWER_SCROLL })
     const typing = fakeField({ value: 'half typed' })
     typing.selectionStart = 4
     typing.selectionEnd = 7
@@ -57,7 +61,7 @@ test('a same-item drawer rebuild keeps the focused value, caret and scroll', () 
 })
 
 test('an unfocused drawer field follows canonical state', () => {
-    const dom = createDrawerDomState()
+    const dom = createSurfaceDomState({ scrollSelector: DRAWER_SCROLL })
     dom.commit('ticket:default:a')
     const snapshot = dom.capture(fakeHost({ fields: [fakeField({ value: 'old' })] }), 'ticket:default:a')
     const rebuilt = fakeField({ value: 'from peer' })
@@ -69,7 +73,7 @@ test('an unfocused drawer field follows canonical state', () => {
 })
 
 test('switching item, switching surface, or closing never carries focus', () => {
-    const dom = createDrawerDomState()
+    const dom = createSurfaceDomState({ scrollSelector: DRAWER_SCROLL })
     const focused = fakeField({ value: 'draft' })
     const host = fakeHost({ fields: [focused], focused })
     dom.commit('ticket:default:a')
@@ -81,7 +85,7 @@ test('switching item, switching surface, or closing never carries focus', () => 
 })
 
 test('contenteditable focus is restored synchronously through its caret hook', () => {
-    const dom = createDrawerDomState()
+    const dom = createSurfaceDomState({ scrollSelector: DRAWER_SCROLL })
     const rich = fakeRichField()
     dom.commit('ticket:default:a')
     const snapshot = dom.capture(fakeHost({ fields: [rich], focused: rich }), 'ticket:default:a')
@@ -97,7 +101,7 @@ test('contenteditable focus is restored synchronously through its caret hook', (
 })
 
 test('a focused checkbox keeps its in-progress checked state', () => {
-    const dom = createDrawerDomState()
+    const dom = createSurfaceDomState({ scrollSelector: DRAWER_SCROLL })
     const checkbox = fakeField({ type: 'checkbox', checked: true })
     dom.commit('ticket:default:a')
     const snapshot = dom.capture(fakeHost({ fields: [checkbox], focused: checkbox }), 'ticket:default:a')
@@ -107,4 +111,64 @@ test('a focused checkbox keeps its in-progress checked state', () => {
 
     assert.equal(rebuilt.checked, true)
     assert.equal(rebuilt.focusCount, 1)
+})
+
+// --- the main pane -------------------------------------------------------
+// Same machinery, no scroll container: the main pane scrolls the document.
+
+test('a background re-render of the same pane keeps the field being typed into', () => {
+    const dom = createSurfaceDomState()
+    // The leaf-bridge port on the Peers pane: a presence heartbeat or a peer
+    // count change rebuilds the pane every few seconds while it is open.
+    const typing = fakeField({ type: 'number', value: '9995' })
+    dom.commit('peers:null:false')
+    const snapshot = dom.capture(fakeHost({ fields: [typing], focused: typing }), 'peers:null:false')
+
+    const rebuilt = fakeField({ type: 'number', value: '9993' })
+    dom.commit('peers:null:false')
+    dom.restore(fakeHost({ fields: [rebuilt] }), snapshot)
+
+    assert.equal(rebuilt.value, '9995')
+    assert.equal(rebuilt.focusCount, 1)
+})
+
+test('a pane with no scroll container captures no scroll offsets', () => {
+    const dom = createSurfaceDomState()
+    const typing = fakeField({ value: 'code' })
+    dom.commit('peers:null:false')
+    const snapshot = dom.capture(fakeHost({ fields: [typing], focused: typing, scrollTops: [77] }), 'peers:null:false')
+
+    assert.deepEqual(snapshot.scrollTops, [])
+    // And restoring must not touch the regions it never captured.
+    const after = fakeHost({ fields: [fakeField({ value: 'x' })], scrollTops: [0] })
+    dom.commit('peers:null:false')
+    dom.restore(after, snapshot)
+    assert.equal(after.regions[0].scrollTop, 0)
+})
+
+test('switching pane drops the draft instead of pasting it into the next pane', () => {
+    const dom = createSurfaceDomState()
+    const typing = fakeField({ value: 'half typed' })
+    const host = fakeHost({ fields: [typing], focused: typing })
+    dom.commit('peers:null:false')
+
+    assert.equal(dom.capture(host, 'lists:default:false'), null)
+})
+
+// Field identity inside a surface is positional, and a peer can change the shape
+// of a pane while you type — a new list section, a server row, an item added
+// remotely. Restoring by index alone would then paste the draft into a stranger.
+test('a field that changed identity at that index does not inherit the draft', () => {
+    const dom = createSurfaceDomState()
+    const code = fakeField({ value: 'invite-code', placeholder: 'Pairing code' })
+    dom.commit('peers:null:false')
+    const snapshot = dom.capture(fakeHost({ fields: [code], focused: code }), 'peers:null:false')
+
+    // A section above it appeared, so index 0 is now somebody else's field.
+    const stranger = fakeField({ value: '', placeholder: 'Wi-Fi passphrase' })
+    dom.commit('peers:null:false')
+    dom.restore(fakeHost({ fields: [stranger] }), snapshot)
+
+    assert.equal(stranger.value, '')
+    assert.equal(stranger.focusCount, 0)
 })
