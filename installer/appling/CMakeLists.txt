@@ -16,14 +16,14 @@ set(LISTAM_VERSION "0.19.13" CACHE STRING "App version (kept in sync with packag
 # Store rejects the upload. The placeholder only lets the package build locally.
 # cmake-pear feeds this to the AppxManifest as-is; build-windows.ps1 patches the
 # remaining identity fields, which cmake-pear derives from the app name.
-set(LISTAM_PUBLISHER "CN=SayNode" CACHE STRING "MSIX Publisher identity (Partner Center)")
+set(LISTAM_PUBLISHER "CN=UNCONFIGURED" CACHE STRING "MSIX Publisher identity (Partner Center)")
 
 add_pear_appling(
   listam_appling
   ID "${LISTAM_ID}"
   NAME "Listam"
   VERSION ${LISTAM_VERSION}
-  AUTHOR "SayNode"
+  AUTHOR "(É) UN CASINO"
   DESCRIPTION "Local-first shared lists on the Pear runtime"
 
   MACOS_IDENTIFIER ch.saynode.listam.desktop

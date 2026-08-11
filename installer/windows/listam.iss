@@ -1,3 +1,6 @@
+﻿; NOTE: this file must keep its UTF-8 BOM. Inno Setup reads a script as the
+; system ANSI codepage unless a BOM says otherwise, which would mangle the
+; accent in AppPublisher.
 ; Inno Setup script for the Listam Windows appling.
 ;
 ; Why an installer rather than shipping Listam.exe on its own: libpear loads
@@ -33,12 +36,12 @@ AppId={{7C6F9E4A-2B31-4D8E-9F5C-1A0E3D7B62F4}
 AppName=Listam
 AppVersion={#ListamVersion}
 AppVerName=Listam {#ListamVersion}
-AppPublisher=SayNode
+AppPublisher=(É) UN CASINO
 AppPublisherURL=https://listam.ch
 AppSupportURL=https://listam.ch
 AppUpdatesURL=https://listam.ch/downloads
 VersionInfoVersion={#ListamVersion}
-VersionInfoCompany=SayNode
+VersionInfoCompany=(É) UN CASINO
 VersionInfoDescription=Listam installer
 VersionInfoProductName=Listam
 

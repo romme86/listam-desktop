@@ -295,15 +295,14 @@ try {
     }
     Set-Content -Path $manifest -Value $xml -Encoding UTF8 -NoNewline
 
-    # An empty Publisher produces a manifest MakeAppx accepts but the Store
-    # rejects, so surface it here rather than after an upload round trip.
-    if ($xml -notmatch '<Identity[\s\S]*?Publisher="CN=') {
-      Write-Warning 'AppxManifest Publisher is not a CN=... identity — this package is NOT Store-ready. Pass -PackagePublisher "CN=<your Partner Center identity>".'
-    }
+    # Warn on what the caller omitted rather than on what the manifest contains:
+    # a placeholder like CN=UNCONFIGURED is shaped exactly like a real identity,
+    # so inspecting the file would happily pass a package the Store will reject.
     foreach ($missing in @(
-      @{ n = '-PackageIdentityName'; v = $PackageIdentityName },
+      @{ n = '-PackageIdentityName';  v = $PackageIdentityName },
+      @{ n = '-PackagePublisher';     v = $PackagePublisher },
       @{ n = '-PublisherDisplayName'; v = $PublisherDisplayName })) {
-      if (-not $missing.v) { Write-Warning "$($missing.n) not supplied — the package will carry a placeholder identity and cannot be submitted as is." }
+      if (-not $missing.v) { Write-Warning "$($missing.n) not supplied — the package carries a placeholder identity and CANNOT be submitted. Copy the value from Partner Center -> Product management -> Product Identity." }
     }
 
     # Call MakeAppx directly rather than building listam_appling_package.

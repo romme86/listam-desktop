@@ -1,4 +1,10 @@
-// Windows resources for Listam.exe, filled in by CMake (see CMakeLists.txt).
+﻿// Windows resources for Listam.exe, filled in by CMake (see CMakeLists.txt).
+//
+// THIS FILE MUST KEEP ITS UTF-8 BOM. Resource compilers assume the system
+// codepage unless a BOM says otherwise, so without it the accent in the company
+// name is mangled in the shipped binary. configure_file copies the bytes
+// through, so the BOM survives into the generated .rc. Verify after a build by
+// reading CompanyName back out of Listam.exe, not by eyeballing this file.
 //
 // cmake-pear wires an icon into the MSIX package only, and adds no VERSIONINFO
 // at all, so a plain build produces an anonymous executable: no publisher, no
@@ -21,11 +27,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0"  // US English, Unicode
         BEGIN
-            VALUE "CompanyName",      "SayNode"
+            VALUE "CompanyName",      "(É) UN CASINO"
             VALUE "FileDescription",  "Listam - local-first shared lists"
             VALUE "FileVersion",      "@LISTAM_VERSION@"
             VALUE "InternalName",     "Listam"
-            VALUE "LegalCopyright",   "Copyright (C) SayNode"
+            VALUE "LegalCopyright",   "Copyright (C) (É) UN CASINO"
             VALUE "OriginalFilename", "Listam.exe"
             VALUE "ProductName",      "Listam"
             VALUE "ProductVersion",   "@LISTAM_VERSION@"
