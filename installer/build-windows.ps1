@@ -444,6 +444,39 @@ if ($Msix) {
   if (-not (Test-Path $msixBuilt)) { throw "MSIX target succeeded but $msixBuilt is missing" }
   $msixOut = Join-Path $distDir "Listam-$Version-win32-x64.msix"
   Copy-Item $msixBuilt $msixOut -Force
+
+  # Read the manifest back out of the finished package rather than trusting the
+  # copy we fed in: MakeAppx rewrites it while packing, so what ships can differ
+  # from what we generated. An .msix is an ordinary zip container.
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zipArchive = [IO.Compression.ZipFile]::OpenRead($msixOut)
+  try {
+    $entry = $zipArchive.Entries | Where-Object { $_.FullName -eq 'AppxManifest.xml' }
+    if (-not $entry) { throw 'packaged MSIX has no AppxManifest.xml' }
+    $reader = New-Object IO.StreamReader($entry.Open())
+    try { $packed = $reader.ReadToEnd() } finally { $reader.Dispose() }
+  } finally { $zipArchive.Dispose() }
+
+  $identity = [regex]::Match($packed, '<Identity[^>]*Name="([^"]*)"')
+  $publisher = [regex]::Match($packed, '<Identity[^>]*Publisher="([^"]*)"')
+  $display = [regex]::Match($packed, '<PublisherDisplayName>([^<]*)</PublisherDisplayName>')
+  Write-Host '   packaged identity:'
+  Write-Host "     Name                 = $($identity.Groups[1].Value)"
+  Write-Host "     Publisher            = $($publisher.Groups[1].Value)"
+  Write-Host "     PublisherDisplayName = $($display.Groups[1].Value)"
+
+  if ($PackageIdentityName -and $identity.Groups[1].Value -ne $PackageIdentityName) {
+    throw "packaged Identity Name is '$($identity.Groups[1].Value)', expected '$PackageIdentityName' — the manifest patch did not survive packaging"
+  }
+  if ($PackagePublisher -and $publisher.Groups[1].Value -ne $PackagePublisher) {
+    throw "packaged Publisher is '$($publisher.Groups[1].Value)', expected '$PackagePublisher'"
+  }
+
+  # MakeAppx has been observed emitting an empty <Resources/>, which Store
+  # validation may reject even though MakeAppx itself accepts it.
+  if ($packed -notmatch '<Resource\b') {
+    Write-Warning 'packaged manifest declares no <Resource> element — if the Store rejects the manifest, this is the first thing to check.'
+  }
 }
 
 $mb = { param($p) '{0:N1} MB' -f ((Get-Item $p).Length / 1MB) }
