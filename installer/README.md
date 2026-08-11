@@ -138,6 +138,21 @@ Both the script and the CI job package the pair.
   `signtool` and `MakeAppx` steps as **ALL** targets, so a plain build fails on
   any machine without a code-signing certificate in its store. Build
   `--target listam_appling`.
+- **MAX_PATH.** `libappling`'s test fixtures nest a 64-character key directory
+  inside a `Pear Runtime.app/Contents/MacOS` path, which overflows Windows'
+  260-character limit: git aborts the checkout with `Filename too long`
+  minutes into the configure. `git config --global core.longpaths true`, or
+  pass `-FetchBase C:\listam-deps` to shorten the dependency path instead.
+  The script refuses to start without one of the two.
+- **C11 atomics.** `bare` sets `C_STANDARD 11` and includes `<stdatomic.h>`,
+  but MSVC keeps C11 atomics behind `/experimental:c11atomics` — without it
+  every bare translation unit fails with
+  `C1189: "C atomic support is not enabled"`. The script passes it via
+  `CMAKE_C_FLAGS`, restating MSVC's stock `/DWIN32 /D_WINDOWS` because
+  assigning that variable replaces the defaults instead of appending.
+- **CRT mismatch.** `cmake-pear` compiles the appling with `/MT` while
+  dependencies default to `/MD`; bare's link options assume the static CRT.
+  The script puts every target on it with `CMAKE_MSVC_RUNTIME_LIBRARY`.
 - **MSIX needs a signed cert to install at all**, which is why the zip is the
   default deliverable. `-Msix` is there for when a Developer ID exists.
 - The `.exe` is unsigned, so SmartScreen shows "Windows protected your PC" →

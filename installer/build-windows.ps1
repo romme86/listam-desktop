@@ -129,7 +129,20 @@ try {
       '-B', 'build',
       '-G', 'Ninja',
       "-DCMAKE_BUILD_TYPE=$Configuration",
-      "-DLISTAM_VERSION=$Version"
+      "-DLISTAM_VERSION=$Version",
+
+      # bare sets C_STANDARD 11 and includes <stdatomic.h>, but MSVC keeps C11
+      # atomics behind /experimental:c11atomics — without it every bare
+      # translation unit dies on "C atomic support is not enabled". The two
+      # /D defines are MSVC's stock CMAKE_C_FLAGS, restated because assigning
+      # this variable replaces the default rather than appending to it.
+      '-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS /experimental:c11atomics',
+
+      # cmake-pear compiles the appling itself with /MT while dependencies
+      # default to /MD, which shows up as a wall of D9025 overrides and then
+      # as duplicate-symbol grief at link time. bare's own link options assume
+      # the static CRT, so put every target on it.
+      '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
     )
     if ($Id) { $cmakeArgs += "-DLISTAM_ID=$Id" }
     # cmake-fetch declares dependencies without an explicit SOURCE_DIR, so the
