@@ -1,0 +1,80 @@
+# Builds the Windows appling (Listam.exe) on a Windows runner.
+#
+# The appling is a small native shell that bootstraps the Pear runtime itself
+# and then boots the app from its P2P drive, so Windows users no longer have to
+# install Pear separately. It embeds only a drive key — the app payload travels
+# over the swarm — so this job needs neither the listam-packages sibling nor a
+# `pear stage`, unlike the lint+test job in ci.yml.
+#
+# Manual dispatch only: the build fetches well over a gigabyte of native
+# dependencies and is not a gate on ordinary pushes.
+name: windows-appling
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: 'z32 drive key to embed (blank = production default in CMakeLists.txt)'
+        required: false
+        type: string
+      version:
+        description: 'Version stamped into the exe (blank = version in package.json)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    name: Listam.exe (win32-x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # bare switches to ASM_NASM on win32-x64. The runner image ships neither
+      # nasm nor ninja, and without them cmake fails deep inside a dependency
+      # with a misleading message. MSVC needs no setup action — the build
+      # script enters the VS environment itself.
+      - name: Install build tools
+        run: choco install nasm ninja -y --no-progress
+
+      - name: Add NASM to PATH
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      # Single entry point: CI runs exactly what a developer runs locally.
+      # Keep build logic in build-windows.ps1, never inline here.
+      - name: Build
+        shell: pwsh
+        env:
+          LISTAM_ID: ${{ inputs.id }}
+          LISTAM_VERSION: ${{ inputs.version }}
+        run: |
+          $params = @{}
+          if ($env:LISTAM_ID)      { $params['Id']      = $env:LISTAM_ID }
+          if ($env:LISTAM_VERSION) { $params['Version'] = $env:LISTAM_VERSION }
+          installer\build-windows.ps1 @params
+
+      - name: Resolve artifact name
+        id: meta
+        shell: pwsh
+        env:
+          LISTAM_VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:LISTAM_VERSION
+          if (-not $version) {
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      # Upload the staged directory rather than the zip: the artifact download
+      # is itself a zip, and nesting one inside the other just makes users
+      # unpack twice before they reach Listam.exe.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Listam-${{ steps.meta.outputs.version }}-win32-x64
+          path: installer/dist/stage-win32-x64/
+          if-no-files-found: error
