@@ -309,9 +309,11 @@ if ($SignThumbprint) {
   Write-Warning 'building UNSIGNED — Windows will warn users, and Defender may quarantine it outright. Pass -SignThumbprint to sign.'
 }
 
-# libpear loads the boot splash from <exe>\..\splash.png with an assert on
-# failure, so an .exe shipped on its own aborts on the very first run — exactly
-# the bootstrap path a new user hits. The two files must travel together.
+# libpear loads the boot splash from <exe>\..\splash.png, so the exe is not
+# self-contained. The check is an assert, which /DNDEBUG compiles out of Release
+# builds, so a lone exe does not crash — it silently fails the image load and
+# shows a blank splash during first-run bootstrap, exactly when the user is
+# waiting. The two files must travel together either way.
 $splash = Join-Path $applingDir 'assets\splash.png'
 if (-not (Test-Path $splash)) { throw "missing $splash — required next to the exe at runtime" }
 
@@ -332,16 +334,59 @@ New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Copy-Item $exe    (Join-Path $stageDir 'Listam.exe')
 Copy-Item $splash (Join-Path $stageDir 'splash.png')
 
+# Portable archive, kept as a secondary download for people who would rather
+# not run an installer. The installer below is the primary deliverable.
 $zip = Join-Path $distDir "Listam-$Version-win32-x64.zip"
 Remove-Item -Force $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zip
 
-$size = '{0:N1} MB' -f ((Get-Item $zip).Length / 1MB)
+# -- installer -----------------------------------------------------------------
+# A bare exe is not shippable on its own: libpear loads its splash from
+# <exe>\..\splash.png. The installer puts both files in place so that stops
+# being the user's problem, and adds shortcuts plus a clean uninstall.
+$isccPath = ''   # StrictMode: must exist before the -not test below
+$iscc = Get-Command 'ISCC' -ErrorAction SilentlyContinue
+if (-not $iscc) {
+  foreach ($base in $env:ProgramFiles, ${env:ProgramFiles(x86)}) {
+    if (-not $base) { continue }
+    $candidate = Join-Path $base 'Inno Setup 6\ISCC.exe'
+    if (Test-Path $candidate) { $isccPath = $candidate; break }
+  }
+} else {
+  $isccPath = $iscc.Source
+}
+
+$setup = $null
+if (-not $isccPath) {
+  Write-Warning 'Inno Setup (ISCC.exe) not found — skipping the installer, shipping the portable zip only. Install it with: choco install innosetup'
+} else {
+  Write-Host '== building installer'
+  & $isccPath `
+    "/DListamVersion=$Version" `
+    "/DPayloadDir=$stageDir" `
+    "/DOutputDir=$distDir" `
+    (Join-Path $installerDir 'windows\listam.iss')
+  if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
+
+  $setup = Join-Path $distDir "Listam-Setup-$Version-win32-x64.exe"
+  if (-not (Test-Path $setup)) { throw "Inno Setup reported success but $setup is missing" }
+
+  # The installer is the file users actually download, so it is the one that
+  # most needs a signature — sign it too when a certificate is configured.
+  if ($SignThumbprint) {
+    Write-Host '== signing installer'
+    & $signToolPath sign /sha1 $SignThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $setup
+    if ($LASTEXITCODE -ne 0) { throw 'signtool failed on the installer' }
+  }
+}
+
+$mb = { param($p) '{0:N1} MB' -f ((Get-Item $p).Length / 1MB) }
 Write-Host ''
 Write-Host 'done.' -ForegroundColor Green
-Write-Host "  package : $zip ($size)"
-if ($Msix) { Write-Host "  msix    : $(Join-Path $buildDir 'Listam.msix')" }
+if ($setup) { Write-Host "  installer : $setup ($(& $mb $setup))" }
+Write-Host "  portable  : $zip ($(& $mb $zip))"
+if ($Msix) { Write-Host "  msix      : $(Join-Path $buildDir 'Listam.msix')" }
 Write-Host ''
-Write-Host 'Ship the zip, not the bare exe: splash.png must sit beside Listam.exe.'
+Write-Host 'Never ship Listam.exe on its own: libpear reads splash.png from beside it.'
 Write-Host 'Installs fetch the app over the swarm — keep a seeder running on the'
 Write-Host 'staging machine: pear seed production <listam-desktop checkout>'

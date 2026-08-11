@@ -39,8 +39,10 @@ jobs:
       # nasm nor ninja, and without them cmake fails deep inside a dependency
       # with a misleading message. MSVC needs no setup action — the build
       # script enters the VS environment itself.
+      # innosetup builds the installer users actually download; without it the
+      # build still succeeds but ships only the portable zip.
       - name: Install build tools
-        run: choco install nasm ninja -y --no-progress
+        run: choco install nasm ninja innosetup -y --no-progress
 
       - name: Add NASM to PATH
         run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
@@ -76,10 +78,18 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      # Upload the staged directory rather than the zip: the artifact download
-      # is itself a zip, and nesting one inside the other just makes users
-      # unpack twice before they reach Listam.exe.
-      - uses: actions/upload-artifact@v4
+      # The installer is the release deliverable; the staged pair is uploaded
+      # separately so the raw exe stays inspectable without unpacking an
+      # installer to get at it.
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Listam-Setup-${{ steps.meta.outputs.version }}-win32-x64
+          path: installer/dist/Listam-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Upload portable payload
+        uses: actions/upload-artifact@v4
         with:
           name: Listam-${{ steps.meta.outputs.version }}-win32-x64
           path: installer/dist/stage-win32-x64/

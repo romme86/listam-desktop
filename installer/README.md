@@ -128,12 +128,34 @@ PowerShell):
 Expect a long first build (~1.5 GB of native dependencies: boringssl, rocksdb,
 libudx, …). V8 itself is a prebuilt, not compiled from source.
 
-### Ship the zip, not the bare exe
+### Never ship `Listam.exe` on its own
 
-`libpear` loads its boot splash from `<exe>\..\splash.png` **with an assert on
-failure**, so a lone `Listam.exe` aborts on the very first run — precisely the
-bootstrap path a new user takes. `splash.png` must sit beside `Listam.exe`.
-Both the script and the CI job package the pair.
+`libpear` loads its boot splash from `<exe>\..\splash.png`, so the executable
+is **not self-contained**. The check is an `assert`, which Release builds
+compile out via `/DNDEBUG` — so a lone exe does not crash, it just fails the
+image load silently and shows a blank or garbage splash during first-run
+bootstrap, exactly when the user is waiting and wondering whether anything is
+happening.
+
+The build therefore produces two things, both containing the pair:
+
+- `Listam-Setup-<version>-win32-x64.exe` — **the download to publish.** Inno
+  Setup (`installer/windows/listam.iss`), per-user install to
+  `%LOCALAPPDATA%\Programs\Listam` so there is no UAC prompt, with Start Menu
+  and optional desktop shortcuts and a clean uninstall. It also **strips the
+  mark-of-the-web from the app binary**: only the downloaded installer trips
+  SmartScreen, and the installed `Listam.exe` launches without a prompt
+  afterwards.
+- `Listam-<version>-win32-x64.zip` — portable alternative for people who would
+  rather not run an installer.
+
+Uninstall deliberately removes only what it installed. The user's lists live in
+Pear storage under `%APPDATA%`, shared with the Pear runtime and any other Pear
+app, so an `[UninstallDelete]` there would destroy data this installer does not
+own.
+
+Building the installer needs `choco install innosetup`; without it the build
+still succeeds and ships the portable zip alone, with a warning.
 
 ### Gotchas
 
