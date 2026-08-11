@@ -306,8 +306,29 @@ try {
       if (-not $missing.v) { Write-Warning "$($missing.n) not supplied — the package will carry a placeholder identity and cannot be submitted as is." }
     }
 
+    # Call MakeAppx directly rather than building listam_appling_package.
+    # cmake-pear declares that target as DEPENDS ${target} ${target}_signature,
+    # so it insists on Authenticode-signing the exe first — the very thing the
+    # MSIX route exists to avoid, since the Store re-signs the package itself.
+    # The manifest and mapping are plain file(GENERATE) outputs, so packing
+    # from them reproduces exactly what that target would have run.
+    $mapping = Join-Path $buildDir 'Mapping.txt'
+    if (-not (Test-Path $mapping)) { throw "expected $mapping after configure, but it is missing" }
+
+    $makeAppx = Get-Command 'MakeAppx' -ErrorAction SilentlyContinue
+    if ($makeAppx) {
+      $makeAppxPath = $makeAppx.Source
+    } else {
+      $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'x64\MakeAppx.exe') } |
+        Sort-Object Name -Descending | Select-Object -First 1
+      if (-not $sdk) { throw 'MakeAppx.exe not found — install the Windows SDK packaging tools' }
+      $makeAppxPath = Join-Path $sdk.FullName 'x64\MakeAppx.exe'
+    }
+
     Write-Host '== packing MSIX'
-    cmake --build build --target listam_appling_package
+    $msixBuilt = Join-Path $buildDir 'Listam.msix'
+    & $makeAppxPath pack /o /m $manifest /f $mapping /p $msixBuilt
     if ($LASTEXITCODE -ne 0) { throw 'MSIX packaging failed' }
   }
 }
