@@ -189,6 +189,54 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
   }
 
+  # -- pin bare-headers ------------------------------------------------------
+  # cmake-bare installs bare-headers@latest for every bare addon, ignoring the
+  # lockfile that pins bare-module@6.0.1 (October 2025). bare-headers 1.29.0
+  # dropped js_on_dynamic_import_transitional, which that bare-module still
+  # calls, so the addon stopped compiling: "call to undeclared function".
+  #
+  # 1.27.0 is the version the known-good macOS build resolved, so it is a
+  # verified match for this libjs pin rather than a guess — and matching the
+  # linked libjs matters beyond this one symbol, since a five-month-newer
+  # header set could disagree about struct layouts too.
+  #
+  # Replacing the contents after configure sticks: install_node_module only
+  # reinstalls when the package is absent, so a later reconfigure keeps this.
+  $pinnedHeaders = '1.27.0'
+  $headerDirs = @(Get-ChildItem -Path $buildDir -Recurse -Directory -Filter 'bare-headers' `
+    -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '_bare' })
+
+  if ($headerDirs.Count -eq 0) {
+    Write-Warning 'no bare-headers directories found — cmake-bare layout may have changed; skipping the pin'
+  } else {
+    Write-Host "== pinning bare-headers to $pinnedHeaders in $($headerDirs.Count) addon tree(s)"
+    $pinDir = Join-Path ([IO.Path]::GetTempPath()) "listam-bare-headers-$pinnedHeaders"
+    if (-not (Test-Path (Join-Path $pinDir 'package'))) {
+      Remove-Item -Recurse -Force $pinDir -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force -Path $pinDir | Out-Null
+      Push-Location $pinDir
+      try {
+        npm pack "bare-headers@$pinnedHeaders" --silent | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not fetch bare-headers@$pinnedHeaders" }
+        tar -xzf "bare-headers-$pinnedHeaders.tgz"
+        if ($LASTEXITCODE -ne 0) { throw 'could not unpack bare-headers' }
+      } finally { Pop-Location }
+    }
+
+    $pinnedSrc = Join-Path $pinDir 'package'
+    foreach ($dir in $headerDirs) {
+      Get-ChildItem -Path $dir.FullName -Force | Remove-Item -Recurse -Force
+      Copy-Item -Path (Join-Path $pinnedSrc '*') -Destination $dir.FullName -Recurse -Force
+    }
+
+    # Prove the swap landed rather than trusting the copy.
+    $probe = Join-Path $headerDirs[0].FullName 'include\js.h'
+    if (-not (Select-String -Path $probe -Pattern 'js_on_dynamic_import_transitional' -Quiet)) {
+      throw "bare-headers pin did not take effect — $probe still lacks the expected declaration"
+    }
+    Write-Host '   verified: js.h declares js_on_dynamic_import_transitional'
+  }
+
   # Target the executable explicitly. cmake-pear registers its signtool and
   # MakeAppx steps as ALL targets, so a bare `cmake --build build` fails on any
   # machine without a code-signing certificate in its store.

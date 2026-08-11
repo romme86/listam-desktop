@@ -159,6 +159,17 @@ Both the script and the CI job package the pair.
 - **CRT mismatch.** `cmake-pear` compiles the appling with `/MT` while
   dependencies default to `/MD`; bare's link options assume the static CRT.
   The script puts every target on it with `CMAKE_MSVC_RUNTIME_LIBRARY`.
+- **`bare-headers` floats and has already broken.** `cmake-bare` installs
+  `bare-headers@latest` for every bare addon, ignoring the lockfile that pins
+  `bare-module@6.0.1` (October 2025). `bare-headers` 1.29.0 dropped
+  `js_on_dynamic_import_transitional`, which that `bare-module` still calls, so
+  the addon fails with `call to undeclared function`. The script pins the
+  headers to **1.27.0** — the version the known-good macOS build resolved —
+  after configure and verifies the swap. This is not Windows-specific: a clean
+  macOS rebuild would hit it too, and the existing `build/` tree only escapes
+  because it resolved 1.27.0 back in June. `install_node_module` skips the
+  install when any version is already present, so the pin survives a
+  reconfigure.
 - **MSIX needs a signed cert to install at all**, which is why the zip is the
   default deliverable. `-Msix` is there for when a Developer ID exists.
 - The `.exe` is unsigned, so SmartScreen shows "Windows protected your PC" →
