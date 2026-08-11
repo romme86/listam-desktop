@@ -124,9 +124,28 @@ Install either:
   - or standalone LLVM: winget install LLVM.LLVM
 '@
 }
-# CMake wants forward slashes in a compiler path.
+# CMake derives the resource compiler from the C compiler, and clang-cl is not
+# one: it rejects rc.exe's /fo output flag with "no such file or directory".
+# llvm-rc ships beside clang-cl and does understand the MSVC rc flags, so point
+# CMake at it explicitly for the icon resource.
+# Swap the trailing filename rather than using Split-Path or GetDirectoryName:
+# the former resolves through the PowerShell drive provider and errors on a
+# drive it cannot see, and the latter's separator handling is host-dependent.
+# This is plain string work, so it behaves the same everywhere.
+$llvmRc = $clangCl -replace '[^\\/]+$', 'llvm-rc.exe'
+if (-not (Test-Path $llvmRc)) {
+  $rcCmd = Get-Command 'rc' -ErrorAction SilentlyContinue
+  if (-not $rcCmd) {
+    throw "neither llvm-rc (next to clang-cl) nor the Windows SDK rc.exe was found — cannot compile the icon resource"
+  }
+  $llvmRc = $rcCmd.Source
+}
+
+# CMake wants forward slashes in compiler paths.
 $clangCl = $clangCl -replace '\\', '/'
+$llvmRc = $llvmRc -replace '\\', '/'
 Write-Host "   compiler: $clangCl"
+Write-Host "   rc      : $llvmRc"
 
 # libappling ships test fixtures that nest a 64-character key directory inside
 # a "Pear Runtime.app/Contents/MacOS" path. Under the default build\_deps
@@ -170,6 +189,7 @@ try {
       # clang-cl provides both while keeping the MSVC ABI and /-style flags.
       "-DCMAKE_C_COMPILER=$clangCl",
       "-DCMAKE_CXX_COMPILER=$clangCl",
+      "-DCMAKE_RC_COMPILER=$llvmRc",
 
       # cmake-pear compiles the appling itself with /MT while dependencies
       # default to /MD, which shows up as a wall of D9025 overrides and then
