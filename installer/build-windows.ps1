@@ -40,9 +40,16 @@ param(
   [switch]$SkipConfigure,
   # Do not auto-enter the VS environment (already in a Developer PowerShell).
   [switch]$SkipDevShell,
-  # Also pack the MSIX. Needs a code-signing cert in the store; an unsigned
-  # MSIX cannot be installed, which is why the zip is the default deliverable.
-  [switch]$Msix
+  # Pack the MSIX for a Microsoft Store submission. The Store re-signs the
+  # package with its own certificate, so this needs no code-signing cert of
+  # ours — unlike an EXE/MSI submission, which the Store does not re-sign.
+  # A locally built MSIX still cannot be side-loaded unsigned; it is for upload.
+  [switch]$Msix,
+  # Partner Center -> Product identity. Required for a Store-ready package:
+  # all three must match the account exactly or the upload is rejected.
+  [string]$PackageIdentityName = '',
+  [string]$PackagePublisher = '',
+  [string]$PublisherDisplayName = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -203,6 +210,7 @@ try {
       '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
     )
     if ($Id) { $cmakeArgs += "-DLISTAM_ID=$Id" }
+    if ($PackagePublisher) { $cmakeArgs += "-DLISTAM_PUBLISHER=$PackagePublisher" }
     # cmake-fetch declares dependencies without an explicit SOURCE_DIR, so the
     # stock FetchContent base-dir variable relocates all of them.
     if ($FetchBase) { $cmakeArgs += "-DFETCHCONTENT_BASE_DIR=$($FetchBase -replace '\\', '/')" }
@@ -270,6 +278,34 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'cmake build failed' }
 
   if ($Msix) {
+    # cmake-pear reuses the app name as the MSIX Identity Name, but the Store
+    # requires the reserved package name from Partner Center — which is rarely
+    # the same string. The manifest is produced by file(GENERATE) at configure
+    # time and only read by MakeAppx at build time, so rewriting it here lands
+    # before packaging, the same window the bare-headers pin uses.
+    $manifest = Join-Path $buildDir 'AppxManifest.xml'
+    if (-not (Test-Path $manifest)) { throw "expected $manifest after configure, but it is missing" }
+
+    $xml = Get-Content $manifest -Raw
+    if ($PackageIdentityName) {
+      $xml = $xml -replace '(<Identity[\s\S]*?Name=")[^"]*(")', "`${1}$PackageIdentityName`${2}"
+    }
+    if ($PublisherDisplayName) {
+      $xml = $xml -replace '(<PublisherDisplayName>)[^<]*(</PublisherDisplayName>)', "`${1}$PublisherDisplayName`${2}"
+    }
+    Set-Content -Path $manifest -Value $xml -Encoding UTF8 -NoNewline
+
+    # An empty Publisher produces a manifest MakeAppx accepts but the Store
+    # rejects, so surface it here rather than after an upload round trip.
+    if ($xml -notmatch '<Identity[\s\S]*?Publisher="CN=') {
+      Write-Warning 'AppxManifest Publisher is not a CN=... identity — this package is NOT Store-ready. Pass -PackagePublisher "CN=<your Partner Center identity>".'
+    }
+    foreach ($missing in @(
+      @{ n = '-PackageIdentityName'; v = $PackageIdentityName },
+      @{ n = '-PublisherDisplayName'; v = $PublisherDisplayName })) {
+      if (-not $missing.v) { Write-Warning "$($missing.n) not supplied — the package will carry a placeholder identity and cannot be submitted as is." }
+    }
+
     Write-Host '== packing MSIX'
     cmake --build build --target listam_appling_package
     if ($LASTEXITCODE -ne 0) { throw 'MSIX packaging failed' }
@@ -380,12 +416,21 @@ if (-not $isccPath) {
   }
 }
 
+# Collect the MSIX next to the other deliverables so CI can publish it.
+$msixOut = $null
+if ($Msix) {
+  $msixBuilt = Join-Path $buildDir 'Listam.msix'
+  if (-not (Test-Path $msixBuilt)) { throw "MSIX target succeeded but $msixBuilt is missing" }
+  $msixOut = Join-Path $distDir "Listam-$Version-win32-x64.msix"
+  Copy-Item $msixBuilt $msixOut -Force
+}
+
 $mb = { param($p) '{0:N1} MB' -f ((Get-Item $p).Length / 1MB) }
 Write-Host ''
 Write-Host 'done.' -ForegroundColor Green
-if ($setup) { Write-Host "  installer : $setup ($(& $mb $setup))" }
+if ($setup)   { Write-Host "  installer : $setup ($(& $mb $setup))" }
 Write-Host "  portable  : $zip ($(& $mb $zip))"
-if ($Msix) { Write-Host "  msix      : $(Join-Path $buildDir 'Listam.msix')" }
+if ($msixOut) { Write-Host "  msix      : $msixOut ($(& $mb $msixOut))" }
 Write-Host ''
 Write-Host 'Never ship Listam.exe on its own: libpear reads splash.png from beside it.'
 Write-Host 'Installs fetch the app over the swarm — keep a seeder running on the'

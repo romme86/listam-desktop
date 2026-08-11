@@ -11,6 +11,13 @@ set(LISTAM_ID "h1jwexik1m9c75rqng8hico4oxqgmm8xskws684skmjepksq5r3o"
     CACHE STRING "z32 drive key the appling boots (production channel)")
 set(LISTAM_VERSION "0.19.13" CACHE STRING "App version (kept in sync with package.json)")
 
+# MSIX package Publisher identity. For a Microsoft Store submission this must be
+# the exact `CN=...` string from Partner Center -> Product identity, or the
+# Store rejects the upload. The placeholder only lets the package build locally.
+# cmake-pear feeds this to the AppxManifest as-is; build-windows.ps1 patches the
+# remaining identity fields, which cmake-pear derives from the app name.
+set(LISTAM_PUBLISHER "CN=SayNode" CACHE STRING "MSIX Publisher identity (Partner Center)")
+
 add_pear_appling(
   listam_appling
   ID "${LISTAM_ID}"
@@ -22,6 +29,8 @@ add_pear_appling(
   MACOS_IDENTIFIER ch.saynode.listam.desktop
   MACOS_CATEGORY public.app-category.productivity
   MACOS_SIGNING_IDENTITY "-"
+
+  WINDOWS_SIGNING_SUBJECT "${LISTAM_PUBLISHER}"
 
   LINUX_CATEGORY Utility
 )

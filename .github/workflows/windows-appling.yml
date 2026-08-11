@@ -21,6 +21,23 @@ on:
         description: 'Version stamped into the exe (blank = version in package.json)'
         required: false
         type: string
+      msix:
+        description: 'Also pack an MSIX for the Microsoft Store'
+        required: false
+        default: false
+        type: boolean
+      package_identity_name:
+        description: 'MSIX Identity Name from Partner Center (e.g. 12345SayNode.Listam)'
+        required: false
+        type: string
+      package_publisher:
+        description: 'MSIX Publisher from Partner Center (e.g. CN=A1B2C3D4-...)'
+        required: false
+        type: string
+      publisher_display_name:
+        description: 'MSIX PublisherDisplayName from Partner Center (e.g. SayNode)'
+        required: false
+        type: string
 
 jobs:
   build:
@@ -60,10 +77,18 @@ jobs:
         env:
           LISTAM_ID: ${{ inputs.id }}
           LISTAM_VERSION: ${{ inputs.version }}
+          LISTAM_MSIX: ${{ inputs.msix }}
+          LISTAM_PKG_NAME: ${{ inputs.package_identity_name }}
+          LISTAM_PKG_PUBLISHER: ${{ inputs.package_publisher }}
+          LISTAM_PKG_DISPLAY: ${{ inputs.publisher_display_name }}
         run: |
           $params = @{}
           if ($env:LISTAM_ID)      { $params['Id']      = $env:LISTAM_ID }
           if ($env:LISTAM_VERSION) { $params['Version'] = $env:LISTAM_VERSION }
+          if ($env:LISTAM_MSIX -eq 'true') { $params['Msix'] = $true }
+          if ($env:LISTAM_PKG_NAME)      { $params['PackageIdentityName']  = $env:LISTAM_PKG_NAME }
+          if ($env:LISTAM_PKG_PUBLISHER) { $params['PackagePublisher']     = $env:LISTAM_PKG_PUBLISHER }
+          if ($env:LISTAM_PKG_DISPLAY)   { $params['PublisherDisplayName'] = $env:LISTAM_PKG_DISPLAY }
           installer\build-windows.ps1 @params
 
       - name: Resolve artifact name
@@ -93,4 +118,12 @@ jobs:
         with:
           name: Listam-${{ steps.meta.outputs.version }}-win32-x64
           path: installer/dist/stage-win32-x64/
+          if-no-files-found: error
+
+      - name: Upload MSIX
+        if: inputs.msix
+        uses: actions/upload-artifact@v4
+        with:
+          name: Listam-${{ steps.meta.outputs.version }}-win32-x64-msix
+          path: installer/dist/*.msix
           if-no-files-found: error
