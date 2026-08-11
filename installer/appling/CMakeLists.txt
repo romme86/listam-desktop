@@ -25,3 +25,24 @@ add_pear_appling(
 
   LINUX_CATEGORY Utility
 )
+
+# cmake-pear only feeds WINDOWS_ICON to the MSIX package, so a plain Listam.exe
+# would ship with the blank default executable icon. Compile the icon in as a
+# resource too — Explorer, the taskbar and alt-tab all read it from the binary.
+# Regenerate icon.ico from icon.png with installer/make-ico.py.
+if(WIN32)
+  enable_language(RC)
+
+  # rc.exe accepts forward slashes inside a quoted path, so the CMake-style
+  # path can go in verbatim.
+  file(GENERATE
+    OUTPUT "listam_appling.rc"
+    CONTENT "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/assets/win32/icon.ico\"\n"
+  )
+
+  target_sources(
+    listam_appling
+    PRIVATE
+      "${CMAKE_CURRENT_BINARY_DIR}/listam_appling.rc"
+  )
+endif()

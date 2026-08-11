@@ -1,12 +1,17 @@
 # Listam desktop installer
 
-Builds a drag-install macOS DMG for the Pear desktop app. Pear apps are not
-packaged like Electron apps — the installer ships a tiny **appling shell**
-(`Listam.app`, ~100 KB) that boots the real app from its P2P drive via the
-Pear runtime; the app payload itself travels over the swarm, not inside the
-DMG.
+Builds a drag-install macOS DMG and a Windows zip for the Pear desktop app.
+Pear apps are not packaged like Electron apps — the installer ships a tiny
+**appling shell** (`Listam.app`, ~100 KB) that boots the real app from its P2P
+drive via the Pear runtime; the app payload itself travels over the swarm, not
+inside the DMG.
 
-## Build
+| Platform | Command | Output |
+|---|---|---|
+| macOS | `installer/build-macos.sh` | `Listam-<version>-<channel>.dmg` |
+| Windows | `installer\build-windows.ps1` | `Listam-<version>-win32-x64.zip` |
+
+## Build (macOS)
 
 ```sh
 installer/build-macos.sh                  # stage + release production + build DMG
@@ -85,6 +90,77 @@ the staged channel. Signing is ad-hoc (`MACOS_SIGNING_IDENTITY "-"`) until a
 Developer ID exists; the cmake build signs with the JIT entitlements the
 runtime needs, so the bundle must not be re-signed casually.
 
+## Build (Windows)
+
+Windows ships the **native appling only** — there is no script-shell fallback,
+and deliberately so: the native shell bootstraps the Pear runtime itself, so a
+Windows user never has to install Pear first. (The Pear installer failing on
+Windows is the reason this path exists.)
+
+```powershell
+installer\build-windows.ps1                        # production key from CMakeLists.txt
+installer\build-windows.ps1 -Id <z32-key>          # another channel, verified against the exe
+installer\build-windows.ps1 -Version 0.19.14 -Msix # also pack the MSIX (needs a cert)
+```
+
+Output: `installer/dist/Listam-<version>-win32-x64.zip`.
+
+No `pear stage` happens here. The appling embeds a drive key and nothing else,
+so **staging stays a macOS-side step** — cut the release with `build-macos.sh`
+first, then build Windows against the same key. Nor does this build need
+`node_modules/` or the `listam-packages` sibling: only `installer/appling/`.
+
+Requirements — the script enters the MSVC environment itself, so a plain
+PowerShell session is fine (`-SkipDevShell` if you are already in a Developer
+PowerShell):
+
+- Visual Studio with the **Desktop development with C++** workload
+- `winget install Kitware.CMake Ninja-build.Ninja NASM.NASM`
+  (**nasm is not optional** — bare enables `ASM_NASM` on `win32-x64` and fails
+  deep inside a dependency without it)
+- Working **outbound UDP**: configure pulls bare's prebuilt V8 for `win32-x64`
+  over the Hyperswarm DHT (`mirror_drive`). A configure that hangs rather than
+  errors is the DHT being unreachable.
+
+Expect a long first build (~1.5 GB of native dependencies: boringssl, rocksdb,
+libudx, …). V8 itself is a prebuilt, not compiled from source.
+
+### Ship the zip, not the bare exe
+
+`libpear` loads its boot splash from `<exe>\..\splash.png` **with an assert on
+failure**, so a lone `Listam.exe` aborts on the very first run — precisely the
+bootstrap path a new user takes. `splash.png` must sit beside `Listam.exe`.
+Both the script and the CI job package the pair.
+
+### Gotchas
+
+- **Never `cmake --build build` with no target.** `cmake-pear` registers its
+  `signtool` and `MakeAppx` steps as **ALL** targets, so a plain build fails on
+  any machine without a code-signing certificate in its store. Build
+  `--target listam_appling`.
+- **MSIX needs a signed cert to install at all**, which is why the zip is the
+  default deliverable. `-Msix` is there for when a Developer ID exists.
+- The `.exe` is unsigned, so SmartScreen shows "Windows protected your PC" →
+  **More info → Run anyway**. Authenticode signing is the fix; there is no
+  Windows equivalent of the macOS ad-hoc signature.
+- `CMakeLists.txt` compiles `assets/win32/icon.ico` into the exe as a resource.
+  `cmake-pear` only wires an icon into the MSIX, so without this the bare exe
+  carries the blank default icon. Regenerate it from macOS after changing the
+  artwork:
+  ```sh
+  installer/make-ico.py installer/appling/assets/win32/icon.png \
+                        installer/appling/assets/win32/icon.ico
+  ```
+
+### Building it without a Windows machine
+
+`.github/workflows/windows-appling.yml` runs the same script on a
+`windows-latest` runner (manual dispatch — Actions → windows-appling → Run
+workflow, with optional key/version inputs) and uploads `Listam.exe` +
+`splash.png` as an artifact. This is the path to a Windows build from a Mac:
+the appling links the static CRT and a Windows subsystem entry point, neither
+of which cross-compiles from macOS.
+
 ## Seeding agent
 
 `seed-agent.sh install` registers a LaunchAgent (`ch.saynode.listam.seed`)
@@ -97,6 +173,10 @@ Without a live seeder, installs on other machines cannot fetch the app.
 - The script-shell DMG (default, no toolchain needed) does not own the
   running Dock tile and needs Pear preinstalled — use `--native` once the
   appling is built.
-- Windows/Linux installers: `appling/CMakeLists.txt` already carries the
-  Windows/Linux settings; the MSIX/AppImage packaging steps run on those
-  hosts, but no CI exists yet.
+- Neither the macOS nor the Windows build is signed by a real identity
+  (ad-hoc on macOS, unsigned on Windows), so both trip their platform's
+  gatekeeper on first launch.
+- **Linux:** `appling/CMakeLists.txt` already carries the Linux settings and
+  `add_app_image` produces an AppImage, but there is no build script or CI job
+  for it yet — the Windows pair (`build-windows.ps1` + `windows-appling.yml`)
+  is the template to copy.
