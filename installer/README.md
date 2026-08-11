@@ -172,9 +172,16 @@ Both the script and the CI job package the pair.
   reconfigure.
 - **MSIX needs a signed cert to install at all**, which is why the zip is the
   default deliverable. `-Msix` is there for when a Developer ID exists.
-- The `.exe` is unsigned, so SmartScreen shows "Windows protected your PC" →
-  **More info → Run anyway**. Authenticode signing is the fix; there is no
-  Windows equivalent of the macOS ad-hoc signature.
+- **Unsigned builds get blocked, not just warned.** SmartScreen shows "Windows
+  protected your PC" (→ **More info → Run anyway**), and Defender may
+  quarantine the file outright as a generic/heuristic detection — a large,
+  reputation-less, unsigned binary that downloads and executes code is close to
+  a textbook heuristic profile, and running as administrator does not bypass
+  either. There is no Windows equivalent of the macOS ad-hoc signature: the
+  only real fix is an Authenticode certificate. Pass `-SignThumbprint <sha1>`
+  once one exists. Interim mitigations: a false-positive report to
+  <https://www.microsoft.com/wdsi/filesubmission>, and the VERSIONINFO
+  resource the build now embeds so the file at least identifies itself.
 - `CMakeLists.txt` compiles `assets/win32/icon.ico` into the exe as a resource.
   `cmake-pear` only wires an icon into the MSIX, so without this the bare exe
   carries the blank default icon. Regenerate it from macOS after changing the

@@ -1,0 +1,38 @@
+// Windows resources for Listam.exe, filled in by CMake (see CMakeLists.txt).
+//
+// cmake-pear wires an icon into the MSIX package only, and adds no VERSIONINFO
+// at all, so a plain build produces an anonymous executable: no publisher, no
+// product name, nothing under Properties -> Details. That is both a bad look
+// for a downloaded binary and one of the signals SmartScreen and Defender
+// heuristics weigh against an unsigned file. Ship real metadata.
+
+1 ICON "@LISTAM_ICON@"
+
+1 VERSIONINFO
+FILEVERSION    @LISTAM_VERSION_COMMAS@
+PRODUCTVERSION @LISTAM_VERSION_COMMAS@
+FILEFLAGSMASK  0x3fL
+FILEFLAGS      0x0L
+FILEOS         0x40004L  // VOS_NT_WINDOWS32
+FILETYPE       0x1L      // VFT_APP
+FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"  // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "SayNode"
+            VALUE "FileDescription",  "Listam - local-first shared lists"
+            VALUE "FileVersion",      "@LISTAM_VERSION@"
+            VALUE "InternalName",     "Listam"
+            VALUE "LegalCopyright",   "Copyright (C) SayNode"
+            VALUE "OriginalFilename", "Listam.exe"
+            VALUE "ProductName",      "Listam"
+            VALUE "ProductVersion",   "@LISTAM_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

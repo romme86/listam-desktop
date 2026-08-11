@@ -26,18 +26,33 @@ add_pear_appling(
   LINUX_CATEGORY Utility
 )
 
-# cmake-pear only feeds WINDOWS_ICON to the MSIX package, so a plain Listam.exe
-# would ship with the blank default executable icon. Compile the icon in as a
-# resource too — Explorer, the taskbar and alt-tab all read it from the binary.
-# Regenerate icon.ico from icon.png with installer/make-ico.py.
+# cmake-pear feeds WINDOWS_ICON to the MSIX package only and adds no
+# VERSIONINFO at all, so a plain Listam.exe ships with the blank default icon
+# and no publisher, product or version under Properties -> Details. Compile
+# both in as resources. Regenerate icon.ico with installer/make-ico.py.
 if(WIN32)
   enable_language(RC)
 
-  # rc.exe accepts forward slashes inside a quoted path, so the CMake-style
-  # path can go in verbatim.
-  file(GENERATE
-    OUTPUT "listam_appling.rc"
-    CONTENT "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/assets/win32/icon.ico\"\n"
+  # VERSIONINFO needs a four-part comma-separated version; pad whatever
+  # LISTAM_VERSION carries (0.19.13 -> 0,19,13,0) so the resource is always
+  # well-formed rather than silently dropped by the resource compiler.
+  string(REPLACE "." ";" listam_version_parts "${LISTAM_VERSION}")
+  list(LENGTH listam_version_parts listam_version_count)
+  while(listam_version_count LESS 4)
+    list(APPEND listam_version_parts 0)
+    math(EXPR listam_version_count "${listam_version_count} + 1")
+  endwhile()
+  list(SUBLIST listam_version_parts 0 4 listam_version_parts)
+  list(JOIN listam_version_parts "," LISTAM_VERSION_COMMAS)
+
+  # rc accepts forward slashes inside a quoted path, so the CMake-style path
+  # goes in verbatim.
+  set(LISTAM_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/win32/icon.ico")
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/listam_appling.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/listam_appling.rc"
+    @ONLY
   )
 
   target_sources(

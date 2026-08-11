@@ -31,6 +31,11 @@ param(
   # Relocate fetched dependencies to a short path (e.g. C:\listam-deps) when
   # the default build\_deps location overflows MAX_PATH. See the check below.
   [string]$FetchBase = '',
+  # SHA-1 thumbprint of an Authenticode certificate in the local store. Signing
+  # is what stops SmartScreen and Defender treating the exe as an unknown
+  # binary; without it users must click through "Windows protected your PC".
+  [string]$SignThumbprint = '',
+  [string]$TimestampUrl = 'http://timestamp.digicert.com',
   # Skip cmake configure and reuse the existing build tree.
   [switch]$SkipConfigure,
   # Do not auto-enter the VS environment (already in a Developer PowerShell).
@@ -276,6 +281,33 @@ finally {
 
 $exe = Join-Path $buildDir 'Listam.exe'
 if (-not (Test-Path $exe)) { throw "build finished but $exe is missing" }
+
+# -- code signing --------------------------------------------------------------
+# Sign here rather than via cmake-pear's code_sign_windows, which registers
+# itself as an ALL target and so would break every build on a machine with no
+# certificate. Timestamping matters: without it every signature stops verifying
+# the day the certificate expires.
+if ($SignThumbprint) {
+  $signTool = Get-Command 'signtool' -ErrorAction SilentlyContinue
+  if (-not $signTool) {
+    $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory -ErrorAction SilentlyContinue |
+      Where-Object { Test-Path (Join-Path $_.FullName 'x64\signtool.exe') } |
+      Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $sdk) { throw 'signtool.exe not found — install the Windows SDK signing tools' }
+    $signToolPath = Join-Path $sdk.FullName 'x64\signtool.exe'
+  } else {
+    $signToolPath = $signTool.Source
+  }
+
+  Write-Host '== signing Listam.exe'
+  & $signToolPath sign /sha1 $SignThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 $exe
+  if ($LASTEXITCODE -ne 0) { throw 'signtool failed' }
+
+  & $signToolPath verify /pa $exe
+  if ($LASTEXITCODE -ne 0) { throw 'signature did not verify' }
+} else {
+  Write-Warning 'building UNSIGNED — Windows will warn users, and Defender may quarantine it outright. Pass -SignThumbprint to sign.'
+}
 
 # libpear loads the boot splash from <exe>\..\splash.png with an assert on
 # failure, so an .exe shipped on its own aborts on the very first run — exactly
