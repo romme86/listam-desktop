@@ -59,6 +59,9 @@ if (-not $Version) {
 
 # Load the MSVC toolchain in-process rather than requiring the caller to open a
 # Developer PowerShell. Keeps CI and local invocations on the same code path.
+# Declared up front: StrictMode makes a later read of an unset variable fatal,
+# and the clang-cl search below reads it whether or not this branch runs.
+$vsPath = ''
 if (-not (Test-Tool 'cl') -and -not $SkipDevShell) {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   if (-not (Test-Path $vswhere)) {
@@ -96,6 +99,35 @@ if (-not (Test-Tool 'cl')) {
   throw 'cl.exe still not on PATH after entering the VS environment — the MSVC C++ workload is likely missing.'
 }
 
+# The actual compiler is clang-cl (see the configure block for why). It ships
+# either with the VS "C++ Clang tools for Windows" component or as a standalone
+# LLVM install; look in both before giving up.
+$clangCmd = Get-Command 'clang-cl' -ErrorAction SilentlyContinue
+$clangCl = if ($clangCmd) { $clangCmd.Source } else { '' }
+if (-not $clangCl) {
+  $candidates = @()
+  if ($vsPath) {
+    $candidates += Join-Path $vsPath 'VC\Tools\Llvm\x64\bin\clang-cl.exe'
+    $candidates += Join-Path $vsPath 'VC\Tools\Llvm\bin\clang-cl.exe'
+  }
+  $candidates += Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'
+  $clangCl = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $clangCl) {
+  throw @'
+clang-cl not found, and MSVC cl.exe cannot build this dependency graph:
+sodium-native compiles libsodium with HAVE_TI_MODE and HAVE_GCC_MEMORY_FENCES
+on every platform, which require __int128 and the GCC atomic builtins.
+
+Install either:
+  - the "C++ Clang tools for Windows" component in the Visual Studio Installer
+  - or standalone LLVM: winget install LLVM.LLVM
+'@
+}
+# CMake wants forward slashes in a compiler path.
+$clangCl = $clangCl -replace '\\', '/'
+Write-Host "   compiler: $clangCl"
+
 # libappling ships test fixtures that nest a 64-character key directory inside
 # a "Pear Runtime.app/Contents/MacOS" path. Under the default build\_deps
 # location that overflows Windows' 260-character MAX_PATH and git aborts the
@@ -131,12 +163,13 @@ try {
       "-DCMAKE_BUILD_TYPE=$Configuration",
       "-DLISTAM_VERSION=$Version",
 
-      # bare sets C_STANDARD 11 and includes <stdatomic.h>, but MSVC keeps C11
-      # atomics behind /experimental:c11atomics — without it every bare
-      # translation unit dies on "C atomic support is not enabled". The two
-      # /D defines are MSVC's stock CMAKE_C_FLAGS, restated because assigning
-      # this variable replaces the default rather than appending to it.
-      '-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS /experimental:c11atomics',
+      # clang-cl, NOT cl.exe. sodium-native compiles libsodium with
+      # HAVE_TI_MODE=1 and HAVE_GCC_MEMORY_FENCES=1 set unconditionally for
+      # every platform, which need __int128 and the GCC atomic builtins —
+      # MSVC has neither, so cl.exe cannot build this dependency graph at all.
+      # clang-cl provides both while keeping the MSVC ABI and /-style flags.
+      "-DCMAKE_C_COMPILER=$clangCl",
+      "-DCMAKE_CXX_COMPILER=$clangCl",
 
       # cmake-pear compiles the appling itself with /MT while dependencies
       # default to /MD, which shows up as a wall of D9025 overrides and then

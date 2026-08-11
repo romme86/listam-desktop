@@ -114,7 +114,10 @@ Requirements — the script enters the MSVC environment itself, so a plain
 PowerShell session is fine (`-SkipDevShell` if you are already in a Developer
 PowerShell):
 
-- Visual Studio with the **Desktop development with C++** workload
+- Visual Studio with the **Desktop development with C++** workload, plus the
+  **C++ Clang tools for Windows** component (or standalone
+  `winget install LLVM.LLVM`) — the build compiles with **clang-cl**, not
+  `cl.exe`; see the gotchas below
 - `winget install Kitware.CMake Ninja-build.Ninja NASM.NASM`
   (**nasm is not optional** — bare enables `ASM_NASM` on `win32-x64` and fails
   deep inside a dependency without it)
@@ -144,12 +147,15 @@ Both the script and the CI job package the pair.
   minutes into the configure. `git config --global core.longpaths true`, or
   pass `-FetchBase C:\listam-deps` to shorten the dependency path instead.
   The script refuses to start without one of the two.
-- **C11 atomics.** `bare` sets `C_STANDARD 11` and includes `<stdatomic.h>`,
-  but MSVC keeps C11 atomics behind `/experimental:c11atomics` — without it
-  every bare translation unit fails with
-  `C1189: "C atomic support is not enabled"`. The script passes it via
-  `CMAKE_C_FLAGS`, restating MSVC's stock `/DWIN32 /D_WINDOWS` because
-  assigning that variable replaces the defaults instead of appending.
+- **clang-cl, not `cl.exe`.** This is the big one. `sodium-native` compiles
+  libsodium with `HAVE_TI_MODE=1` and `HAVE_GCC_MEMORY_FENCES=1` defined
+  unconditionally for *every* platform; those need `__int128` and the GCC
+  atomic builtins, and MSVC has neither. `cl.exe` therefore cannot build this
+  dependency graph at all — it fails first in `bare` on
+  `C1189: "C atomic support is not enabled"` and then in libsodium on
+  `C2065: '__ATOMIC_ACQUIRE': undeclared identifier`. clang-cl supplies both
+  while keeping the MSVC ABI, so the script selects it explicitly. MSVC is
+  still required alongside it for the headers, libs and linker.
 - **CRT mismatch.** `cmake-pear` compiles the appling with `/MT` while
   dependencies default to `/MD`; bare's link options assume the static CRT.
   The script puts every target on it with `CMAKE_MSVC_RUNTIME_LIBRARY`.
