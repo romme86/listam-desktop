@@ -28,6 +28,9 @@ param(
   # Defaults to the version in package.json so the two cannot drift.
   [string]$Version = '',
   [string]$Configuration = 'Release',
+  # Relocate fetched dependencies to a short path (e.g. C:\listam-deps) when
+  # the default build\_deps location overflows MAX_PATH. See the check below.
+  [string]$FetchBase = '',
   # Skip cmake configure and reuse the existing build tree.
   [switch]$SkipConfigure,
   # Do not auto-enter the VS environment (already in a Developer PowerShell).
@@ -93,6 +96,23 @@ if (-not (Test-Tool 'cl')) {
   throw 'cl.exe still not on PATH after entering the VS environment — the MSVC C++ workload is likely missing.'
 }
 
+# libappling ships test fixtures that nest a 64-character key directory inside
+# a "Pear Runtime.app/Contents/MacOS" path. Under the default build\_deps
+# location that overflows Windows' 260-character MAX_PATH and git aborts the
+# checkout with "Filename too long" — several minutes into the configure, well
+# after the first dependencies have fetched. Fail here instead.
+if (-not $FetchBase -and (git config --get core.longpaths) -ne 'true') {
+  throw @'
+git core.longpaths is disabled, so fetching libappling will fail on MAX_PATH.
+
+Enable it once per machine:
+    git config --global core.longpaths true
+
+Or keep git as-is and shorten the dependency path instead:
+    installer\build-windows.ps1 -FetchBase C:\listam-deps
+'@
+}
+
 Write-Host "== listam-desktop $Version — Windows appling (win32-x64)" -ForegroundColor Cyan
 
 Push-Location $applingDir
@@ -112,6 +132,9 @@ try {
       "-DLISTAM_VERSION=$Version"
     )
     if ($Id) { $cmakeArgs += "-DLISTAM_ID=$Id" }
+    # cmake-fetch declares dependencies without an explicit SOURCE_DIR, so the
+    # stock FetchContent base-dir variable relocates all of them.
+    if ($FetchBase) { $cmakeArgs += "-DFETCHCONTENT_BASE_DIR=$($FetchBase -replace '\\', '/')" }
 
     # Configure pulls bare's prebuilt V8 for win32-x64 over the Hyperswarm DHT
     # (mirror_drive), so it needs working outbound UDP, not just HTTPS. A hang

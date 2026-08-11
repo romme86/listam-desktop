@@ -45,6 +45,12 @@ jobs:
       - name: Add NASM to PATH
         run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
+      # libappling's test fixtures nest a 64-char key directory inside a
+      # "Pear Runtime.app/Contents/MacOS" path, which overflows MAX_PATH: git
+      # aborts the checkout with "Filename too long" mid-configure.
+      - name: Enable git long paths
+        run: git config --global core.longpaths true
+
       # Single entry point: CI runs exactly what a developer runs locally.
       # Keep build logic in build-windows.ps1, never inline here.
       - name: Build
