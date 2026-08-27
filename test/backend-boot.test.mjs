@@ -149,3 +149,26 @@ test('a timed-out non-idempotent add recovers the worker without replaying', asy
     assert.equal(fixture.shutdowns(), 1)
     assert.equal(replacementCalls, 0)
 })
+
+test('a timed-out invite MINT is not replayed, but the invite READ is', async () => {
+    // The invite book became additive: RPC_CREATE_INVITE (12) always mints
+    // (@listam/backend backend.mjs:506), so replaying a lost one hands out a
+    // second live code and pushes toward the eight-code cap — which evicts the
+    // OLDEST live code, i.e. the one already given to somebody. RPC_GET_KEY (5)
+    // re-publishes the live code instead, so it is the safe refresh.
+    let minted = 0
+    const mint = recoveringFixture(
+        async () => { throw timeoutError() },
+        async () => { minted++; return '{"ok":true}' },
+    )
+    await assert.rejects(mint.recovering.client.send(12), { code: 'BACKEND_REQUEST_TIMEOUT' })
+    assert.equal(minted, 0)
+
+    let read = 0
+    const get = recoveringFixture(
+        async () => { throw timeoutError() },
+        async (command) => { read++; assert.equal(command, 5); return '{"ok":true}' },
+    )
+    await get.recovering.client.send(5)
+    assert.equal(read, 1)
+})

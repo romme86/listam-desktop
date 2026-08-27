@@ -740,6 +740,9 @@ button {
 }
 .event-line:nth-child(odd) { background: var(--surface-1); }
 .event-line .ts { color: var(--ink-faint); }
+/* Transport field names are longer than the log's timestamps; give the key
+   track the room it needs so `relayConfigured` doesn't wrap under itself. */
+.net-diagnostics .event-line { grid-template-columns: 150px minmax(0, 1fr); }
 
 /* Muted helper text and a heading+action row, both inset to the 1rem content
    edge used by section headings and card text. */
@@ -915,6 +918,33 @@ button {
 }
 .dialog .invite-share-layout { margin-top: 0.25rem; }
 .dialog .invite-share-layout .invite-code { align-self: stretch; }
+/* The invite's terms sit UNDER the code, not beside it: "works once" and the
+   countdown are what the sharer has to read before handing the code over, and a
+   sidelong caption reads as decoration. */
+.invite-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.9rem;
+    color: var(--secondary);
+    margin-top: -0.5rem;
+}
+.invite-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.invite-share-layout.is-expired { grid-template-columns: minmax(0, 1fr); }
+/* Live-code count next to the section heading. Only rendered above 1, where it
+   is the only sign that the code handed to the previous person still works.
+   The pill is styled here rather than reused from .nav-item .badge, which is
+   scoped to the rail and carries its own margin-left:auto. */
+.category-heading.with-badge { display: flex; align-items: center; gap: 0.5rem; }
+.category-heading.with-badge .badge {
+    background: var(--signal);
+    color: var(--on-signal);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 14px;
+    letter-spacing: 0;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--r-pill);
+}
 .dialog .warning { color: var(--on-danger-container); background: var(--danger-container); padding: 0.75rem 1rem; border-radius: var(--r-field); }
 .shortcut-rows { display: flex; flex-direction: column; gap: 0.5rem; }
 .shortcut-rows .kv-row { grid-template-columns: 120px 1fr; padding: 0.5rem 1rem; }
@@ -1019,6 +1049,15 @@ kbd {
 /* Joining overlay phases */
 .join-overlay { text-align: center; }
 .join-overlay .phase { color: var(--ink-mute); margin-top: 0.5rem; animation: phase-pulse 1.8s ease-in-out infinite; }
+/* The elapsed counter and hints below it are the OPPOSITE of the pulsing phase
+   line: they are read, not glanced at, so they hold still. */
+.join-overlay .join-elapsed { color: var(--ink-faint); margin-top: 1.25rem; font-family: var(--font-mono); }
+.join-overlay .join-hint {
+    color: var(--ink-mute);
+    max-width: 46ch;
+    margin: 0.75rem auto 0;
+}
+.join-overlay .join-actions { display: flex; justify-content: center; margin-top: 1.5rem; }
 @keyframes phase-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.45; }

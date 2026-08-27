@@ -10,6 +10,7 @@ import {
     RPC_MOVE,
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
+    RPC_GET_KEY,
     RPC_REQUEST_SYNC,
     RPC_GET_BOARD_CONFIG,
     RPC_SET_BOARD_CONFIG,
@@ -19,6 +20,10 @@ import {
     RPC_SHARE_LIST,
     RPC_JOIN_LIST,
     RPC_COMPACT_HISTORY,
+    RPC_CANCEL_JOIN,
+    RPC_NET_SUSPEND,
+    RPC_NET_RESUME,
+    RPC_GET_NET_DIAGNOSTICS,
 } from '@listam/protocol'
 import { normalizeListItem } from '@listam/domain/list-reducer'
 import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
@@ -34,6 +39,32 @@ import { reductionFromItems } from './store.mjs'
 // model — one list, three types via listType), so they surface as the built-in
 // Groceries / Board / Todo rail entries. A separate registry list ("Hardware"
 // in a "Projects" group) exercises the multi-list / groups feature on top.
+// Mock invites carry the same envelope the real backend now sends, so the
+// preview exercises the countdown / single-use / live-count rendering instead of
+// the legacy bare-string path.
+const MOCK_INVITE_TTL_MS = 10 * 60 * 1000
+const MOCK_INVITE_MAX = 8
+let mockLiveInvites = 0
+let mockInviteExpiresAt = 0
+// `mint` is the RPC_CREATE_INVITE path ("New code"); RPC_GET_KEY re-publishes
+// what is already live and only mints when nothing is — the same split the real
+// backend makes, so the preview cannot hide a call site that mints by accident.
+function mockInviteEvent({ mint = false } = {}) {
+    if (mint || mockLiveInvites === 0) {
+        mockLiveInvites = Math.min(MOCK_INVITE_MAX, mockLiveInvites + 1)
+        mockInviteExpiresAt = Date.now() + MOCK_INVITE_TTL_MS
+    }
+    return {
+        type: 'invite-key',
+        key: 'mock1nv1te'.repeat(10),
+        expiresAt: mockInviteExpiresAt,
+        expiresInMs: Math.max(0, mockInviteExpiresAt - Date.now()),
+        singleUse: true,
+        liveInvites: mockLiveInvites,
+        maxInvites: MOCK_INVITE_MAX,
+    }
+}
+
 const DEFAULT_LIST = 'default'
 const HARDWARE_LIST = 'hardware'
 const PROJECTS_GROUP = 'projects'
@@ -254,7 +285,31 @@ export function createMockBackend() {
                 }
                 return JSON.stringify({ ok: true })
             } else if (command === RPC_CREATE_INVITE) {
-                emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
+                emit(mockInviteEvent({ mint: true }))
+            } else if (command === RPC_GET_KEY) {
+                emit(mockInviteEvent())
+            } else if (command === RPC_CANCEL_JOIN) {
+                return JSON.stringify({ ok: true, cancelled: false })
+            } else if (command === RPC_NET_SUSPEND) {
+                return JSON.stringify({ ok: true, suspended: false })
+            } else if (command === RPC_NET_RESUME) {
+                return JSON.stringify({ ok: true, resumed: false })
+            } else if (command === RPC_GET_NET_DIAGNOSTICS) {
+                // `randomized: true` on purpose: the relayed note is the state the
+                // preview most needs to be able to show, and nothing in a browser
+                // fixture can reach a real DHT to produce it.
+                return JSON.stringify({
+                    ok: true,
+                    bootstrapped: true,
+                    online: true,
+                    firewalled: false,
+                    randomized: true,
+                    punches: 0,
+                    relaying: 1,
+                    relayConfigured: 2,
+                    tempConnections: 0,
+                    mainConnections: 2,
+                })
             } else if (command === RPC_SHARE_LIST) {
                 // Simulate promoting a list to its own base. The reserved default
                 // grocery surface is re-ID'd into an ordinary registry list, just
@@ -397,7 +452,7 @@ export function createMockBackend() {
 
     function start() {
         syncList()
-        emit({ type: 'invite-key', key: 'mock1nv1te'.repeat(10) })
+        emit(mockInviteEvent())
         emit({ type: 'message', payload: { type: 'peer-count', count: 2 }, raw: '' })
         emit({
             type: 'message',

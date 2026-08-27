@@ -204,10 +204,14 @@ export function selectDesktopState(rootState) {
             ...Object.values(rootState.presence.itemsById),
         ],
         inviteKey: rootState.sync.autobaseInviteKey,
+        invite: rootState.sync.invite,
         peerCount: rootState.sync.peerCount,
         baseId: rootState.sync.baseId,
         epoch: rootState.sync.epoch,
         joinPhase: rootState.sync.joinPhase,
+        joinProgress: rootState.sync.joinProgress,
+        joinError: rootState.sync.joinError,
+        networkStatus: rootState.sync.networkStatus,
         isJoining: rootState.sync.isJoining,
         backendReady: rootState.sync.isWorkletReady,
         synced: rootState.sync.hasReceivedSnapshot,
@@ -433,8 +437,17 @@ export function createDesktopStore(initial = {}) {
             }
             case 'invite-key':
                 transaction(() => {
-                    reduxStore.dispatch(syncActions.autobaseInviteKeySet(event.key ?? ''))
-                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic(event.key ? 'invite-key (rotated)' : 'invite-key (cleared)', undefined, now) }))
+                    // The decoded event, not just the code: its expiry, its
+                    // single-use flag and how many codes are live are the only
+                    // way the share surface can stop lying about all three.
+                    reduxStore.dispatch(syncActions.autobaseInviteReceived(event))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({
+                        diagnostics: recordDiagnostic(
+                            event.key ? 'invite-key (minted)' : 'invite-key (cleared)',
+                            event.key ? `${event.liveInvites ?? 1} live` : undefined,
+                            now,
+                        ),
+                    }))
                 })
                 return 'invite-key'
             case 'reset':
@@ -473,6 +486,21 @@ export function createDesktopStore(initial = {}) {
                     diagnostics: recordDiagnostic(`join-phase ${payload.phase || 'cleared'}`, undefined, now),
                 })
                 return type
+            case 'join-progress':
+                // Heartbeat, every 10s while pairing. It is what separates
+                // "never reached the DHT" from "on the DHT but never found the
+                // host" — three different failures that were one mute spinner.
+                transaction(() => {
+                    reduxStore.dispatch(syncActions.joinProgressReceived(payload))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({
+                        diagnostics: recordDiagnostic(
+                            `join-progress ${Math.round((payload.elapsedMs ?? 0) / 1000)}s`,
+                            payload.randomized === true ? 'randomized NAT (relayed)' : undefined,
+                            now,
+                        ),
+                    }))
+                })
+                return type
             case 'join-success':
                 setState({
                     isJoining: false,
@@ -488,10 +516,28 @@ export function createDesktopStore(initial = {}) {
                 })
                 return type
             case 'join-error':
-                setState({
-                    isJoining: false,
-                    joinPhase: null,
-                    diagnostics: recordDiagnostic('join-error', payload.message, now),
+                // The reason is the useful half. `message` is the backend's
+                // untranslated Error text: it goes into the diagnostic log and
+                // nowhere else — the failure a user reads is resolved from the
+                // reason through the catalog (see joinErrorKey).
+                transaction(() => {
+                    setState({
+                        isJoining: false,
+                        joinPhase: null,
+                        diagnostics: recordDiagnostic(`join-error ${payload.reason ?? 'unknown'}`, payload.message, now),
+                    })
+                    reduxStore.dispatch(syncActions.joinErrorReceived({ ...payload, at: now }))
+                })
+                return type
+            case 'network-status':
+                // Recorded as the actual status, not a bare label. A desktop peer
+                // that hosted a failed pairing used to leave no trace of whether
+                // its OWN DHT was up at the time.
+                transaction(() => {
+                    reduxStore.dispatch(syncActions.networkStatusSet(payload.status))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({
+                        diagnostics: recordDiagnostic('network-status', payload.status, now),
+                    }))
                 })
                 return type
             case 'write-queued':

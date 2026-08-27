@@ -10,6 +10,9 @@ import {
     RPC_MOVE,
     RPC_JOIN_KEY,
     RPC_CREATE_INVITE,
+    RPC_GET_KEY,
+    RPC_CANCEL_JOIN,
+    RPC_GET_NET_DIAGNOSTICS,
     RPC_REQUEST_SYNC,
     RPC_REMOVE_MEMBER,
     RPC_GET_MEMBERS,
@@ -71,15 +74,10 @@ import {
     clampRate,
     hasValueRating,
     validateValueDraft,
-    summarizeValue,
-    aggregateCompletedValuePerDay,
-    valueStatsForPeriod,
 } from '@listam/domain/value'
 import {
     isPlanItem,
     reducePlan,
-    groupPlanByDate,
-    overduePlanRecords,
     computePlanReorder,
     computePlanInsert,
     buildItemPlanEntry,
@@ -107,10 +105,18 @@ import { createInviteQr } from './qr-code.mjs'
 import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
+import { createOverviewSection } from './ui/overview.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
 import { shouldHandleAppShortcut, isTypingKeystroke, isTypingTarget } from './ui/keyboard-shortcuts.mjs'
 import { adoptSharedListRoute } from './ui/shared-route.mjs'
+import {
+    joinErrorKey,
+    canCancelJoin,
+    describeJoinProgress,
+    describeInvite,
+    describeNetDiagnostics,
+} from './ui/pairing-status.mjs'
 import { selectSummary, selectDoneItems } from './store.mjs'
 import { buildUndoEntry, applyInverseWrite, guardOk, pushCapped } from './undo.mjs'
 import { categoryIcon, tablerIcon } from './icons.mjs'
@@ -153,6 +159,11 @@ const HINTS_LEAVE_MS = 150
 const REMOTE_ATTRIBUTION_MS = 5000
 // How often the Servers pane re-polls paired headless peers while it's open.
 const SERVERS_POLL_MS = 20000
+// The invite countdown is wall-clock: nothing pushes an event as a code runs
+// out, and a code still reading "expires in 0:14" after it died is exactly the
+// confusion this change exists to remove. Ticks only while a countdown is on
+// screen, so it costs nothing the rest of the time.
+const INVITE_TICK_MS = 5000
 // How often to re-render the peers pane / devices dialog so presence (online-now,
 // "seen ago") decays with wall-clock even when no new heartbeat event arrives.
 const PRESENCE_TICK_MS = 20000
@@ -417,6 +428,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         updateReady: false,
         updateRestarting: false,
         updateRestartFailed: false,
+        // Last RPC_GET_NET_DIAGNOSTICS snapshot, projected by describeNetDiagnostics.
+        // UI-local: it is a point-in-time probe of the transport, not replicated
+        // state, and it must not survive a store reset the way sync state does.
+        netDiagnostics: null,
+        netDiagnosticsBusy: false,
     }
     const now = env.now ?? (() => Date.now())
     // Block ids only need to be unique within a session; the renderer rebuilds
@@ -1510,8 +1526,40 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // hit by reflex when the user meant to share one list (that lives in the
         // per-list settings dialog via shareList).
         shareProject() {
-            send(RPC_CREATE_INVITE)
+            // RPC_GET_KEY, not RPC_CREATE_INVITE. Since the invite book became
+            // additive, CREATE_INVITE always mints (`{ fresh: true }`,
+            // @listam/backend backend.mjs:506), so opening Share five times used
+            // to leave five live codes and push toward the eight-code cap, which
+            // evicts the OLDEST live code — the one already handed to somebody.
+            // GET_KEY re-publishes the code that is live, minting only when none
+            // is. Minting is the "New code" button's job and nothing else's.
+            send(RPC_GET_KEY)
             openDialog({ kind: 'share' })
+        },
+        // Mint an ADDITIONAL code. RPC_CREATE_INVITE no longer replaces the last
+        // one, so handing a second friend a code cannot silently kill the first
+        // friend's — which is exactly what happened on 2026-08-26.
+        regenerateInvite() {
+            send(RPC_CREATE_INVITE)
+        },
+        // Abort a join that is still pairing. Without this the guest stays behind
+        // joinViaInvite's single-flight guard for the rest of its 120s deadline,
+        // so a retry with a fresh code re-attaches to the stuck attempt and the
+        // OLD failure gets reported against the NEW code.
+        async cancelJoin() {
+            const res = parseReply(await send(RPC_CANCEL_JOIN))
+            // A real cancellation answers { cancelled: true } and the backend
+            // broadcasts join-error/'cancelled', which clears this itself.
+            if (res?.cancelled) return
+            // { cancelled: false } is two different situations and only one of
+            // them may dismiss the overlay — see canCancelJoin.
+            if (!canCancelJoin(store.getState().joinPhase)) return
+            // Nothing was in flight and no broadcast is coming: clear the pane
+            // that is otherwise stuck forever.
+            store.setState({ isJoining: false })
+        },
+        refreshNetDiagnostics() {
+            return refreshNetDiagnostics()
         },
         // Promote ONE list to its own shared base and show its co-edit invite.
         // Distinct from share() (the whole-project invite): others who join this
@@ -1743,7 +1791,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             class: `nav-item${def.soon ? ' soon' : ''}`,
             onclick: def.soon
                 ? null
-                : (def.action ?? (() => { ui.view = def.key; renderAll() })),
+                : (def.action ?? (() => {
+                    ui.view = def.key
+                    // Opening Peers is exactly when someone asks "why is this not
+                    // connecting" — probe the transport then, rather than on a
+                    // timer that runs while nobody is looking at the answer.
+                    if (def.key === 'peers') void refreshNetDiagnostics()
+                    renderAll()
+                })),
         })
         if (def.soon) btn.setAttribute('aria-disabled', 'true')
         navButtons[def.key] = btn
@@ -2313,517 +2368,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         )
     }
 
-    // --- Overview (the cross-list day plan) ---------------------------------
-    // A read-only aggregation: items/lists flagged into a day (the synced plan
-    // channel) joined back to their live source items. Marking done / editing a
-    // row writes through to the SOURCE item; list-cards open their list and clear
-    // from the plan when checked. Two layouts: Focus (spotlight + today) and
-    // Planner (today agenda + a week rail). Calendar events are out of v1.
-    function openSurfaceById(listId, type) {
-        selectSurface(store.getState(), { listId, type })
-    }
-    function parsePlanKey(key) {
-        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || '')
-        return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(now())
-    }
-    function planSurfaceName(listId, type, registry, surfaceLabels) {
-        if (listId === DEFAULT_LIST_ID) return builtinDisplayName(type, surfaceLabels)
-        return registry.lists.find((l) => l.id === listId)?.name || listId
-    }
-    function renderOverviewPane(state) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const reduced = reducePlan(state.items)
-        const byDate = groupPlanByDate(reduced)
-        const registry = reduceRegistry(state.items)
-        const surfaceLabels = reduceSurfaceLabels(state.items)
-        const byKey = new Map()
-        for (const it of state.items) byKey.set(`${it.listId}::${it.id}`, it)
-
-        // Board tickets track "done" via status, not isDone — route their overview
-        // checkbox through a board status change so the source column updates too.
-        const boardConfig = selectBoardConfig(state)
-        const boardDone = new Set(doneStatusesOf(boardConfig))
-        const firstDoneStatus = doneStatusesOf(boardConfig)[0] || 'done'
-        const firstOpenStatus = (boardConfig.states || []).map((s) => s.id).find((id) => !boardDone.has(id)) || 'todo'
-        const isItemDone = (item) => (isBoardType(item.listType) ? (item.isDone || boardDone.has(item.status)) : !!item.isDone)
-        const toggleItemDone = (item) => {
-            if (isBoardType(item.listType)) actions.moveTicket(item, isItemDone(item) ? firstOpenStatus : firstDoneStatus)
-            else actions.toggleItem(item)
-        }
-
-        const today = toDateKey(now())
-        const tomorrowKey = shiftDateKey(today, 1)
-        // The strip pages a week at a time; weekOffset 0 starts on today, negative
-        // pages into the past, positive into the future.
-        const anchor = shiftDateKey(today, ui.weekOffset * 7)
-        const week = Array.from({ length: 7 }, (_, i) => shiftDateKey(anchor, i))
-        // Keep the selected day within the visible week; fall back to today when
-        // it's on-screen, else the first pill of the paged week.
-        const selected = (ui.planDate && week.includes(ui.planDate))
-            ? ui.planDate
-            : (week.includes(today) ? today : week[0])
-        const view = ['planner', 'value'].includes(state.preferences.overviewView) ? state.preferences.overviewView : 'focus'
-
-        // Resolve a plan record to a renderable row, dropping dangling item refs.
-        const resolve = (rec) => {
-            if (rec.kind === 'list') {
-                const scoped = state.items.filter((it) => it.listId === rec.refListId && typePredicate(rec.refType)(it))
-                return {
-                    rec,
-                    kind: 'list',
-                    listId: rec.refListId,
-                    listType: rec.refType,
-                    label: planSurfaceName(rec.refListId, rec.refType, registry, surfaceLabels),
-                    count: selectSummary(scoped).remaining,
-                }
-            }
-            const src = byKey.get(`${rec.refListId}::${rec.refItemId}`)
-            if (!src) return null
-            return {
-                rec,
-                kind: 'item',
-                item: src,
-                done: isItemDone(src),
-                label: src.text,
-                chip: planSurfaceName(rec.refListId, src.listType, registry, surfaceLabels),
-            }
-        }
-        const resolveDay = (dateKey) => (byDate.get(dateKey) || []).map(resolve).filter(Boolean)
-        // Derived carryover: entries parked on a past day that aren't done yet
-        // surface under Today in their shared manual order. Their plannedFor is
-        // retained while reordering, so origin badges remain accurate. Completing
-        // writes through to the source; "move to today" (below) re-homes the entry
-        // for real if the user wants it off the past.
-        const carried = overduePlanRecords(reduced, today)
-            .map(resolve)
-            .filter(Boolean)
-            .filter((r) => !r.done)
-            // The carry-over tray is one reorderable collection even though its
-            // records retain different origin dates. planOrder is therefore the
-            // primary display key here; origin date remains a deterministic tie
-            // breaker for trays that have never been manually ordered.
-            .sort((a, b) => (
-                (a.rec.planOrder - b.rec.planOrder) ||
-                a.rec.plannedFor.localeCompare(b.rec.plannedFor) ||
-                a.rec.ref.localeCompare(b.rec.ref)
-            ))
-
-        // Value rollups for the plan strip / rail: sum value + average delay over
-        // the rated single items planned into a day (list-cards have no rate).
-        const dayValueItems = (dateKey) => resolveDay(dateKey).filter((r) => r.kind === 'item').map((r) => r.item)
-        const fmtAvg = (n) => String(Math.round(n * 10) / 10)
-        const valueRollup = (summary) => summary.count === 0 ? null : h('span', { class: 'value-rollup label-sm', title: `${t('value.value')} · ${t('value.delay')}` },
-            tablerIcon('coins', { size: 12 }), String(summary.totalValue),
-            tablerIcon('hourglass', { size: 12 }), fmtAvg(summary.avgDelay))
-        const weekValueBar = (() => {
-            const roll = valueRollup(summarizeValue(week.flatMap(dayValueItems)))
-            return roll ? h('div', { class: 'plan-weekbar' }, roll) : null
-        })()
-
-        // Every plan row is a drag SOURCE: dropping it onto a day pill (the strip)
-        // or a week column re-plans it to that day (movePlanToDay). This is what
-        // makes single-item days, done rows, and carried-over rows movable — not
-        // only the multi-row days that also support reordering.
-        const planDragSource = (rec) => ({
-            draggable: 'true',
-            ondragstart: (event) => {
-                ui.planDrag = { ref: rec.ref, fromDate: rec.plannedFor }
-                event.dataTransfer.effectAllowed = 'move'
-                try { event.dataTransfer.setData('text/plain', rec.ref) } catch { /* some platforms reject */ }
-                event.currentTarget.classList.add('dragging')
-                event.stopPropagation()
-            },
-            ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
-        })
-        // A plan row can be a drop target for either an ordered collection (the
-        // carry-over tray, whose records retain different origin dates) or one
-        // day's agenda. Dropping across days inserts at the indicated row,
-        // whereas dropping within the same collection only changes planOrder.
-        const planReorderTarget = (rec, orderedRecords, index, { collection = false } = {}) => ({
-            ondragover: (event) => {
-                const d = ui.planDrag
-                if (!d || d.ref === rec.ref) return
-                if (collection && !orderedRecords.some((r) => r.ref === d.ref)) return
-                event.preventDefault(); event.stopPropagation()
-                const before = dropBefore(event, 'y')
-                event.currentTarget.classList.toggle('drop-before', before)
-                event.currentTarget.classList.toggle('drop-after', !before)
-            },
-            ondragleave: (event) => { event.currentTarget.classList.remove('drop-before', 'drop-after') },
-            ondrop: (event) => {
-                const d = ui.planDrag
-                event.currentTarget.classList.remove('drop-before', 'drop-after')
-                if (!d || d.ref === rec.ref) return
-                if (collection && !orderedRecords.some((r) => r.ref === d.ref)) return
-                event.preventDefault(); event.stopPropagation()
-                ui.planDrag = null
-                const before = dropBefore(event, 'y')
-                const insertAt = before ? index : index + 1
-                const fromIndex = orderedRecords.findIndex((r) => r.ref === d.ref)
-                if (collection || d.fromDate === rec.plannedFor) {
-                    if (fromIndex < 0) return
-                    actions.reorderPlanRecords(orderedRecords, fromIndex, insertAt > fromIndex ? insertAt - 1 : insertAt)
-                    return
-                }
-                actions.movePlanIntoDay(d.ref, rec.plannedFor, orderedRecords, insertAt)
-            },
-        })
-
-        const planRow = (resolved, dayRecords, index, opts = {}) => {
-            // Every row is a drag source (drop on a day pill/column to re-plan it to
-            // another day) and a drop target, so a carry-over item can be inserted
-            // before/after even when Today currently contains only one item.
-            // The whole row is the drag surface — the grip is just the affordance,
-            // shown on every row so "move to another day" is always discoverable.
-            const records = Array.isArray(dayRecords) ? dayRecords : []
-            const dnd = { ...planDragSource(resolved.rec), ...(records.length > 0 ? planReorderTarget(resolved.rec, records, index) : {}) }
-            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
-            if (resolved.kind === 'list') {
-                return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
-                    grip,
-                    h('button', {
-                        class: 'plan-check',
-                        'aria-label': t('plan.clearFromPlan'),
-                        title: t('plan.clearFromPlan'),
-                        onclick: () => actions.clearFromPlan(resolved.rec.ref),
-                    }, tablerIcon('square', { size: opts.spotlight ? 22 : 18 })),
-                    h('span', { class: 'glyph' }, tablerIcon(iconForType(resolved.listType), { size: 16 })),
-                    h('span', { class: 'plan-text', onclick: () => openSurfaceById(resolved.listId, resolved.listType) }, resolved.label),
-                    h('span', { class: 'plan-chip' }, t('plan.listItems', { count: resolved.count })),
-                    h('button', {
-                        class: 'plan-open',
-                        'aria-label': t('plan.openList'),
-                        onclick: () => openSurfaceById(resolved.listId, resolved.listType),
-                    }, tablerIcon('chevron-right', { size: 16 })),
-                )
-            }
-            const item = resolved.item
-            if (ui.editingItemId === item.id) {
-                const editInput = h('input', {
-                    class: 'input',
-                    value: item.text,
-                    onkeydown: (event) => {
-                        if (event.key === 'Enter') { actions.editItem(item, editInput.value); ui.editingItemId = null; renderAll() }
-                        else if (event.key === 'Escape') { ui.editingItemId = null; renderAll() }
-                    },
-                    onblur: () => { ui.editingItemId = null; renderAll() },
-                })
-                queueMicrotask(() => editInput.focus())
-                return h('div', { class: 'plan-row' }, editInput)
-            }
-            const done = isItemDone(item)
-            return h('div', { class: `plan-row${done ? ' done' : ''}${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
-                grip,
-                h('button', {
-                    class: 'plan-check',
-                    'aria-pressed': done ? 'true' : 'false',
-                    'aria-label': t('main.item.toggle'),
-                    onclick: () => toggleItemDone(item),
-                }, tablerIcon(done ? 'square-check' : 'square', { size: opts.spotlight ? 22 : 18 })),
-                h('span', { class: 'plan-text plan-text-open', title: t('plan.openList'), onclick: () => actions.openPlanItem(item) }, item.text),
-                ...valueBadges(item),
-                h('span', { class: 'plan-chip' }, resolved.chip),
-                h('button', {
-                    class: 'plan-remove',
-                    'aria-label': t('plan.remove'),
-                    title: t('plan.remove'),
-                    onclick: () => actions.clearFromPlan(resolved.rec.ref),
-                }, tablerIcon('x', { size: 14 })),
-            )
-        }
-
-        // A carried-over row (shown only under Today): same check / open / clear
-        // as a normal plan row, plus a badge for the past day it slipped from and
-        // a one-click "move to today" shortcut. It's a drag source too, so a
-        // slipped item can be dropped onto ANY day pill/column — not just today.
-        // Its origin day stays intact while the tray's shared planOrder changes.
-        const carryRow = (resolved, carryRecords, index) => {
-            const rec = resolved.rec
-            const dnd = {
-                ...planDragSource(rec),
-                ...(carryRecords.length > 1 ? planReorderTarget(rec, carryRecords, index, { collection: true }) : {}),
-            }
-            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
-            const badge = h('span', {
-                class: 'plan-carry-badge label-sm',
-                title: parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
-            },
-                tablerIcon('history', { size: 12 }),
-                parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }),
-            )
-            const moveBtn = h('button', {
-                class: 'plan-carry-move',
-                'aria-label': t('plan.moveToToday'),
-                title: t('plan.moveToToday'),
-                onclick: () => actions.movePlanToDay(rec.ref, today),
-            }, tablerIcon('calendar-up', { size: 16 }))
-            if (resolved.kind === 'list') {
-                return h('div', { class: 'plan-row plan-list-card plan-carry', ...dnd },
-                    grip,
-                    h('button', {
-                        class: 'plan-check',
-                        'aria-label': t('plan.clearFromPlan'),
-                        title: t('plan.clearFromPlan'),
-                        onclick: () => actions.clearFromPlan(rec.ref),
-                    }, tablerIcon('square', { size: 18 })),
-                    h('span', { class: 'glyph' }, tablerIcon(iconForType(resolved.listType), { size: 16 })),
-                    h('span', { class: 'plan-text', onclick: () => openSurfaceById(resolved.listId, resolved.listType) }, resolved.label),
-                    badge,
-                    h('span', { class: 'plan-chip' }, t('plan.listItems', { count: resolved.count })),
-                    moveBtn,
-                    h('button', {
-                        class: 'plan-open',
-                        'aria-label': t('plan.openList'),
-                        onclick: () => openSurfaceById(resolved.listId, resolved.listType),
-                    }, tablerIcon('chevron-right', { size: 16 })),
-                )
-            }
-            const item = resolved.item
-            return h('div', { class: 'plan-row plan-carry', ...dnd },
-                grip,
-                h('button', {
-                    class: 'plan-check',
-                    'aria-pressed': 'false',
-                    'aria-label': t('main.item.toggle'),
-                    onclick: () => toggleItemDone(item),
-                }, tablerIcon('square', { size: 18 })),
-                h('span', { class: 'plan-text plan-text-open', title: t('plan.openList'), onclick: () => actions.openPlanItem(item) }, item.text),
-                badge,
-                ...valueBadges(item),
-                h('span', { class: 'plan-chip' }, resolved.chip),
-                moveBtn,
-                h('button', {
-                    class: 'plan-remove',
-                    'aria-label': t('plan.remove'),
-                    title: t('plan.remove'),
-                    onclick: () => actions.clearFromPlan(rec.ref),
-                }, tablerIcon('x', { size: 14 })),
-            )
-        }
-
-        // One day's agenda: an optional carried-over tray (Today only), then the
-        // spotlight (first pending) + next-up + a done tray.
-        const dayAgenda = (dateKey) => {
-            const rows = resolveDay(dateKey)
-            // Carried-over work belongs to Today only; other days show just their own.
-            const carriedHere = dateKey === today ? carried : []
-            const pending = rows.filter((r) => !r.done)
-            const done = rows.filter((r) => r.done)
-            const pendingRecords = pending.map((r) => r.rec)
-            if (rows.length === 0 && carriedHere.length === 0) {
-                return h('div', { class: 'plan-empty' },
-                    h('div', { class: 'plan-empty-icon' }, tablerIcon('flag', { size: 22 })),
-                    h('p', { class: 'plan-empty-title' }, t('plan.empty.title')),
-                    h('p', { class: 'label-md' }, t('plan.empty.hint')),
-                    h('div', { class: 'plan-empty-tip label-sm' },
-                        tablerIcon('flag', { size: 14 }),
-                        h('span', {}, t('plan.flag')),
-                        h('span', { class: 'plan-empty-tip-or' }, '·'),
-                        h('kbd', {}, 'F'),
-                    ),
-                )
-            }
-            const parts = []
-            if (carriedHere.length > 0) {
-                parts.push(h('div', { class: 'plan-section-label plan-carry-label label-sm' },
-                    tablerIcon('history', { size: 13 }),
-                    h('span', {}, t('plan.carriedOver', { count: carriedHere.length })),
-                ))
-                const carryRecords = carriedHere.map((r) => r.rec)
-                parts.push(h('div', { class: 'plan-rows plan-carry-rows' }, ...carriedHere.map((r, i) => carryRow(r, carryRecords, i))))
-            }
-            if (pending.length > 0) {
-                parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.now')))
-                parts.push(h('div', { class: 'plan-spotlight-wrap' }, planRow(pending[0], pendingRecords, 0, { spotlight: true })))
-                if (pending.length > 1) {
-                    parts.push(h('div', { class: 'plan-section-label label-sm' }, t('plan.nextUp')))
-                    parts.push(h('div', { class: 'plan-rows' }, ...pending.slice(1).map((r, i) => planRow(r, pendingRecords, i + 1))))
-                }
-            }
-            if (done.length > 0) {
-                parts.push(h('div', { class: 'plan-done-tray' },
-                    h('span', { class: 'glyph done' }, tablerIcon('square-check', { size: 14 })),
-                    h('span', { class: 'label-sm' }, t('plan.doneToday', { count: done.length })),
-                ))
-                parts.push(h('div', { class: 'plan-rows plan-done-rows' }, ...done.map((r) => planRow(r, [], 0))))
-            }
-            return h('div', {}, ...parts)
-        }
-
-        // The clickable + droppable day strip.
-        const strip = h('div', { class: 'plan-strip' }, ...week.map((dk) => {
-            const count = resolveDay(dk).length
-            return h('button', {
-                class: `plan-pill${dk === selected ? ' selected' : ''}${dk === today ? ' today' : ''}`,
-                onclick: () => { ui.planDate = dk; renderAll() },
-                ondragover: (event) => { if (ui.planDrag) { event.preventDefault(); event.currentTarget.classList.add('drop') } },
-                ondragleave: (event) => { event.currentTarget.classList.remove('drop') },
-                ondrop: (event) => {
-                    event.preventDefault(); event.currentTarget.classList.remove('drop')
-                    const d = ui.planDrag; ui.planDrag = null
-                    if (d) actions.movePlanToDay(d.ref, dk)
-                },
-            },
-                h('span', { class: 'pill-dow label-sm' }, dk === today ? t('plan.today') : dk === tomorrowKey ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short' })),
-                h('span', { class: 'pill-day' }, String(parsePlanKey(dk).getDate())),
-                h('span', { class: `pill-count label-sm${count === 0 ? ' zero' : ''}` }, count > 0 ? String(count) : '·'),
-                valueRollup(summarizeValue(dayValueItems(dk))),
-            )
-        }))
-
-        // Page the strip a week at a time so past days are reachable; a Today jump
-        // snaps back to the current week whenever the strip has drifted off it.
-        const rangeLabel = `${parsePlanKey(week[0]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} – ${parsePlanKey(week[6]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
-        const stripNav = h('div', { class: 'plan-strip-nav' },
-            h('button', {
-                class: 'plan-week-btn', 'aria-label': t('plan.prevWeek'), title: t('plan.prevWeek'),
-                onclick: () => { ui.weekOffset -= 1; ui.planDate = ''; renderAll() },
-            }, tablerIcon('chevron-left', { size: 16 })),
-            h('span', { class: 'plan-week-range label-sm' }, rangeLabel),
-            h('button', {
-                class: 'plan-week-btn', 'aria-label': t('plan.nextWeek'), title: t('plan.nextWeek'),
-                onclick: () => { ui.weekOffset += 1; ui.planDate = ''; renderAll() },
-            }, tablerIcon('chevron-right', { size: 16 })),
-            ui.weekOffset === 0 ? null : h('button', {
-                class: 'plan-today-btn label-sm',
-                onclick: () => { ui.weekOffset = 0; ui.planDate = today; renderAll() },
-            }, t('plan.today')),
-        )
-        const stripWrap = h('div', { class: 'plan-strip-wrap' }, stripNav, strip)
-
-        const header = h('header', { class: 'page-header' },
-            h('div', {},
-                h('h1', { class: 'page-title title-lg' }, t('desktop.nav.overview')),
-                h('div', { class: 'summary-bar label-md plan-subhead' },
-                    beacon(state),
-                    h('span', {}, parsePlanKey(today).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })),
-                ),
-            ),
-            h('div', { class: 'header-actions' },
-                h('span', { class: 'plan-viewtoggle' },
-                    h('button', { class: `seg${view === 'focus' ? ' active' : ''}`, onclick: () => actions.setOverviewView('focus') }, t('plan.focus')),
-                    h('button', { class: `seg${view === 'planner' ? ' active' : ''}`, onclick: () => actions.setOverviewView('planner') }, t('plan.planner')),
-                    h('button', { class: `seg${view === 'value' ? ' active' : ''}`, onclick: () => actions.setOverviewView('value') }, t('value.tab')),
-                ),
-            ),
-        )
-
-        if (view === 'value') {
-            return replaceChildren(main, header, renderValuePane(state))
-        }
-
-        if (view === 'planner') {
-            const rail = h('div', { class: 'plan-week-rail' }, ...week.map((dk) => {
-                const rows = resolveDay(dk)
-                return h('section', {
-                    class: `plan-week-day${dk === selected ? ' selected' : ''}${dk === today ? ' today' : ''}`,
-                    onclick: () => { ui.planDate = dk; renderAll() },
-                    ondragover: (event) => { if (ui.planDrag) { event.preventDefault(); event.currentTarget.classList.add('drop') } },
-                    ondragleave: (event) => { event.currentTarget.classList.remove('drop') },
-                    ondrop: (event) => { event.preventDefault(); event.currentTarget.classList.remove('drop'); const d = ui.planDrag; ui.planDrag = null; if (d) actions.movePlanToDay(d.ref, dk) },
-                },
-                    h('div', { class: 'plan-week-head' },
-                        h('span', {}, dk === today ? t('plan.today') : dk === tomorrowKey ? t('plan.tomorrow') : parsePlanKey(dk).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })),
-                        h('span', { class: 'plan-week-head-right' },
-                            valueRollup(summarizeValue(dayValueItems(dk))),
-                            h('span', { class: `pill-count label-sm${rows.length === 0 ? ' zero' : ''}` }, rows.length > 0 ? String(rows.length) : '·'),
-                        ),
-                    ),
-                    rows.length === 0
-                        ? h('div', { class: 'plan-week-empty label-sm' }, t('plan.empty.none'))
-                        : h('div', { class: 'plan-week-rows' }, ...rows.map((r) => h('div', { class: `plan-week-row${r.done ? ' done' : ''}` },
-                            tablerIcon(r.kind === 'list' ? iconForType(r.listType) : (r.done ? 'square-check' : 'square'), { size: 13 }),
-                            h('span', {}, r.label),
-                        ))),
-                )
-            }))
-            return replaceChildren(main, header, stripWrap, weekValueBar,
-                h('div', { class: 'plan-planner' },
-                    h('div', { class: 'plan-agenda' }, dayAgenda(selected)),
-                    rail,
-                ),
-            )
-        }
-
-        // Focus layout: selected-day agenda, plus a receded Tomorrow when on today.
-        const parts = [header, stripWrap, weekValueBar, h('div', { class: 'plan-focus' }, dayAgenda(selected))]
-        if (selected === today) {
-            const tomorrow = resolveDay(tomorrowKey).filter((r) => !r.done)
-            if (tomorrow.length > 0) {
-                parts.push(h('div', { class: 'plan-tomorrow' },
-                    h('div', { class: 'plan-section-label label-sm' }, t('plan.tomorrow')),
-                    h('div', { class: 'plan-rows' }, ...tomorrow.map((r) => planRow(r, [], 0))),
-                ))
-            }
-        }
-        return replaceChildren(main, ...parts)
-    }
-
-    // The Overview "Value" tab: a two-series day chart (total completed value +
-    // average delay) over the last 30 days, plus daily/monthly/quarterly/yearly
-    // stat cards. Aggregates COMPLETED rated items across every surface.
-    function renderValuePane(state) {
-        const t = locale.i18n.t.bind(locale.i18n)
-        const nowMs = now()
-        const fmt1 = (n) => String(Math.round(n * 10) / 10)
-        const series = aggregateCompletedValuePerDay(state.items, { daysBack: 30, nowMs })
-        const hasData = series.some((d) => d.count > 0)
-
-        const chart = buildValueChart(series)
-        const legend = h('div', { class: 'value-legend label-sm' },
-            h('span', { class: 'value-legend-item' }, h('span', { class: 'value-swatch value' }), tablerIcon('coins', { size: 13 }), t('value.chart.value')),
-            h('span', { class: 'value-legend-item' }, h('span', { class: 'value-swatch delay' }), tablerIcon('hourglass', { size: 13 }), t('value.chart.delay')),
-        )
-        const axis = h('div', { class: 'value-axis label-sm' },
-            h('span', {}, parsePlanKey(series[0].dateKey).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })),
-            h('span', {}, parsePlanKey(series[series.length - 1].dateKey).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })),
-        )
-
-        const periods = [['day', t('value.stats.daily')], ['month', t('value.stats.monthly')], ['quarter', t('value.stats.quarterly')], ['year', t('value.stats.yearly')]]
-        const cards = periods.map(([p, label]) => {
-            const s = valueStatsForPeriod(state.items, p, { nowMs })
-            return h('div', { class: 'value-stat-card' },
-                h('div', { class: 'value-stat-label label-sm' }, label),
-                h('div', { class: 'value-stat-num' }, tablerIcon('coins', { size: 16 }), s.count ? String(s.totalValue) : '—'),
-                h('div', { class: 'value-stat-sub label-sm' }, s.count
-                    ? h('span', {}, tablerIcon('hourglass', { size: 12 }), `${fmt1(s.avgDelay)} · ${t('congruency.completed', { count: s.count })}`)
-                    : h('span', {}, t('value.empty'))),
-            )
-        })
-
-        return h('div', { class: 'value-pane' },
-            h('div', { class: 'value-chart-card' },
-                legend,
-                hasData ? chart : h('div', { class: 'value-empty' }, t('value.empty')),
-                hasData ? axis : null,
-            ),
-            h('div', { class: 'value-stats' }, ...cards),
-        )
-    }
-
-    // Inline-SVG dual-line chart. Value uses its own max; delay is fixed 1..10.
-    // Built as an SVG string injected via innerHTML (the HTML parser creates the
-    // SVG-namespaced nodes), mirroring how tablerIcon builds its markup.
-    function buildValueChart(series) {
-        const W = 640, H = 200, padL = 6, padR = 6, padT = 14, padB = 10
-        const n = series.length
-        const innerW = W - padL - padR
-        const innerH = H - padT - padB
-        const maxValue = Math.max(1, ...series.map((d) => d.totalValue))
-        const xAt = (i) => padL + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW)
-        const yValue = (v) => padT + innerH - (v / maxValue) * innerH
-        const yDelay = (v) => padT + innerH - (v / VALUE_MAX) * innerH
-        const pts = (fn, key) => series.map((d, i) => `${xAt(i).toFixed(1)},${fn(d[key]).toFixed(1)}`).join(' ')
-        const svg = `<svg viewBox="0 0 ${W} ${H}" class="value-chart-svg" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">`
-            + `<line x1="${padL}" y1="${(padT + innerH).toFixed(1)}" x2="${W - padR}" y2="${(padT + innerH).toFixed(1)}" class="vc-axis" />`
-            + `<polyline points="${pts(yValue, 'totalValue')}" class="vc-line vc-value" />`
-            + `<polyline points="${pts(yDelay, 'avgDelay')}" class="vc-line vc-delay" />`
-            + '</svg>'
-        const wrap = h('div', { class: 'value-chart' })
-        wrap.innerHTML = svg
-        return wrap
-    }
-
+    const { renderOverviewPane } = createOverviewSection({
+        main,
+        store,
+        locale,
+        ui,
+        actions,
+        now,
+        renderAll,
+        selectSurface,
+        builtinDisplayName,
+        typePredicate,
+        iconForType,
+        dropBefore,
+        valueBadges,
+        beacon,
+    })
     function renderListsPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const { preferences } = state
@@ -2935,12 +2495,32 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         )
     }
 
+    // Three people on 4G watched this pane say "Pairing..." for two minutes and
+    // then nothing. It now reports the backend's own heartbeat: how long this has
+    // been going, whether the network forced a relay, and a way out that actually
+    // aborts the attempt instead of leaving it wedged behind the single-flight
+    // guard. `elapsedMs` comes from the backend, so no local timer can drift
+    // from, or outlive, the real join.
     function renderJoinOverlay(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const phase = state.joinPhase || 'default'
+        const progress = describeJoinProgress(state.joinProgress)
         return h('div', { class: 'join-overlay pane-section' },
             h('h2', { class: 'headline-sm' }, t(`joining.phase.${phase}.title`)),
             h('p', { class: 'phase body-md' }, t(`joining.phase.${phase}.subtitle`)),
+            progress
+                ? h('p', { class: 'join-elapsed label-md' }, t('joining.elapsed', { seconds: progress.seconds }))
+                : null,
+            progress?.slow ? h('p', { class: 'join-hint body-md' }, t('joining.hint.slow')) : null,
+            progress?.relayed ? h('p', { class: 'join-hint body-md' }, t('joining.hint.relayed')) : null,
+            // Only offered while the attempt can actually be stopped: a button
+            // that quietly does nothing is the same mute failure this whole
+            // change exists to remove.
+            canCancelJoin(state.joinPhase)
+                ? h('div', { class: 'join-actions' },
+                    h('button', { class: 'btn btn-secondary', onclick: () => actions.cancelJoin() }, t('joining.cancel')),
+                )
+                : null,
         )
     }
 
@@ -4613,6 +4193,82 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         )
     }
 
+    // One invite rendering for both the Peers pane and the share dialog. Before
+    // this, both sites bound `state.inviteKey` raw: the code and its QR swapped
+    // under the sharer the moment anything re-minted, with no countdown, no sign
+    // the code works exactly once, and no way to tell an expired code from a live
+    // one. All three facts ride the invite envelope; this is where they surface.
+    function renderInviteBlock(state, { showCopy = true, emptyKey = 'desktop.peers.invite.none', emptyClass = 'body-md pane-note' } = {}) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const invite = describeInvite({ key: state.inviteKey, ...(state.invite ?? {}) }, now())
+        if (!invite.code) return h('p', { class: emptyClass }, t(emptyKey))
+        const regenerate = h('button', {
+            class: 'btn btn-secondary',
+            onclick: () => actions.regenerateInvite(),
+        }, t('invite.regenerate'))
+        // Rendering a QR for a dead code invites a second failed join. Say it is
+        // expired and offer the one action that helps.
+        if (invite.expired) {
+            return h('div', { class: 'invite-share-layout is-expired' },
+                h('div', { class: 'invite-share-copy' },
+                    h('p', { class: 'body-md' }, t('invite.expired')),
+                    h('div', { class: 'invite-actions' }, regenerate),
+                ),
+            )
+        }
+        return h('div', { class: 'invite-share-layout' },
+            createInviteQr(createInviteQrPayload(invite.code, 'project'), t('share.project.dialogTitle')),
+            h('div', { class: 'invite-share-copy' },
+                h('div', { class: 'invite-code' }, invite.code),
+                h('div', { class: 'invite-meta label-sm' },
+                    invite.singleUse ? h('span', {}, t('invite.singleUse')) : null,
+                    // No countdown when the backend sent a bare z32 code: unknown
+                    // expiry is not the same as expired.
+                    invite.hasExpiry ? h('span', {}, t('invite.expiresIn', { time: invite.countdown })) : null,
+                ),
+                h('div', { class: 'invite-actions' },
+                    showCopy ? h('button', { class: 'btn btn-primary', onclick: copyInvite }, t('desktop.peers.copy')) : null,
+                    regenerate,
+                ),
+            ),
+        )
+    }
+
+    // Transport diagnostics, in the pane where sharing and peers already live.
+    // The rows are the backend's own field names (a copied dump is read next to
+    // its logs); the one sentence a user needs — this network blocks direct
+    // connections — is the translated note above them.
+    function renderNetDiagnostics(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const net = ui.netDiagnostics
+        return h('section', { class: 'pane-section' },
+            h('h3', { class: 'category-heading label-sm' }, t('network.diagnostics.title')),
+            net?.relayed ? h('p', { class: 'body-md pane-note' }, t('network.diagnostics.relayed')) : null,
+            // Rendered as the app's raw-diagnostic idiom (the same monospace log
+            // lines the Activity dump uses), not as ten setting-sized kv rows:
+            // this is a transport dump to read and copy, and at kv-row weight it
+            // was taller than every other section in the pane put together.
+            h('div', { class: 'event-log net-diagnostics' },
+                ...(net ? net.rows : [['networkStatus', state.networkStatus ?? '—']]).map(([key, value]) => (
+                    h('div', { class: 'event-line' },
+                        h('span', { class: 'ts' }, key),
+                        h('span', {}, value),
+                    )
+                )),
+            ),
+            h('div', { class: 'choice-row', style: 'padding: 0.75rem 1rem 0;' },
+                h('button', {
+                    class: 'btn btn-secondary',
+                    disabled: ui.netDiagnosticsBusy ? '' : null,
+                    onclick: () => { void actions.refreshNetDiagnostics() },
+                }, t('desktop.servers.refresh')),
+                net
+                    ? h('button', { class: 'btn btn-secondary', onclick: copyNetDiagnostics }, t('network.diagnostics.copy'))
+                    : null,
+            ),
+        )
+    }
+
     function renderPeersPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const members = state.roster?.writers ?? []
@@ -4654,16 +4310,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ),
             ),
             h('section', { class: 'pane-section' },
-                h('h3', { class: 'category-heading label-sm' }, t('desktop.peers.invite.title')),
-                state.inviteKey
-                    ? h('div', { class: 'invite-share-layout' },
-                        createInviteQr(createInviteQrPayload(state.inviteKey, 'project'), t('share.project.dialogTitle')),
-                        h('div', { class: 'invite-share-copy' },
-                            h('div', { class: 'invite-code' }, state.inviteKey),
-                            h('button', { class: 'btn btn-primary', onclick: copyInvite }, t('desktop.peers.copy'))),
-                    )
-                    : h('p', { class: 'body-md pane-note' }, t('desktop.peers.invite.none')),
+                h('h3', { class: 'category-heading label-sm with-badge' },
+                    h('span', {}, t('desktop.peers.invite.title')),
+                    // Several codes can be live at once now. A bare count needs no
+                    // translation and is the only honest way to show that the code
+                    // handed to the last person still works.
+                    (state.invite?.liveInvites ?? 0) > 1
+                        ? h('span', { class: 'badge' }, String(state.invite.liveInvites))
+                        : null,
+                ),
+                renderInviteBlock(state),
             ),
+            renderNetDiagnostics(state),
             renderLeafBridge(state),
             renderVoice(state),
         )
@@ -5021,6 +4679,42 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         }
     }
 
+    // Probe the transport. Deliberately request/response rather than a
+    // subscription: this is a "what is happening right now" answer a user asks
+    // for while a share is failing, not a stream worth keeping open.
+    async function refreshNetDiagnostics() {
+        if (ui.netDiagnosticsBusy) return
+        ui.netDiagnosticsBusy = true
+        try {
+            // Deliberately `client.send`, NOT the wrapped `send()`: this is a
+            // read-only probe that answers { ok: true } and runs on the peers
+            // pane's 20s tick. Through send() every one of those replies would
+            // call clearWriteBlock() and erase a live "writes are refused"
+            // banner that nothing has actually resolved — and every failed probe
+            // would toast backend.startFailed on the same tick.
+            const reply = parseReply(await client.send(RPC_GET_NET_DIAGNOSTICS))
+            ui.netDiagnostics = describeNetDiagnostics(reply, { networkStatus: store.getState().networkStatus })
+        } catch {
+            // A dead worker already surfaces through the write-block banner; an
+            // empty diagnostics panel must not be mistaken for "all fields false".
+            ui.netDiagnostics = null
+        } finally {
+            ui.netDiagnosticsBusy = false
+            renderAll()
+        }
+    }
+
+    async function copyNetDiagnostics() {
+        const text = ui.netDiagnostics?.text
+        if (!text) return
+        try {
+            await navigator.clipboard.writeText(text)
+            store.pushNotice(locale.i18n.t('network.diagnostics.copied'), 'success')
+        } catch {
+            store.pushNotice(locale.i18n.t('invite.share.failed'), 'error')
+        }
+    }
+
     async function copyLeafKey(key) {
         try {
             await navigator.clipboard.writeText(key)
@@ -5058,7 +4752,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         act('settings', t('desktop.nav.settings'), () => openDialog({ kind: 'settings' }))
         act('info-circle', t('desktop.shortcuts.help'), () => openDialog({ kind: 'shortcuts' }))
         jmp('layout-dashboard', t('desktop.nav.overview'), '', () => { closeDialog(); ui.view = 'overview'; renderAll() })
-        jmp('users', t('desktop.nav.peers'), '', () => { closeDialog(); ui.view = 'peers'; renderAll() })
+        jmp('users', t('desktop.nav.peers'), '', () => { closeDialog(); ui.view = 'peers'; void refreshNetDiagnostics(); renderAll() })
         jmp('activity', t('desktop.analytics.title'), '', () => { closeDialog(); ui.view = 'analytics'; renderAll() })
         for (const g of buildRail(state).groups) {
             for (const s of g.surfaces) {
@@ -5193,14 +4887,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         } else if (kind === 'share') {
             content = dialogFrame(t('share.project.dialogTitle'), [
                 h('p', { class: 'dialog-body' }, t('share.project.dialogMessage')),
-                state.inviteKey
-                    ? h('div', { class: 'invite-share-layout' },
-                        createInviteQr(createInviteQrPayload(state.inviteKey, 'project'), t('share.project.dialogTitle')),
-                        h('div', { class: 'invite-code' }, state.inviteKey),
-                    )
-                    : h('p', { class: 'dialog-body' }, t('invite.share.notReady')),
+                // The dialog keeps its own "not ready yet" copy: it is opened by a
+                // deliberate Share action, so an absent code means the mint is
+                // still in flight, not that none was ever asked for.
+                renderInviteBlock(state, {
+                    showCopy: false,
+                    emptyKey: 'invite.share.notReady',
+                    emptyClass: 'dialog-body',
+                }),
             ], [
-                state.inviteKey ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy')) : null,
+                // Same expiry test the block above uses: the body already refuses
+                // to draw a QR for a dead code, so the footer must not still offer
+                // to put one on the clipboard.
+                describeInvite({ key: state.inviteKey, ...(state.invite ?? {}) }, now()).expired === false && state.inviteKey
+                    ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy'))
+                    : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
         } else if (kind === 'share-list') {
@@ -6094,9 +5795,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (ui.ticketDocId || ui.selectedTicketId) { actions.closeTicket(); return }
             return
         }
-        // The loading pane owns the workspace until the non-cancellable join
-        // settles. In particular, do not let the command palette start another
-        // join behind it.
+        // The loading pane owns the workspace until the join settles; it carries
+        // its own Stop button (RPC_CANCEL_JOIN), so keyboard shortcuts stay out.
+        // In particular, do not let the command palette start another join
+        // behind it.
         if (store.getState().isJoining) return
         const commandPaletteKey = (event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')
         if (!shouldHandleAppShortcut({
@@ -6182,6 +5884,26 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // Undo history is per-base: a reset / join (synced flips false) invalidates
     // every captured inverse, which may point at items that no longer exist.
     let lastSynced = null
+    // A failed join used to leave nothing behind but one diagnostics line, so
+    // three people on 4G got a spinner and then silence. Say what happened,
+    // once per failure, resolved from the machine-readable reason — never from
+    // the backend's untranslated Error message.
+    let noticedJoinError = null
+    function surfaceJoinError(state) {
+        const failure = state.joinError
+        if (!failure) {
+            noticedJoinError = null
+            return
+        }
+        // Identity, not reason: two consecutive timeouts are two failures and
+        // the second one deserves to be seen.
+        if (failure === noticedJoinError) return
+        noticedJoinError = failure
+        // Deferred: pushNotice dispatches, and dispatching from inside renderAll
+        // would re-enter renderAll while this pass is still building the DOM.
+        queueMicrotask(() => store.pushNotice(locale.i18n.t(joinErrorKey(failure.reason)), 'error'))
+    }
+
     function renderAll() {
         const state = store.getState()
         if (state.synced === false && lastSynced !== false) ui.undoStack.length = 0
@@ -6195,6 +5917,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         migrateBuiltinGroups()
         // Materialize the mandated default "general" group once we're writable.
         maybeEnsureGeneralGroup()
+        surfaceJoinError(state)
         // If anything inside the drawer/inspector holds focus (a button as much
         // as a field), don't let the row focus-restore below yank focus (and the
         // scroll position) back to the list row on a background re-render.
@@ -6244,8 +5967,20 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // while visible. Cheap and idle when neither surface is showing.
     if (typeof setInterval === 'function') {
         setInterval(() => {
-            if (ui.view === 'peers' || ui.dialog?.kind === 'devices') renderAll()
+            if (ui.view !== 'peers' && ui.dialog?.kind !== 'devices') return
+            // Re-probe the transport while the pane that shows it is open, so the
+            // diagnostics a user is staring at during a failed share are current.
+            // Fired alongside the render rather than instead of it: the probe is
+            // async and skips itself while one is in flight, and presence decay
+            // still owes this tick a re-render either way.
+            if (ui.view === 'peers') void refreshNetDiagnostics()
+            renderAll()
         }, PRESENCE_TICK_MS)
+        setInterval(() => {
+            if (ui.view !== 'peers' && ui.dialog?.kind !== 'share') return
+            if (!store.getState().inviteKey) return
+            renderAll()
+        }, INVITE_TICK_MS)
     }
     return { renderAll, openDialog, closeDialog, actions }
 }

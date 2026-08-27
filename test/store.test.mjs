@@ -645,3 +645,167 @@ test('a personal tombstone deletes only the personal row, not the shared copy', 
         'the row it removed must be the personal one — the shared copy is what the user just shared',
     )
 })
+
+// --- 4G/CGNAT pairing remediation ------------------------------------------
+// Every fact below reached the desktop already; none of it was kept. The
+// invite's expiry and single-use flag were dropped on the floor, join-progress
+// had no handler at all, join-error kept only the untranslated message, and
+// network-status fell through to the default branch as a content-free label —
+// so a desktop peer that hosted a failed pairing left no record of whether its
+// own DHT was even up.
+
+test('the invite envelope is kept whole, not reduced to a code', () => {
+    const store = createDesktopStore()
+
+    store.applyClientEvent({
+        type: 'invite-key',
+        key: 'z32code',
+        expiresAt: 1_700_000_000_000,
+        expiresInMs: 600000,
+        singleUse: true,
+        liveInvites: 2,
+        maxInvites: 8,
+    })
+
+    const state = store.getState()
+    assert.equal(state.inviteKey, 'z32code')
+    assert.deepEqual(state.invite, {
+        expiresAt: 1_700_000_000_000,
+        singleUse: true,
+        liveInvites: 2,
+        maxInvites: 8,
+    })
+})
+
+test('a legacy bare-string invite keeps a null expiry rather than a fabricated one', () => {
+    // @listam/client hands a UI on this version talking to an OLDER backend a
+    // decoded event with expiresAt null. That must stay null: describeInvite
+    // treats "unknown expiry" and "expired" as different things.
+    const store = createDesktopStore()
+
+    store.applyClientEvent({ type: 'invite-key', key: 'z32code', expiresAt: null, singleUse: true, liveInvites: 1 })
+
+    assert.equal(store.getState().invite.expiresAt, null)
+    assert.equal(store.getState().invite.liveInvites, 1)
+})
+
+test('clearing the invite clears its envelope with it', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'invite-key', key: 'z32code', expiresAt: 1, liveInvites: 3 })
+
+    store.applyClientEvent({ type: 'invite-key', key: '' })
+
+    assert.equal(store.getState().inviteKey, '')
+    assert.equal(store.getState().invite.liveInvites, 0)
+    assert.equal(store.getState().invite.expiresAt, null)
+})
+
+test('join-progress heartbeats land in state and in the diagnostic log', () => {
+    const store = createDesktopStore()
+
+    store.applyClientEvent({
+        type: 'message',
+        payload: {
+            type: 'join-progress',
+            phase: 'pairing',
+            elapsedMs: 40000,
+            bootstrapped: true,
+            online: true,
+            randomized: true,
+            relayConfigured: 1,
+            tempConnections: 0,
+            mainConnections: 0,
+        },
+    }, 5)
+
+    const state = store.getState()
+    assert.equal(state.joinProgress.elapsedMs, 40000)
+    assert.equal(state.joinProgress.randomized, true)
+    const entry = state.diagnostics.at(-1)
+    assert.equal(entry.label, 'join-progress 40s')
+})
+
+test('join-error keeps the machine-readable reason, and the message only as a diagnostic', () => {
+    const store = createDesktopStore()
+    store.setState({ isJoining: true })
+    store.applyClientEvent({ type: 'message', payload: { type: 'join-progress', elapsedMs: 10000 } })
+
+    store.applyClientEvent({
+        type: 'message',
+        payload: { type: 'join-error', reason: 'invite-used', message: 'Invite already claimed' },
+    }, 7)
+
+    const state = store.getState()
+    assert.equal(state.isJoining, false)
+    assert.equal(state.joinPhase, null)
+    assert.equal(state.joinError.reason, 'invite-used')
+    // Cleared: an elapsed counter from the attempt that just died must not sit
+    // under the next one's overlay.
+    assert.equal(state.joinProgress, null)
+    const entry = state.diagnostics.at(-1)
+    assert.equal(entry.label, 'join-error invite-used')
+    assert.equal(entry.detail, 'Invite already claimed')
+})
+
+test('a reasonless join-error still resolves to a reason', () => {
+    const store = createDesktopStore()
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'join-error', message: 'boom' } })
+
+    assert.equal(store.getState().joinError.reason, 'unknown')
+})
+
+test('two consecutive identical failures are two distinct events', () => {
+    // The UI shows a failure once per occurrence by object identity. If a repeat
+    // reused the previous object, the second timeout would never be reported.
+    const store = createDesktopStore()
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'join-error', reason: 'timeout' } }, 1)
+    const first = store.getState().joinError
+    store.applyClientEvent({ type: 'message', payload: { type: 'join-error', reason: 'timeout' } }, 2)
+
+    assert.notEqual(store.getState().joinError, first)
+    assert.equal(store.getState().joinError.at, 2)
+})
+
+test('starting a join clears the previous attempt’s failure and elapsed counter', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'message', payload: { type: 'join-error', reason: 'timeout' } })
+
+    store.setState({ isJoining: true })
+
+    assert.equal(store.getState().joinError, null)
+    assert.equal(store.getState().joinProgress, null)
+})
+
+test('network-status records the real status instead of an empty label', () => {
+    const store = createDesktopStore()
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'network-status', status: 'offline' } }, 3)
+
+    assert.equal(store.getState().networkStatus, 'offline')
+    const entry = store.getState().diagnostics.at(-1)
+    assert.equal(entry.label, 'network-status')
+    assert.equal(entry.detail, 'offline')
+})
+
+test('an unrecognized network status is ignored rather than stored', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'message', payload: { type: 'network-status', status: 'online' } })
+
+    store.applyClientEvent({ type: 'message', payload: { type: 'network-status', status: 'banana' } })
+
+    assert.equal(store.getState().networkStatus, 'online')
+})
+
+test('a reset returns a fresh invite envelope, not the shared initial object', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'invite-key', key: 'z32code', expiresAt: 1, liveInvites: 4 })
+
+    store.applyClientEvent({ type: 'reset' })
+    const afterReset = store.getState().invite
+    store.applyClientEvent({ type: 'invite-key', key: 'other', expiresAt: 2, liveInvites: 1 })
+
+    assert.equal(afterReset.liveInvites, 0)
+    assert.equal(afterReset.expiresAt, null)
+})

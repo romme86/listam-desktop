@@ -6,7 +6,7 @@
 import {
     RPC_UPDATE,
     RPC_REQUEST_SYNC,
-    RPC_CREATE_INVITE,
+    RPC_GET_KEY,
     RPC_GET_MEMBERS,
     RPC_GET_BOARD_CONFIG,
     RPC_LIST_BACKUPS,
@@ -20,10 +20,15 @@ const WORKER_CLOSE_TIMEOUT_MS = 3000
 // keyed by item id and resolves the same LWW value. The remaining commands are
 // read/refresh requests. Deliberately exclude RPC_ADD and RPC_MOVE — if their
 // first reply was lost, blindly repeating them could create or move twice.
+//
+// RPC_CREATE_INVITE left this set when the invite book became additive: it now
+// mints unconditionally, so a replay is not a refresh — it hands out a second
+// code and pushes toward the cap that evicts the oldest live one. RPC_GET_KEY
+// is the read that replaced it here and at both former call sites.
 const RECOVERY_RETRY_SAFE_COMMANDS = new Set([
     RPC_UPDATE,
     RPC_REQUEST_SYNC,
-    RPC_CREATE_INVITE,
+    RPC_GET_KEY,
     RPC_GET_MEMBERS,
     RPC_GET_BOARD_CONFIG,
     RPC_LIST_BACKUPS,

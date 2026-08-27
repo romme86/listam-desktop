@@ -1,7 +1,7 @@
 // Desktop entry point. Under Pear the embedded @listam/backend is booted
 // in-process; in a plain browser (design preview, ?mock=1) a fixture backend
 // stands in. Everything downstream — store, i18n, UI — is identical.
-import { RPC_REQUEST_SYNC, RPC_GET_MEMBERS, RPC_CREATE_INVITE } from '@listam/protocol'
+import { RPC_REQUEST_SYNC, RPC_GET_MEMBERS, RPC_GET_KEY, RPC_NET_SUSPEND, RPC_NET_RESUME } from '@listam/protocol'
 import { createLogger } from '@listam/logging'
 import { createDesktopStore } from './store.mjs'
 import { buildI18n, loadLocaleChoice, persistLocaleChoice } from './i18n.mjs'
@@ -10,6 +10,7 @@ import { mountApp } from './ui.mjs'
 import { createMockBackend } from './mock-backend.mjs'
 import { installSyncRecovery } from './sync-recovery.mjs'
 import { createOwnerControlBridge } from './owner-control.mjs'
+import { createNetLifecycle } from './net-lifecycle.mjs'
 
 const root = document.getElementById('app')
 const storage = globalThis.localStorage
@@ -89,6 +90,19 @@ async function boot() {
                 },
             }
             : null
+        // Sleep and network drops leave the swarm holding dead UDP sockets and a
+        // stale announce, so a desktop that napped simply stops being reachable.
+        // Pear exposes no app suspend/resume event; ./net-lifecycle.mjs explains
+        // which signals actually exist here and why they end in a suspend+resume
+        // pair rather than a bare resume.
+        createNetLifecycle({
+            suspend: () => backend.client.send(RPC_NET_SUSPEND),
+            resume: () => backend.client.send(RPC_NET_RESUME),
+            onError: (error, reason) => log.error('[listam] net lifecycle transition failed', {
+                reason,
+                message: error?.message ?? String(error),
+            }),
+        }).start()
         mountApp({ root, store, client: backend.client, locale, ownerControl, appUpdates })
         // The backend emits its initial sync/invite during startup, before the
         // UI listener attaches; ask again now that we are listening.
@@ -97,7 +111,11 @@ async function boot() {
         })
         await syncRecovery.refresh()
         await backend.client.send(RPC_GET_MEMBERS)
-        await backend.client.send(RPC_CREATE_INVITE)
+        // RPC_GET_KEY, not RPC_CREATE_INVITE: the invite book is additive now
+        // and CREATE_INVITE always mints, so booting the app would hand out a
+        // brand-new code nobody asked for on every launch. GET_KEY re-publishes
+        // the live code (minting only when there is none).
+        await backend.client.send(RPC_GET_KEY)
         // Leaf-board bridge (Settings → leaf board): resume the TCP listener
         // when the user left it enabled. Failures surface via leafBridge.error
         // in the settings dialog rather than blocking boot.
