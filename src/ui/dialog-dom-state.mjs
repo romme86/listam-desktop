@@ -31,11 +31,29 @@
 // Restoring a caret is only meaningful — and only legal — on the text-like input
 // types. Reading selectionStart off a checkbox yields null; WRITING it throws.
 const SELECTABLE_INPUT_TYPES = new Set(['text', 'password', 'search', 'url', 'tel', 'email', ''])
+// Types whose `value` is not the thing being edited (the checked flag / the file
+// list is), so carrying it across a rebuild would say nothing true.
+const VALUELESS_INPUT_TYPES = new Set(['checkbox', 'radio', 'file'])
 
 function isSelectable (el) {
     if (!el) return false
     if (el.tagName === 'TEXTAREA') return true
     return el.tagName === 'INPUT' && SELECTABLE_INPUT_TYPES.has(el.type ?? '')
+}
+
+// FOCUS is worth carrying for every field, not just the caret-bearing ones. The
+// ticket create panel autosaves as you type, so a background rebuild lands
+// mid-interaction on its number (estimate) and range (complexity, value, delay)
+// inputs exactly as it does on its text inputs — and being thrown off a slider
+// you are dragging is the same bug as losing a caret.
+function isFocusCarryable (el) {
+    return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
+}
+
+function carriesValue (el) {
+    if (!el) return false
+    if (el.tagName === 'TEXTAREA') return true
+    return el.tagName === 'INPUT' && !VALUELESS_INPUT_TYPES.has(el.type ?? '')
 }
 
 export function createDialogDomState () {
@@ -64,13 +82,14 @@ export function createDialogDomState () {
             const body = host.querySelector('.dialog-body')
             if (!body) return null
             const active = host.ownerDocument?.activeElement || null
-            const focused = active && host.contains(active) && isSelectable(active) ? active : null
+            const focused = active && host.contains(active) && isFocusCarryable(active) ? active : null
+            const selectable = isSelectable(focused)
             return {
                 scrollTop: body.scrollTop || 0,
                 fieldIndex: focused ? fields(host).indexOf(focused) : -1,
-                value: focused ? focused.value : null,
-                selectionStart: focused ? focused.selectionStart : null,
-                selectionEnd: focused ? focused.selectionEnd : null,
+                value: focused && carriesValue(focused) ? focused.value : null,
+                selectionStart: selectable ? focused.selectionStart : null,
+                selectionEnd: selectable ? focused.selectionEnd : null,
             }
         },
 
@@ -97,6 +116,9 @@ export function createDialogDomState () {
             // Synchronous: a dialog that autofocuses in a microtask still wins,
             // which is its pre-existing behaviour and not this module's call.
             field.focus?.({ preventScroll: true })
+            // No caret to restore on a slider or a number input — and asking for
+            // one there throws rather than returning nothing.
+            if (snapshot.selectionStart == null && snapshot.selectionEnd == null) return
             try {
                 field.setSelectionRange?.(
                     snapshot.selectionStart ?? field.value.length,

@@ -29,6 +29,10 @@ import {
     tableAddColumn,
     tableRemoveRow,
     tableRemoveColumn,
+    buildDraftTicket,
+    isDraftTicket,
+    canChangeTicketStatus,
+    commitDraftTicket,
 } from '@listam/domain/board'
 import {
     markdownToHtml,
@@ -62,6 +66,15 @@ export {
     tableAddColumn,
     tableRemoveRow,
     tableRemoveColumn,
+    buildDraftTicket,
+    isDraftTicket,
+    commitDraftTicket,
+}
+
+// The status pin on an unfinished draft. Wrapped like validateRigorDraft so the
+// caller passes the raw (possibly partial) config it holds in state.
+export function canMoveTicket (item, config) {
+    return canChangeTicketStatus(item, normalizeBoardConfig(config))
 }
 
 export function selectBoardConfig (state) {

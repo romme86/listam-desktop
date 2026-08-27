@@ -16,6 +16,10 @@ import {
     normalizeBlocks,
     renderInlineMarkdown,
     escapeHtml,
+    buildDraftTicket,
+    isDraftTicket,
+    canMoveTicket,
+    commitDraftTicket,
 } from '../src/ticket.mjs'
 import { createDesktopStore } from '../src/store.mjs'
 import { DEFAULT_BOARD_CONFIG, TIMELINESS } from '@listam/domain/board'
@@ -190,3 +194,44 @@ test('escapeHtml escapes the dangerous characters', () => {
 
 // Block-level markdown -> HTML is now markdownToHtml in @listam/domain/markdown,
 // covered by that package's markdown.test.mjs (incl. headings + round trip).
+
+// --- draft tickets -----------------------------------------------------------
+// The create panel writes a real row on open, so the rigor gate no longer blocks
+// a ticket's CREATION. canMoveTicket is where it went: it blocks the ticket's
+// first move instead. These cover the desktop's wrapper — the raw domain
+// behaviour is exercised in listam-packages/packages/domain/board.test.mjs.
+
+test('canMoveTicket pins an unfinished draft under rigor and frees it once filled', () => {
+    const draft = buildDraftTicket({ id: 'draft-1', listId: 'default' })
+    assert.equal(isDraftTicket(draft), true)
+
+    const pinned = canMoveTicket(draft, { rigorOn: true })
+    assert.equal(pinned.ok, false)
+    assert.ok(pinned.missing.includes('description'))
+
+    const filled = {
+        ...draft,
+        description: 'Renew the passport',
+        checklist: [{ id: 'task-0', text: 'Book it', done: false }],
+        estimatedHours: 3,
+        estimatedComplexity: 50,
+    }
+    assert.equal(canMoveTicket(filled, { rigorOn: true }).ok, true)
+})
+
+test('canMoveTicket never pins with rigor off, and never pins a committed ticket', () => {
+    const draft = buildDraftTicket({ id: 'draft-2', listId: 'default' })
+    assert.equal(canMoveTicket(draft, { rigorOn: false }).ok, true)
+    // Committing clears the mark, so the pin lifts even while the fields are thin
+    // — a state only reachable with rigor off, which is exactly when it is right.
+    assert.equal(canMoveTicket(commitDraftTicket(draft, 2), { rigorOn: true }).ok, true)
+})
+
+test('canMoveTicket leaves ordinary board tickets alone under a partial config', () => {
+    // selectBoardConfig hands over a normalized config, but the guard reads a raw
+    // one in tests and on a base whose config has not replicated yet. A legacy
+    // ticket that would fail the rigor gate still has to be movable.
+    const legacy = ticket('legacy', { description: '', checklist: [] })
+    assert.deepEqual(canMoveTicket(legacy, null), { ok: true, missing: [] })
+    assert.deepEqual(canMoveTicket(legacy, {}), { ok: true, missing: [] })
+})

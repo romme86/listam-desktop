@@ -109,6 +109,14 @@ import { createOverviewSection } from './ui/overview.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
 import { shouldHandleAppShortcut, isTypingKeystroke, isTypingTarget } from './ui/keyboard-shortcuts.mjs'
+import {
+    emptyTicketDraft,
+    ticketDraftFromItem,
+    ticketDraftChecklist,
+    ticketDraftFields,
+    ticketDraftMissing,
+    planTicketDraftSettlement,
+} from './ui/ticket-draft.mjs'
 import { adoptSharedListRoute } from './ui/shared-route.mjs'
 import {
     joinErrorKey,
@@ -134,6 +142,10 @@ import {
     selectWriterStats,
     validateRigorDraft,
     buildStatusChange,
+    buildDraftTicket,
+    isDraftTicket,
+    canMoveTicket,
+    commitDraftTicket,
     formatDuration,
     deltaPercent,
     BLOCK_TYPES,
@@ -481,6 +493,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     let registryIdSeq = 0
     const nextListId = () => `list-${now()}-${registryIdSeq++}`
     const nextGroupId = () => `group-${now()}-${registryIdSeq++}`
+    // Ticket ids are normally minted BY THE BACKEND on add. A draft ticket is
+    // written through update-as-create (see buildDraftTicket) so the panel knows
+    // the id before the write lands and can keep editing that exact row — which
+    // means this side has to mint it. Clock + counter as above, plus a random
+    // tail: unlike a list, two devices really can create a ticket in the same
+    // millisecond, and a collision here would silently merge two people's work.
+    const nextTicketId = () => `ticket-${now()}-${registryIdSeq++}-${Math.random().toString(36).slice(2, 8)}`
     // The reduced registry derived from the synced meta-items in state.items.
     const currentRegistry = () => reduceRegistry(store.getState().items)
 
@@ -1224,13 +1243,50 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             })
         },
         // --- board --------------------------------------------------------
+        // Opening the panel MATERIALIZES the ticket (see the draft-autosave
+        // block): the row exists before the dialog is built, and every field
+        // edits it in place. It stays marked `draft: true` — amber on the board,
+        // pinned in its column — until the panel commits it.
         newTicket() {
-            openDialog({ kind: 'add-ticket', draft: { description: '', tasks: [''], hours: '', complexity: 50 } })
+            const draft = emptyTicketDraft()
+            const listId = ui.activeListId
+            const valueOn = isValueSurface(listId, ui.activeType)
+            const id = nextTicketId()
+            const item = buildDraftTicket({
+                id,
+                listId,
+                listType: BOARD_WRITE_TYPE,
+                // Only addItem stamps this backend-side, and this row is written
+                // through update; without it computeCongruency cannot attribute
+                // the ticket to whoever wrote it.
+                createdBy: selfWriterKey(),
+                fields: { estimatedComplexity: draft.complexity },
+                now: now(),
+            })
+            if (!item) return
+            markLocalId(id)
+            send(RPC_UPDATE, { item })
+            openTicketDraftDialog(id, draft, valueOn)
+        },
+        // Resume an unfinished draft: the same panel, seeded from the live row
+        // rather than from blank. This is what a click on an amber card does.
+        editTicketDraft(item) {
+            if (!isDraftTicket(item)) return
+            openTicketDraftDialog(item.id, ticketDraftFromItem(item), isValueSurface(item.listId, item.listType))
         },
         // The backend freezes time-in-progress + the on-time verdict from this
         // status change; the frontend only sends the new status with a bumped
         // updatedAt (so the LWW reducer never drops it).
         moveTicket(item, status) {
+            // An unfinished draft is pinned where it is: the rigor gate no
+            // longer blocks the ticket's CREATION (the panel materializes it on
+            // open), so it blocks its first move instead. With rigor off there
+            // is nothing to satisfy and nothing is pinned.
+            const gate = canMoveTicket(item, selectBoardConfig(store.getState()))
+            if (!gate.ok) {
+                store.pushNotice(locale.i18n.t('ticket.draft.pinned'), 'error')
+                return
+            }
             const payload = buildStatusChange(item, status, now())
             if (!payload) return
             // Dropping into a different column clears the manual order so the
@@ -1266,6 +1322,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // Card click -> right drawer that slides in over the right half of the
         // screen (the board stays full-width and visible underneath).
         openTicket(id) {
+            // An amber draft has no detail drawer yet — it reopens the panel it
+            // was left in, so the click means "carry on where I stopped".
+            const target = store.getState().items.find((entry) => entry && entry.id === id)
+            if (isDraftTicket(target)) { actions.editTicketDraft(target); return }
             const changed = ui.selectedTicketId !== id
             ui.selectedTicketId = id
             ui.ticketDocId = null
@@ -1837,13 +1897,102 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     const drawerHost = h('div', {})
     root.append(titlebar, shell, hintsHost, noticesHost, drawerHost, dialogHost)
 
+    // A dialog may register an `onClose` hook (the ticket create panel does: it
+    // owns a real row and a pending autosave, and both have to settle however
+    // the panel goes away). closeDialog is the ONE choke point every dismissal
+    // reaches — the backdrop click, the global Escape handler, and each action
+    // button — so the hook belongs here rather than on any one of them.
     function openDialog(dialog) {
+        runDialogClose()
         ui.dialog = dialog
         renderAll()
     }
     function closeDialog() {
+        runDialogClose()
         ui.dialog = null
         renderAll()
+    }
+    function runDialogClose() {
+        const hook = ui.dialog?.onClose
+        if (typeof hook !== 'function') return
+        // Detach before running: the hook writes and pushes notices, which
+        // re-render, and it must never be able to re-enter itself.
+        ui.dialog.onClose = null
+        hook()
+    }
+
+    // --- ticket draft autosave ---------------------------------------------
+    // The create panel used to hold its fields in a throwaway object on
+    // ui.dialog, so every way of dismissing it — a click on the backdrop, the
+    // global Escape handler, a background render that swapped the dialog —
+    // silently took the half-written ticket with it.
+    //
+    // So the panel no longer holds the ticket: it OPENS one. newTicket writes a
+    // real row (marked `draft: true`) before the dialog is even built, and
+    // everything typed after that is an edit of that row. There is no unsaved
+    // state left for a dismissal to lose.
+    //
+    // Writes are coalesced on an idle timer. One append per pause rather than
+    // per keystroke matters twice over: each write echoes back through the store
+    // and rebuilds the dialog wholesale, so an un-debounced save would have the
+    // user typing into a field being torn down under them on every character.
+    const TICKET_DRAFT_SAVE_MS = 400
+    let ticketDraftTimer = null
+    let ticketDraftPending = null
+
+    function writeTicketDraft(draftId, draft, valueOn, { commit = false } = {}) {
+        const existing = store.getState().items.find((it) => it && it.id === draftId)
+        if (!existing) return false
+        const at = now()
+        let next = { ...existing, ...ticketDraftFields(draft, valueOn), updatedAt: at }
+        if (commit) next = commitDraftTicket(next, at)
+        markLocalId(draftId)
+        send(RPC_UPDATE, { item: next })
+        return true
+    }
+    function scheduleTicketDraftSave(draftId, draft, valueOn) {
+        ticketDraftPending = { draftId, draft, valueOn }
+        if (ticketDraftTimer) clearTimeout(ticketDraftTimer)
+        ticketDraftTimer = setTimeout(() => {
+            ticketDraftTimer = null
+            const pending = ticketDraftPending
+            ticketDraftPending = null
+            if (pending) writeTicketDraft(pending.draftId, pending.draft, pending.valueOn)
+        }, TICKET_DRAFT_SAVE_MS)
+    }
+    function cancelTicketDraftSave() {
+        if (ticketDraftTimer) clearTimeout(ticketDraftTimer)
+        ticketDraftTimer = null
+        ticketDraftPending = null
+    }
+    // What a dismissal leaves behind is decided in ./ui/ticket-draft.mjs, where
+    // node can test it; this is only the write it asks for. Always at most one
+    // append, which also flushes whatever the debounce still owed.
+    function settleTicketDraft(draftId, draft, valueOn) {
+        cancelTicketDraftSave()
+        const item = store.getState().items.find((it) => it && it.id === draftId)
+        const plan = planTicketDraftSettlement({
+            item,
+            draft,
+            config: selectBoardConfig(store.getState()),
+            valueOn,
+            isDraft: isDraftTicket(item),
+        })
+        if (plan === 'none') return
+        if (plan === 'delete') {
+            markLocalId(draftId)
+            send(RPC_DELETE, { item })
+            return
+        }
+        writeTicketDraft(draftId, draft, valueOn, { commit: plan === 'commit' })
+    }
+    function openTicketDraftDialog(draftId, draft, valueOn) {
+        openDialog({
+            kind: 'add-ticket',
+            draftId,
+            draft,
+            onClose: () => settleTicketDraft(draftId, draft, valueOn),
+        })
     }
 
     // --- list navigation ----------------------------------------------------
@@ -3055,7 +3204,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, nowMs)
+        // An unfinished draft: the create panel materialized this row and never
+        // committed it. Amber, so an incomplete ticket is never mistaken for a
+        // real one, and a click resumes the panel instead of opening the drawer.
+        const draftCard = isDraftTicket(item)
         const chips = []
+        if (draftCard) chips.push(h('span', { class: 'draft-pill' }, t('ticket.draft.badge')))
         if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
         const meta = []
         if (b.assignee) { const pd = peerDisplay(b.assignee); meta.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials)) }
@@ -3095,7 +3249,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // column's status-change drop.
         const inColumn = (drag) => drag && group.some((ticket) => ticket && ticket.id === drag.id)
         return h('article', {
-            class: `ticket-card${ui.selectedTicketId === item.id ? ' selected' : ''}`,
+            class: `ticket-card${draftCard ? ' draft' : ''}${ui.selectedTicketId === item.id ? ' selected' : ''}`,
             tabindex: '0',
             draggable: 'true',
             dataset: { itemId: item.id, status: item.status || 'todo' },
@@ -3141,7 +3295,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 title: plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
                 onclick: (event) => { event.stopPropagation(); actions.toggleItemPlan(item) },
             }, tablerIcon('flag', { size: 13 })),
-            h('div', { class: 'ticket-title', title: item.text }, item.text),
+            h('div', { class: `ticket-title${item.text ? '' : ' untitled'}`, title: item.text || t('ticket.draft.untitled') }, item.text || t('ticket.draft.untitled')),
             chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
             meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
         )
@@ -5523,14 +5677,24 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             const config = selectBoardConfig(state)
             const rigorOn = config.rigorOn
             const draft = ui.dialog.draft
-            const descInput = h('input', { class: 'input', value: draft.description, placeholder: t('ticket.field.descriptionPlaceholder'), oninput: (event) => { draft.description = event.target.value } })
-            const hoursInput = h('input', { class: 'input', type: 'number', min: '0.25', step: '0.25', style: 'max-width: 130px;', value: draft.hours, placeholder: '6', oninput: (event) => { draft.hours = event.target.value } })
-            const cxReadout = h('span', { class: 'complexity-readout label-md' }, `${draft.complexity}%`)
-            const cxInput = h('input', { type: 'range', min: '1', max: '100', value: String(draft.complexity), class: 'complexity-slider', oninput: (event) => { draft.complexity = Number(event.target.value); cxReadout.textContent = `${draft.complexity}%` } })
+            // Two modes share this panel. `draftId` is the LIVE one: the row
+            // already exists and every field autosaves onto it. Without it this
+            // is the promote-into-board form (moveItem opens it when an existing
+            // grocery/to-do item is dragged onto a board and the rigor gate needs
+            // filling), where there is no board row yet and nothing to save to —
+            // that path still collects the fields and submits once.
+            const draftId = ui.dialog.draftId ?? null
+            const live = draftId != null
             // Value-return rating (mandatory when the destination surface has it on).
             const vListId = ui.dialog.moveFrom ? ui.dialog.targetListId : ui.activeListId
             const vType = ui.dialog.moveFrom ? ui.dialog.targetListType : ui.activeType
             const valueOn = isValueSurface(vListId, vType)
+            const touched = () => { if (live) scheduleTicketDraftSave(draftId, draft, valueOn) }
+
+            const descInput = h('input', { class: 'input', value: draft.description, placeholder: t('ticket.field.descriptionPlaceholder'), oninput: (event) => { draft.description = event.target.value; touched() } })
+            const hoursInput = h('input', { class: 'input', type: 'number', min: '0.25', step: '0.25', style: 'max-width: 130px;', value: draft.hours, placeholder: '6', oninput: (event) => { draft.hours = event.target.value; touched() } })
+            const cxReadout = h('span', { class: 'complexity-readout label-md' }, `${draft.complexity}%`)
+            const cxInput = h('input', { type: 'range', min: '1', max: '100', value: String(draft.complexity), class: 'complexity-slider', oninput: (event) => { draft.complexity = Number(event.target.value); cxReadout.textContent = `${draft.complexity}%`; touched() } })
             if (draft.valueRate === undefined) draft.valueRate = null
             if (draft.delayRate === undefined) draft.delayRate = null
             // Value + delay capture as sliders (1–10), mirroring the detail-drawer
@@ -5542,62 +5706,60 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 const slider = h('input', {
                     type: 'range', min: String(VALUE_MIN), max: String(VALUE_MAX), step: '1', class: 'rate-slider',
                     value: draft[key] != null ? String(draft[key]) : String(VALUE_MIN),
-                    oninput: (event) => { draft[key] = clampRate(Number(event.target.value)); readout.textContent = String(draft[key]) },
+                    oninput: (event) => { draft[key] = clampRate(Number(event.target.value)); readout.textContent = String(draft[key]); touched() },
                 })
                 return { slider, readout }
             }
             const valField = rateSliderField('valueRate')
             const delField = rateSliderField('delayRate')
             const taskRows = draft.tasks.map((val, index) => h('div', { class: 'rigor-task-row' },
-                h('input', { class: 'input', value: val, placeholder: t('ticket.field.taskPlaceholder'), oninput: (event) => { draft.tasks[index] = event.target.value } }),
-                h('button', { class: 'btn btn-secondary btn-icon', 'aria-label': t('common.remove'), onclick: () => { draft.tasks.splice(index, 1); if (!draft.tasks.length) draft.tasks.push(''); renderAll() } }, tablerIcon('x', { size: 14 })),
+                h('input', { class: 'input', value: val, placeholder: t('ticket.field.taskPlaceholder'), oninput: (event) => { draft.tasks[index] = event.target.value; touched() } }),
+                h('button', { class: 'btn btn-secondary btn-icon', 'aria-label': t('common.remove'), onclick: () => { draft.tasks.splice(index, 1); if (!draft.tasks.length) draft.tasks.push(''); touched(); renderAll() } }, tablerIcon('x', { size: 14 })),
             ))
+            const missingNow = () => ticketDraftMissing(draft, config, valueOn)
+            const shakeMissing = (missing) => {
+                store.pushNotice(t('ticket.create.missing'), 'error')
+                if (missing.includes('description')) shake(descInput)
+                if (missing.includes('hours')) shake(hoursInput)
+                if (missing.includes('value')) shake(valField.slider)
+                if (missing.includes('delay')) shake(delField.slider)
+            }
             const submit = () => {
+                const missing = missingNow()
+                if (missing.length) { shakeMissing(missing); return }
+                // The live panel needs no write here: closeDialog runs the
+                // onClose settlement, which flushes the pending edit AND clears
+                // the draft mark in one append (see settleTicketDraft).
+                if (live) { closeDialog(); return }
                 const desc = draft.description.trim()
-                const tasks = draft.tasks.map((s) => s.trim()).filter(Boolean)
+                const checklist = ticketDraftChecklist(draft)
                 const hours = Number(draft.hours)
                 const complexity = Number(draft.complexity)
-                const checklist = tasks.map((text, index) => ({ id: `task-${index}-${text.length}-${complexity}`, text, done: false }))
-                const missing = []
-                if (!desc) missing.push('description')
-                if (rigorOn) {
-                    for (const m of validateRigorDraft({ text: desc, description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity }, config).missing) {
-                        if (!missing.includes(m)) missing.push(m)
-                    }
-                }
-                if (valueOn) {
-                    for (const m of validateValueDraft({ valueRate: draft.valueRate, delayRate: draft.delayRate }).missing) {
-                        if (!missing.includes(m)) missing.push(m)
-                    }
-                }
-                if (missing.length) {
-                    store.pushNotice(t('ticket.create.missing'), 'error')
-                    if (missing.includes('description')) shake(descInput)
-                    if (missing.includes('hours')) shake(hoursInput)
-                    if (missing.includes('value')) shake(valField.slider)
-                    if (missing.includes('delay')) shake(delField.slider)
-                    return
-                }
                 const valueFields = valueOn ? { valueRate: draft.valueRate, delayRate: draft.delayRate } : {}
-                if (ui.dialog.moveFrom) {
-                    // Promote-into-board move: relocate the existing item (id
-                    // preserved) and supply the rigor fields the form collected.
-                    markLocalId(ui.dialog.moveFrom.id)
-                    send(RPC_MOVE, {
-                        item: ui.dialog.moveFrom,
-                        targetListId: ui.dialog.targetListId,
-                        targetListType: BOARD_WRITE_TYPE,
-                        fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields },
-                    })
-                } else {
-                    markLocalText(desc)
-                    send(RPC_ADD, { text: desc, listId: ui.activeListId, listType: BOARD_WRITE_TYPE, status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields })
-                }
+                // Promote-into-board move: relocate the existing item (id
+                // preserved) and supply the rigor fields the form collected.
+                markLocalId(ui.dialog.moveFrom.id)
+                send(RPC_MOVE, {
+                    item: ui.dialog.moveFrom,
+                    targetListId: ui.dialog.targetListId,
+                    targetListType: BOARD_WRITE_TYPE,
+                    fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields },
+                })
                 closeDialog()
             }
-            content = dialogFrame(t('ticket.create.title'), [
+            // Throwing the row away is now an explicit act, because closing the
+            // panel deliberately does NOT: that is the whole point of the change.
+            const discard = () => {
+                cancelTicketDraftSave()
+                const row = store.getState().items.find((it) => it && it.id === draftId)
+                if (row) { markLocalId(draftId); send(RPC_DELETE, { item: row }) }
+                if (ui.dialog) ui.dialog.onClose = null
+                closeDialog()
+            }
+            content = dialogFrame(live ? t('ticket.create.liveTitle') : t('ticket.create.title'), [
                 rigorOn ? h('div', { class: 'rigor-badge' }, tablerIcon('checklist', { size: 13 }), t('ticket.create.rigorBadge')) : null,
                 rigorOn ? h('p', { class: 'dialog-body', style: 'color: var(--secondary);' }, t('ticket.create.rigorHint')) : null,
+                live ? h('p', { class: 'dialog-body draft-hint', style: 'color: var(--secondary);' }, tablerIcon('device-floppy', { size: 13 }), t('ticket.create.autosaveHint')) : null,
                 fieldLabel(t('ticket.field.description'), rigorOn),
                 descInput,
                 fieldLabel(t('ticket.field.tasks'), rigorOn),
@@ -5613,10 +5775,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ) : null,
                 rigorOn ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('ticket.rigor.ownerNote')) : null,
             ], [
-                h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
-                h('button', { class: 'btn btn-primary', onclick: submit }, t('ticket.create.submit')),
+                live
+                    ? h('button', { class: 'btn btn-secondary btn-danger-text', onclick: discard }, t('ticket.create.discard'))
+                    : h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
+                h('button', { class: 'btn btn-primary', onclick: submit }, live ? t('ticket.create.done') : t('ticket.create.submit')),
             ])
-            queueMicrotask(() => descInput.focus())
+            // Autofocus belongs to the OPEN, not to every render. Each autosave
+            // echoes back and rebuilds this dialog; without the guard the caret
+            // was yanked out of whatever field was being typed into and back to
+            // the description on every save.
+            if (dialogDom.shouldEnter(kind)) queueMicrotask(() => descInput.focus())
         } else if (kind === 'value-rate') {
             // Collect the mandatory value + delay rates for a to-do add, or edit
             // them on an existing item. Shared between the add-bar gate and the

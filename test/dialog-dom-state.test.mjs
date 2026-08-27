@@ -136,16 +136,54 @@ test('focus outside the dialog is not dragged into it', () => {
     assert.equal(rebuilt.focusCount, 0)
 })
 
-test('a checkbox is never treated as a caret-bearing field', () => {
+test('a checkbox keeps its focus but is never treated as a caret-bearing field', () => {
     // Reading selectionStart off a checkbox yields null and WRITING it throws, so
-    // a switch row (Settings has several) must not be captured as a text field.
+    // a switch row (Settings has several) must carry neither a caret nor a value
+    // — `checked` is the state, not `value`. Focus itself is still worth keeping:
+    // a background rebuild must not throw a keyboard user off the row.
     const dom = createDialogDomState()
-    const box = { tagName: 'INPUT', type: 'checkbox', checked: true }
+    const box = { tagName: 'INPUT', type: 'checkbox', checked: true, value: 'on', focusCount: 0, focus () { this.focusCount += 1 } }
     const before = fakeHost({ fields: [box], focused: box })
     dom.commit('settings')
 
     const snapshot = dom.capture(before, 'settings')
-    assert.equal(snapshot.fieldIndex, -1)
+    assert.equal(snapshot.fieldIndex, 0)
+    assert.equal(snapshot.value, null, 'a checkbox has no half-typed value to carry')
+    assert.equal(snapshot.selectionStart, null)
+    assert.equal(snapshot.selectionEnd, null)
+
+    const rebuilt = { tagName: 'INPUT', type: 'checkbox', checked: true, value: 'on', focusCount: 0, focus () { this.focusCount += 1 } }
+    const after = fakeHost({ fields: [rebuilt] })
+    dom.commit('settings')
+    // setSelectionRange is absent on the rebuilt node exactly as it is unusable
+    // on a real checkbox: restoring must not reach for it.
+    dom.restore(after, snapshot)
+    assert.equal(rebuilt.focusCount, 1)
+    assert.equal(rebuilt.value, 'on', 'the value must be left alone')
+})
+
+test('a number and a range field keep focus and value across a rebuild', () => {
+    // The ticket create panel autosaves as you type, so its estimate (number) and
+    // complexity/value/delay (range) inputs are rebuilt mid-interaction. Neither
+    // type bears a caret; both must survive the rebuild still focused.
+    for (const type of ['number', 'range']) {
+        const dom = createDialogDomState()
+        const field = { tagName: 'INPUT', type, value: '6', focusCount: 0, focus () { this.focusCount += 1 } }
+        const before = fakeHost({ fields: [field], focused: field })
+        dom.commit('add-ticket')
+
+        const snapshot = dom.capture(before, 'add-ticket')
+        assert.equal(snapshot.fieldIndex, 0, `${type} lost its focus on rebuild`)
+        assert.equal(snapshot.value, '6')
+        assert.equal(snapshot.selectionStart, null, `${type} must not claim a caret`)
+
+        const rebuilt = { tagName: 'INPUT', type, value: '', focusCount: 0, focus () { this.focusCount += 1 } }
+        const after = fakeHost({ fields: [rebuilt] })
+        dom.commit('add-ticket')
+        dom.restore(after, snapshot)
+        assert.equal(rebuilt.focusCount, 1)
+        assert.equal(rebuilt.value, '6')
+    }
 })
 
 test('a field that vanished from the rebuild is skipped rather than throwing', () => {
