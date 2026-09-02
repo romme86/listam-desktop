@@ -1,12 +1,23 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { RPC_REQUEST_SYNC, RPC_SHARE_LIST } from '@listam/protocol'
-import { buildBuiltinVisibilityItem, surfaceLabelKey } from '@listam/domain/labels'
-import { reduceRegistry } from '@listam/domain/list-registry'
+import { buildBuiltinVisibilityItem, buildSurfaceLabelItem, surfaceLabelKey } from '@listam/domain/labels'
+import { buildItemPlanEntry } from '@listam/domain/plan'
+import { buildListMetaItem, reduceRegistry } from '@listam/domain/list-registry'
 import { isBoardType, BOARD_LIST_TYPE } from '@listam/domain/board'
-import { DEFAULT_LIST_TYPE, TODO_LIST_TYPE, isTodoType } from '@listam/domain/identity'
+import { DEFAULT_LIST_TYPE, TODO_LIST_TYPE, isTodoType, NOTES_LIST_TYPE, isNotesType } from '@listam/domain/identity'
 import { createMockBackend } from '../src/mock-backend.mjs'
 import { detectExtraLists, visibleBuiltinSurfaceTypes } from '../src/registry.mjs'
+import {
+    surfaceForType,
+    iconForType,
+    typePredicate,
+    builtinFallbackKey,
+    isGroceryItem,
+    isTodoItem,
+    isNotesItem,
+} from '../src/ui/list-types.mjs'
+import { TABLER_PATHS } from '../src/tabler-icons.mjs'
 
 test('a fresh desktop rail contains only the starter grocery surface', () => {
     assert.deepEqual(visibleBuiltinSurfaceTypes([]), [DEFAULT_LIST_TYPE])
@@ -34,7 +45,7 @@ test('synced grocery deletion hides the starter surface until matching content r
     assert.deepEqual(visibleBuiltinSurfaceTypes([milk, { id: 't', listId: 'default', listType: TODO_LIST_TYPE, text: 'Call', updatedAt: 11 }], [localTodo]), [DEFAULT_LIST_TYPE])
 })
 
-test('the mock seeds grocery/board/todo on the default list + a named registry list', async () => {
+test('the mock seeds grocery/board/todo on the default list + the named registry lists', async () => {
     const { client } = createMockBackend()
     let synced = null
     client.onEvent((event) => { if (event.type === 'sync-list') synced = event.items })
@@ -48,15 +59,25 @@ test('the mock seeds grocery/board/todo on the default list + a named registry l
     assert.ok(onDefault.some((i) => isTodoType(i.listType)), 'to-do items on default')
     assert.ok(onDefault.some((i) => !isBoardType(i.listType) && !isTodoType(i.listType) && i.listType !== 'registry'), 'grocery items on default')
 
-    // The registry declares only the *named* extra list + its group; the default
-    // surfaces are built-ins, not registry entries.
+    // Notes is a NAMED list only — no built-in Notes surface — so the notes
+    // fixtures live on their own listId and never on the default bucket.
+    assert.equal(onDefault.filter((i) => isNotesType(i.listType)).length, 0, 'no notes on the default bucket')
+
+    // The registry declares only the *named* extra lists + their group; the
+    // default surfaces are built-ins, not registry entries.
     const registry = reduceRegistry(synced)
     assert.deepEqual(registry.groups.map((g) => g.name), ['Projects'])
     assert.deepEqual(registry.lists.map((l) => ({ id: l.id, name: l.name, type: l.type, groupId: l.groupId })), [
         { id: 'hardware', name: 'Hardware', type: 'shopping', groupId: 'projects' },
+        { id: 'fieldnotes', name: 'Field notes', type: NOTES_LIST_TYPE, groupId: 'projects' },
     ])
-    // The named list's items live on its own listId.
+    // The named lists' items live on their own listIds.
     assert.ok(synced.some((i) => i.listId === 'hardware' && i.text === 'M3 screws'))
+    // Both index row shapes are seeded: a plain note and one with a block body.
+    const notes = synced.filter((i) => i.listId === 'fieldnotes')
+    assert.ok(notes.some((i) => !Array.isArray(i.blocks)), 'a plain note')
+    assert.ok(notes.some((i) => Array.isArray(i.blocks) && i.blocks.length > 0), 'a note with blocks')
+    assert.ok(notes.some((i) => i.isDone), 'an archived note')
 
     // The board's legacy wire value normalizes to the canonical type on read.
     assert.equal(BOARD_LIST_TYPE, 'board')
@@ -112,4 +133,88 @@ test('the mock promotes default groceries into a distinct shared list', async ()
     assert.equal(synced.filter((item) => item.listId === reply.listId && item.listType === 'shopping').length, beforeGroceries.length)
     assert.equal(synced.filter((item) => item.listId === 'default' && isBoardType(item.listType)).length, beforeBoards.length)
     assert.equal(synced.filter((item) => item.listId === 'default' && isTodoType(item.listType)).length, beforeTodos.length)
+})
+
+// --- the list-type seam --------------------------------------------------
+// Which pane renders a type, which rail icon marks it, which localized name a
+// built-in falls back to, and which items belong to it. All four were
+// hard-coded "board? todo? otherwise grocery" chains, and that otherwise is
+// exactly how a fourth type ends up wearing the grocery surface.
+
+const item = (id, listType, overrides = {}) => ({
+    id, listId: 'l1', listType, text: id, isDone: false, timeOfCompletion: 0, updatedAt: 1, ...overrides,
+})
+
+test('every list type routes to its own pane and its own rail icon', () => {
+    assert.equal(surfaceForType(DEFAULT_LIST_TYPE), 'lists')
+    assert.equal(surfaceForType('kanban'), 'board', 'the legacy board wire type still routes to the board')
+    assert.equal(surfaceForType(BOARD_LIST_TYPE), 'board')
+    assert.equal(surfaceForType(TODO_LIST_TYPE), 'todo')
+    assert.equal(surfaceForType(NOTES_LIST_TYPE), 'notes')
+    // Forward compat: normalizeListType accepts anything a newer peer invents,
+    // so an unknown type must still land on a real pane rather than nowhere.
+    assert.equal(surfaceForType('recipes'), 'lists')
+
+    assert.equal(iconForType(NOTES_LIST_TYPE), 'notes')
+    const icons = [DEFAULT_LIST_TYPE, BOARD_LIST_TYPE, TODO_LIST_TYPE, NOTES_LIST_TYPE].map(iconForType)
+    assert.equal(new Set(icons).size, icons.length, 'each surface is told apart by its icon in the rail')
+})
+
+test('every icon a list type asks for is actually vendored', () => {
+    // tablerIcon falls back to the grocery basket for a name it does not have,
+    // so an un-vendored glyph is invisible at runtime: the notes list would
+    // simply wear the basket and nothing would fail.
+    for (const type of [DEFAULT_LIST_TYPE, BOARD_LIST_TYPE, 'kanban', TODO_LIST_TYPE, NOTES_LIST_TYPE]) {
+        assert.ok(TABLER_PATHS[iconForType(type)], `${type} -> '${iconForType(type)}' is not in tabler-icons.mjs`)
+    }
+})
+
+test('isGroceryItem excludes every type that has a surface of its own — notes included', () => {
+    const grocery = item('milk', DEFAULT_LIST_TYPE)
+    const note = item('boiler', NOTES_LIST_TYPE)
+    assert.equal(isGroceryItem(grocery), true)
+    assert.equal(isGroceryItem(item('ship', 'kanban')), false)
+    assert.equal(isGroceryItem(item('call', TODO_LIST_TYPE)), false)
+    // The regression this closes: the voice notetaker has been writing real
+    // 'notes' items since the backend shipped them, and "not board, not todo"
+    // is TRUE for a note — so every one of them rendered, was counted and was
+    // categorized as a grocery row.
+    assert.equal(isGroceryItem(note), false)
+    assert.equal(isNotesItem(note), true)
+    assert.equal(isTodoItem(note), false)
+
+    // The meta-item buckets share state.items and stay excluded as well.
+    assert.equal(isGroceryItem(buildListMetaItem({ id: 'l1', name: 'Hardware', type: 'shopping', updatedAt: 1 })), false)
+    assert.equal(isGroceryItem(buildSurfaceLabelItem({ listId: 'default', type: TODO_LIST_TYPE, name: 'Chores', updatedAt: 1 })), false)
+    assert.equal(isGroceryItem(buildItemPlanEntry({ listId: 'l1', itemId: 'milk', plannedFor: '2026-09-01', updatedAt: 1 })), false)
+    assert.equal(isGroceryItem(null), false)
+})
+
+test('typePredicate scopes a surface to its own items', () => {
+    const items = [
+        item('milk', DEFAULT_LIST_TYPE),
+        item('ship', 'kanban'),
+        item('call', TODO_LIST_TYPE),
+        item('boiler', NOTES_LIST_TYPE),
+    ]
+    const idsOn = (type) => items.filter(typePredicate(type)).map((i) => i.id)
+    assert.deepEqual(idsOn(DEFAULT_LIST_TYPE), ['milk'])
+    assert.deepEqual(idsOn(BOARD_LIST_TYPE), ['ship'])
+    assert.deepEqual(idsOn(TODO_LIST_TYPE), ['call'])
+    assert.deepEqual(idsOn(NOTES_LIST_TYPE), ['boiler'])
+})
+
+test('builtinFallbackKey names each type instead of defaulting it to Groceries', () => {
+    assert.equal(builtinFallbackKey(DEFAULT_LIST_TYPE), 'desktop.rail.groceries')
+    assert.equal(builtinFallbackKey('kanban'), 'desktop.rail.board')
+    assert.equal(builtinFallbackKey(TODO_LIST_TYPE), 'desktop.rail.todo')
+    assert.equal(builtinFallbackKey(NOTES_LIST_TYPE), 'desktop.rail.notes')
+})
+
+test('notes never becomes a built-in surface — it is a named list only', () => {
+    // The default bucket is the legacy compatibility container for Groceries /
+    // Board / Todo. Notes is net-new and always registry-backed, so even notes
+    // content parked on 'default' must not conjure a fourth built-in row.
+    const stray = { id: 'n', listId: 'default', listType: NOTES_LIST_TYPE, text: 'Boiler', isDone: false, timeOfCompletion: 0, updatedAt: 1 }
+    assert.deepEqual(visibleBuiltinSurfaceTypes([stray]), [DEFAULT_LIST_TYPE])
 })

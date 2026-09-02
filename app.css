@@ -2056,3 +2056,58 @@ html.board-drawer-open { overflow: hidden; }
 .rate-label { color: var(--ink-mute); flex-shrink: 0; min-width: 3.2rem; }
 .rate-slider { flex: 1; accent-color: var(--signal); cursor: pointer; height: 3px; }
 .rate-readout { min-width: 1.4rem; text-align: right; font-family: var(--font-mono); color: var(--ink); }
+
+/* ===== Notes =========================================================== */
+/* Two panes inside the content column: a fixed index and the document. A note
+   row is NOT a row to tick — there is no checkbox anywhere on this surface —
+   and an archived note recedes WITHOUT a strikethrough, because isDone on a
+   note means filed, not finished. */
+.notes-head { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1; }
+.notes-crumb { color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.12em; }
+/* The h1 doubles as the note's rename field, the same trick the inspector
+   title uses: plain title text until it takes focus. */
+.notes-title-field {
+    width: 100%; min-width: 0; border: 0; background: transparent; color: var(--ink);
+    padding: 0.15rem 0.3rem; margin: -0.15rem -0.3rem; border-radius: var(--r-field);
+}
+.notes-title-field:hover { background: var(--surface-2); }
+.notes-title-field:focus { outline: none; background: var(--card); box-shadow: inset 0 0 0 2px var(--ink); }
+.notes-title-field::placeholder { color: var(--ink-faint); }
+
+.notes-split { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 2rem; align-items: start; }
+.notes-index { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
+.notes-groups { display: flex; flex-direction: column; gap: 1.5rem; }
+.notes-group .category-heading { margin: 0 0 0.5rem; padding: 0 0.75rem; }
+.notes-index-empty { color: var(--ink-faint); padding: 0 0.75rem; margin: 0; }
+
+/* A plain note is title + timestamp; a note that grew a body adds the excerpt
+   and its block count. No rule between rows (the no-line rule): the active one
+   is marked by an inset acid edge on a tonal shift, never by a border. */
+.note-row {
+    display: flex; flex-direction: column; gap: 0.2rem;
+    width: 100%; text-align: left; cursor: pointer;
+    padding: 0.6rem 0.75rem; border-radius: var(--r-row);
+    background: transparent; color: var(--ink);
+    transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.note-row:hover { background: var(--surface-1); }
+.note-row:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.note-row.active { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--signal); }
+.note-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-row-title.untitled { color: var(--ink-faint); }
+.note-row-excerpt { color: var(--ink-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-row-meta { display: flex; gap: 0.75rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+/* Archived rows recede. Deliberately no line-through: nothing was completed. */
+.note-row.archived { background: var(--surface-2); color: var(--ink-faint); }
+.note-row.archived .note-row-title, .note-row.archived .note-row-excerpt { color: var(--ink-faint); }
+.note-row.archived:hover { background: var(--surface-3); }
+
+/* The document column: a mono meta strip, then the shared block body. */
+.notes-doc { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
+.notes-doc-meta { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+.notes-doc-empty { padding-top: 0; }
+
+@media (max-width: 920px) {
+    /* The index stops being a column of its own and stacks over the document. */
+    .notes-split { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+}
