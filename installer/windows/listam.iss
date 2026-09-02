@@ -17,7 +17,7 @@
 ; ISCC.exe (choco install innosetup); driven by installer/build-windows.ps1.
 ;
 ; Version and payload directory come from the build script:
-;   ISCC /DListamVersion=0.20.0 /DPayloadDir=<dir> listam.iss
+;   ISCC /DListamVersion=0.21.0 /DPayloadDir=<dir> listam.iss
 
 #ifndef ListamVersion
   #define ListamVersion "0.0.0"
