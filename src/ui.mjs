@@ -38,9 +38,9 @@ import {
     buildProvisioningPayload,
     provisionLeaf,
 } from '@listam/provisioning'
-import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE } from '@listam/domain/identity'
+import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE, isNotesType, NOTES_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
-import { isRegistryItem, reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
+import { reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
     shortKey,
     ticketInitials,
@@ -52,7 +52,6 @@ import {
     presenceStatusVerdict,
 } from '@listam/domain/peer-display'
 import {
-    isLabelItem,
     surfaceLabelKey,
     buildSurfaceLabelItem,
     buildPeerLabelItem,
@@ -76,7 +75,6 @@ import {
     validateValueDraft,
 } from '@listam/domain/value'
 import {
-    isPlanItem,
     reducePlan,
     computePlanReorder,
     computePlanInsert,
@@ -108,6 +106,16 @@ import { createCompactionOps } from './ui/compaction.mjs'
 import { createOverviewSection } from './ui/overview.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
+import {
+    surfaceForType,
+    iconForType,
+    typePredicate,
+    builtinFallbackKey,
+    isGroceryItem,
+    isTodoItem,
+    isNotesItem,
+} from './ui/list-types.mjs'
+import { isArchivedNote, noteBlockCount, noteExcerpt, projectNotes } from './ui/notes.mjs'
 import { shouldHandleAppShortcut, isTypingKeystroke, isTypingTarget } from './ui/keyboard-shortcuts.mjs'
 import {
     emptyTicketDraft,
@@ -343,27 +351,6 @@ function setRichCaretOffset (root, target) {
     return false
 }
 
-// Grocery surfaces (the lists pane, its count, clear-done) operate on ordinary
-// grocery list items only. Board tickets live on their own board, and to-do
-// items are plain text with no grocery intelligence — both are excluded so they
-// are never shown, counted, categorized, or cleared alongside groceries. Each
-// has its own dedicated surface when its list exists.
-function isGroceryItem(item) {
-    // Registry meta-items (listType 'registry') describe lists/groups, not
-    // grocery entries — they share state.items but must never render as rows.
-    // (Board/to-do are already excluded by type; registry is the one a bare
-    // "not board, not todo" test would wrongly admit.)
-    // Label meta-items (peer names, surface names) also share state.items but
-    // live in their own listId buckets and must never render as grocery rows.
-    return !!item && !isRegistryItem(item) && !isLabelItem(item) && !isPlanItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType)
-}
-
-// The to-do surface: plain text items (isTodoType), the mirror of isGroceryItem
-// for the grocery surface and isBoardType for the board.
-function isTodoItem(item) {
-    return !!item && isTodoType(item.listType)
-}
-
 // Locale-neutral formatters for the Servers monitoring pane. Bytes use binary
 // units; durations collapse to the two coarsest non-zero parts.
 // formatBytes moved into ./ui/servers.mjs — the storage row on a server card was
@@ -406,6 +393,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // List-item Inspector (toggle I): the grocery/todo item whose detail panel
         // is open on the right. Non-modal — the list stays clickable.
         inspectorItemId: null,
+        // Notes surface: the note open in the document column, and the index's
+        // search box. A note is NOT put in the Inspector — a drawer annotates a
+        // row, and a note IS the content — so it takes the column instead.
+        activeNoteId: null,
+        noteQuery: '',
         // (Per-server monitoring state moved into ./ui/servers.mjs — every
         // reference to it was inside that one block, so it owns it now.)
         addBarOpen: false,
@@ -500,6 +492,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // tail: unlike a list, two devices really can create a ticket in the same
     // millisecond, and a collision here would silently merge two people's work.
     const nextTicketId = () => `ticket-${now()}-${registryIdSeq++}-${Math.random().toString(36).slice(2, 8)}`
+    // A note is written through update-as-create for the same reason a draft
+    // ticket is: newNote has to know the id to open the document it just made.
+    const nextNoteId = () => `note-${now()}-${registryIdSeq++}-${Math.random().toString(36).slice(2, 8)}`
     // The reduced registry derived from the synced meta-items in state.items.
     const currentRegistry = () => reduceRegistry(store.getState().items)
 
@@ -1401,6 +1396,59 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (ui.inspectorItemId === id) actions.closeInspector()
             else actions.openInspector(id)
         },
+        // --- notes ---------------------------------------------------------
+        // A note is created empty and opened straight away with its title
+        // focused: the title IS the first thing typed, and blocks come later (or
+        // never). Written through update-as-create like a draft ticket, because
+        // RPC_ADD mints the id backend-side and this has to know it NOW to open
+        // the document it just made.
+        newNote() {
+            const listId = ui.activeListId
+            if (listId == null) return
+            const id = nextNoteId()
+            markLocalId(id)
+            send(RPC_UPDATE, {
+                item: {
+                    id,
+                    listId,
+                    listType: NOTES_LIST_TYPE,
+                    text: '',
+                    isDone: false,
+                    timeOfCompletion: 0,
+                    updatedAt: now(),
+                    // A shared list's writes carry its baseKey so the backend
+                    // routes them to that base (see addItem).
+                    ...(ui.activeBaseKey ? { baseKey: ui.activeBaseKey } : {}),
+                },
+            })
+            ui.activeNoteId = id
+            ui.blockEditingId = null
+            ui.blockDraft = ''
+            seedTableDraft(null)
+            ui.blockMenu = null
+            renderAll()
+            // editableText restores focus across a re-render, not on first entry
+            // into a field that did not exist a render ago.
+            queueMicrotask(() => root.querySelector('#note-title')?.focus())
+        },
+        openNote(id) {
+            const changed = ui.activeNoteId !== id
+            if (changed) {
+                // Switching notes: the previous block editor's blur has already
+                // committed; just drop the stale edit/menu state.
+                ui.blockEditingId = null
+                ui.blockDraft = ''
+                seedTableDraft(null)
+                ui.blockMenu = null
+            }
+            ui.activeNoteId = id
+            ui.focusedItemId = id
+            // Fold only on a genuine open (see openInspector) so a re-click before
+            // the fold echo returns can't fold the same note twice.
+            const item = changed ? store.getState().items.find((entry) => entry && entry.id === id) : null
+            if (item) actions.foldLegacyText(item, 'note')
+            renderAll()
+        },
         // Open a plan-row item from the Overview: navigate to its source surface
         // and, for a board ticket, open its detail drawer.
         openPlanItem(item) {
@@ -1807,9 +1855,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         { key: 'analytics', icon: 'activity', label: (t) => t('desktop.analytics.title') },
         { key: 'settings', icon: 'settings', label: (t) => t('desktop.nav.settings'), action: () => { openDialog({ kind: 'settings' }); loadAutoBackups(); void refreshCompactionReadiness() } },
     ]
-    // Map a list type to its pane/view key. System views sit outside this.
-    const surfaceForType = (type) => (isBoardType(type) ? 'board' : isTodoType(type) ? 'todo' : 'lists')
-    const iconForType = (type) => (isBoardType(type) ? 'layout-grid' : isTodoType(type) ? 'checklist' : 'shopping-cart')
 
     // --- Value Return -------------------------------------------------------
     // The value-return enable flag is keyed by the canonical surface type, so a
@@ -2005,23 +2050,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // (ui.activeListId, ui.activeType), and item filtering keys on BOTH so legacy
     // board/todo rows never bleed into the grocery view (and vice-versa).
     const GROCERY_TYPE = 'shopping'
-    // The localized default label key for a built-in surface type.
-    function builtinFallbackKey(type) {
-        if (isBoardType(type)) return 'desktop.rail.board'
-        if (isTodoType(type)) return 'desktop.rail.todo'
-        return 'desktop.rail.groceries'
-    }
     // A built-in surface's display name: a synced rename override (surface label)
     // if present, else the localized default. `surfaceLabels` is the reduced
     // Map<surfaceKey,name>; pass it in so callers reduce state.items once.
     function builtinDisplayName(type, surfaceLabels) {
         const t = locale.i18n.t.bind(locale.i18n)
         return surfaceLabels.get(surfaceLabelKey(DEFAULT_LIST_ID, type)) || t(builtinFallbackKey(type))
-    }
-    function typePredicate(type) {
-        if (isBoardType(type)) return (item) => isBoardType(item.listType)
-        if (isTodoType(type)) return (item) => isTodoItem(item)
-        return (item) => isGroceryItem(item)
     }
     function surfaceActive(surface) {
         return ui.activeListId === surface.listId && surfaceForType(ui.activeType) === surfaceForType(surface.type)
@@ -2109,7 +2143,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.activeListId = null
             ui.activeType = null
             ui.activeBaseKey = null
-            if (ui.view === 'board' || ui.view === 'todo') ui.view = 'lists'
+            if (ui.view === 'board' || ui.view === 'todo' || ui.view === 'notes') ui.view = 'lists'
         }
         return rail
     }
@@ -2134,6 +2168,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         ui.view = surfaceForType(surface.type)
         ui.selectedTicketId = null
         ui.ticketDocId = null
+        ui.activeNoteId = null
+        ui.noteQuery = ''
         ui.editingListId = null
         ui.editingSurfaceKey = null
         ui.editingGroupId = null
@@ -2350,7 +2386,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // entrance replay is owed to a re-render, no draft is owed to a new pane).
     function mainPaneKey(state) {
         if (state.isJoining) return 'joining'
-        const surface = ui.ticketDocId ? `doc:${ui.ticketDocId}` : `${ui.view}:${ui.activeListId}`
+        // A note is a document with its own title field and block body, so
+        // switching notes is a pane SWAP, not a re-render: without the note id in
+        // the key the carry below would paste note A's half-typed title into note
+        // B (the drawer keys its tickets for exactly this reason).
+        const surface = ui.ticketDocId
+            ? `doc:${ui.ticketDocId}`
+            : ui.view === 'notes'
+                ? `notes:${ui.activeListId}:${ui.activeNoteId}`
+                : `${ui.view}:${ui.activeListId}`
         return `${surface}:${state.preferences.isGridView}`
     }
     // The main pane is rebuilt wholesale on every store notify, exactly like the
@@ -2395,13 +2439,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (state.isJoining) return replaceChildren(main, renderJoinOverlay(state))
         if (ui.ticketDocId) return renderTicketFull(state)
         if (ui.view === 'overview') return renderOverviewPane(state)
-        // A list surface ('lists' | 'board' | 'todo') needs an active list; with
-        // none selected (launch, or the active list was just deleted) show the
-        // "pick or create a list" placeholder instead.
-        const isListSurface = ui.view === 'lists' || ui.view === 'board' || ui.view === 'todo'
+        // A list surface ('lists' | 'board' | 'todo' | 'notes') needs an active
+        // list; with none selected (launch, or the active list was just deleted)
+        // show the "pick or create a list" placeholder instead.
+        const isListSurface = ui.view === 'lists' || ui.view === 'board' || ui.view === 'todo' || ui.view === 'notes'
         if (isListSurface && ui.activeListId == null) return renderNoListPane(state)
         if (ui.view === 'board') return renderBoardPane(state)
         if (ui.view === 'todo') return renderTodoPane(state)
+        if (ui.view === 'notes') return renderNotesPane(state)
         if (ui.view === 'peers') return renderPeersPane(state)
         if (ui.view === 'analytics') return renderAnalyticsPane(state)
         return renderListsPane(state)
@@ -2641,6 +2686,189 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 : h('div', { class: 'item-rows' },
                     ...items.map((item, i) => renderItemRow(item, tablerIcon(item.isDone ? 'square-check' : 'square', { size: 18 }), items, i)),
                 ),
+        )
+    }
+
+    // The notes surface: an index on the left, the open note as a document on
+    // the right. A note is NOT put in the Inspector drawer — a drawer annotates
+    // a row, and a note IS the content — so it takes the whole content column.
+    // `isDone` on a note means ARCHIVED, not done: archived rows recede but are
+    // never struck through, and no row carries a checkbox, because a single
+    // click opens the note and there is nothing for a toggle to do.
+    function renderNotesPane(state) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const notes = itemsForActiveList(state)
+        const listName = activeSurface(state)?.name || t('desktop.rail.notes')
+        // "Pinned" is the day-plan flag — the same star F toggles on a focused
+        // row and the Overview reads — so the index invents no pin channel.
+        const groups = projectNotes(notes, {
+            isPinned: (note) => plannedRefs.has(planItemKey(note.listId, note.id)),
+            query: ui.noteQuery,
+        })
+        // The open note resolves against ALL notes, not the filtered index: a
+        // search that hides the row must not close the document under it.
+        const open = notes.find((note) => note.id === ui.activeNoteId) ?? null
+        const statusKey = !state.backendReady
+            ? 'header.status.starting'
+            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+
+        replaceChildren(main,
+            h('header', { class: 'page-header' },
+                // The breadcrumb names the level above the h1: the list while a
+                // note is open (the h1 is then the note's own title, editable in
+                // place), the surface itself while none is.
+                h('div', { class: 'notes-head' },
+                    h('span', { class: 'notes-crumb label-sm' }, open ? listName : t('desktop.rail.notes')),
+                    open
+                        ? editableText({
+                            id: 'note-title',
+                            value: open.text || '',
+                            placeholder: t('desktop.notes.untitled'),
+                            className: 'notes-title-field title-lg',
+                            onCommit: (v) => actions.editItem(open, v),
+                        })
+                        : h('h1', { class: 'page-title title-lg' }, listName),
+                ),
+                h('div', { class: 'header-actions' },
+                    h('button', {
+                        class: 'btn btn-secondary btn-icon',
+                        'aria-label': t('desktop.notes.new'),
+                        title: `${t('desktop.notes.new')} (N)`,
+                        onclick: () => actions.newNote(),
+                    }, tablerIcon('plus', { size: 16 })),
+                    h('button', {
+                        class: `btn btn-secondary btn-icon${plannedRefs.has(planListKey(ui.activeListId, ui.activeType)) ? ' active' : ''}`,
+                        'aria-label': t('plan.flagList'),
+                        title: t('plan.flagList'),
+                        onclick: () => actions.toggleListPlan(ui.activeListId, ui.activeType),
+                    }, tablerIcon('flag', { size: 16 })),
+                    // Archiving IS the isDone write, so it goes through the same
+                    // toggle — and earns the same undo entry — as every other
+                    // item's done flag. Only the wording and the row treatment
+                    // differ, because a note is filed rather than finished.
+                    open
+                        ? h('button', {
+                            class: `btn btn-secondary btn-icon${isArchivedNote(open) ? ' active' : ''}`,
+                            'aria-label': isArchivedNote(open) ? t('desktop.notes.unarchive') : t('desktop.notes.archive'),
+                            title: isArchivedNote(open) ? t('desktop.notes.unarchive') : t('desktop.notes.archive'),
+                            onclick: () => actions.toggleItem(open),
+                        }, tablerIcon('package', { size: 16 }))
+                        : null,
+                    // Archiving files a note; this throws it away. Without it a
+                    // note made by a stray N would have no way out at all —
+                    // there is no row-level delete on an index row. Undoable
+                    // (⌘Z) like every other item delete.
+                    open
+                        ? h('button', {
+                            class: 'btn btn-secondary btn-icon',
+                            'aria-label': t('main.item.delete'),
+                            title: t('main.item.delete'),
+                            onclick: () => { ui.activeNoteId = null; actions.deleteItem(open) },
+                        }, tablerIcon('trash', { size: 16 }))
+                        : null,
+                ),
+            ),
+            h('div', { class: 'summary-bar label-md' },
+                beacon(state),
+                h('span', {}, t(statusKey, { count: state.peerCount })),
+                groups.pinned.length ? h('span', {}, `${t('desktop.notes.pinned')} ${groups.pinned.length}`) : null,
+                h('span', {}, `${t('desktop.notes.recent')} ${groups.recent.length}`),
+                groups.archived.length ? h('span', {}, `${t('desktop.notes.archived')} ${groups.archived.length}`) : null,
+            ),
+            h('div', { class: 'notes-split' },
+                renderNotesIndex(t, groups, notes.length),
+                open
+                    ? renderNoteDocument(t, open)
+                    : h('div', { class: 'empty-state notes-doc-empty' },
+                        h('h2', {}, t(notes.length ? 'desktop.notes.none' : 'desktop.notes.empty')),
+                        h('p', {}, t('desktop.notes.emptyHint')),
+                        notes.length
+                            ? null
+                            : h('button', { class: 'btn btn-primary', onclick: () => actions.newNote() },
+                                tablerIcon('plus', { size: 16 }), h('span', {}, t('desktop.notes.new'))),
+                    ),
+            ),
+        )
+    }
+
+    // Row and document timestamps. Fixture and legacy rows carry a counter
+    // rather than a clock in updatedAt (see the Inspector footer), so only a
+    // real wall-clock value earns a relative time.
+    const noteStamp = (note) => (note.updatedAt > 1e12 ? relativeTime(now() - note.updatedAt) : '')
+
+    // The index column: a search field, then Pinned / Recent / Archived.
+    function renderNotesIndex(t, groups, total) {
+        const shown = groups.pinned.length + groups.recent.length + groups.archived.length
+        return h('aside', { class: 'notes-index' },
+            h('input', {
+                class: 'input',
+                id: 'note-search',
+                value: ui.noteQuery,
+                placeholder: t('desktop.notes.search'),
+                'aria-label': t('desktop.notes.search'),
+                // The query lives on `ui`, not in the DOM: a background peer
+                // update rebuilds this pane wholesale and would otherwise drop
+                // the filter mid-search. The typing itself survives because the
+                // main pane carries the focused field's value and caret across
+                // the rebuild (mainPaneKey / mainDom).
+                oninput: (event) => { ui.noteQuery = event.target.value; renderAll() },
+            }),
+            shown === 0
+                ? h('p', { class: 'notes-index-empty label-md' }, t(total ? 'palette.empty' : 'desktop.notes.empty'))
+                : h('div', { class: 'notes-groups' },
+                    renderNoteGroup(t, 'desktop.notes.pinned', groups.pinned),
+                    renderNoteGroup(t, 'desktop.notes.recent', groups.recent),
+                    renderNoteGroup(t, 'desktop.notes.archived', groups.archived),
+                ),
+        )
+    }
+
+    function renderNoteGroup(t, labelKey, notes) {
+        if (notes.length === 0) return null
+        return h('section', { class: 'notes-group' },
+            h('h3', { class: 'category-heading label-sm' }, t(labelKey)),
+            ...notes.map((note) => renderNoteRow(t, note)),
+        )
+    }
+
+    // One index row. A PLAIN note is title + timestamp; a note that has grown a
+    // block body adds the one-line excerpt and its block count. Focusing a row
+    // sets focusedItemId, so ↑/↓ walk the index and F pins the note.
+    function renderNoteRow(t, note) {
+        const blocks = noteBlockCount(note)
+        const excerpt = blocks ? noteExcerpt(note) : ''
+        const title = (note.text || '').trim()
+        const stamp = noteStamp(note)
+        return h('button', {
+            class: `note-row${ui.activeNoteId === note.id ? ' active' : ''}${isArchivedNote(note) ? ' archived' : ''}`,
+            type: 'button',
+            dataset: { itemId: note.id },
+            onclick: () => actions.openNote(note.id),
+            onfocus: () => { ui.focusedItemId = note.id },
+        },
+            h('span', { class: `note-row-title body-md${title ? '' : ' untitled'}` }, title || t('desktop.notes.untitled')),
+            excerpt ? h('span', { class: 'note-row-excerpt label-md' }, excerpt) : null,
+            h('span', { class: 'note-row-meta label-sm' },
+                stamp ? h('span', {}, stamp) : null,
+                blocks ? h('span', {}, t('desktop.notes.blockCount', { count: blocks })) : null,
+            ),
+        )
+    }
+
+    // The document column: a mono meta strip, then the SHARED block body — the
+    // same builder the board drawer and the item Inspector use, which is
+    // already type-agnostic. Legacy `note` free-text folds into its first
+    // markdown block on open (openNote -> foldLegacyText).
+    function renderNoteDocument(t, note) {
+        const blocks = noteBlockCount(note)
+        const stamp = noteStamp(note)
+        return h('article', { class: 'notes-doc' },
+            h('div', { class: 'notes-doc-meta label-sm' },
+                h('span', {}, blocks ? t('desktop.notes.blockCount', { count: blocks }) : t('desktop.notes.plain')),
+                isArchivedNote(note) ? h('span', {}, t('desktop.notes.archived')) : null,
+                stamp ? h('span', {}, t('inspector.edited', { time: stamp })) : null,
+            ),
+            renderTicketBody(note, { legacyField: 'note', variant: 'inspector' }),
         )
     }
 
@@ -5383,6 +5611,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 { type: 'shopping', label: t('desktop.rail.groceries') },
                 { type: TODO_LIST_TYPE, label: t('desktop.rail.todo') },
                 ...(state.preferences.boardEnabled ? [{ type: BOARD_WRITE_TYPE, label: t('desktop.rail.board') }] : []),
+                { type: NOTES_LIST_TYPE, label: t('desktop.rail.notes') },
                 { type: 'group', label: t('desktop.group.label') },
             ]
             const typeRow = h('div', { class: 'choice-row' }, ...typeOptions.map((o) => h('button', {
@@ -5653,7 +5882,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             const item = ui.dialog.item
             const rail = buildRail(state)
             const isCurrent = (s) => s.listId === item.listId && surfaceForType(s.type) === surfaceForType(item.listType)
-            const typeGlyph = (type) => tablerIcon(isBoardType(type) ? 'layout-columns' : isTodoType(type) ? 'checklist' : 'basket', { size: 16 })
+            const typeGlyph = (type) => tablerIcon(isBoardType(type) ? 'layout-columns' : isTodoType(type) ? 'checklist' : isNotesType(type) ? 'notes' : 'basket', { size: 16 })
             const dests = rail.groups
                 .map((g) => ({ name: g.name, surfaces: g.surfaces.filter((s) => !isCurrent(s)) }))
                 .filter((g) => g.surfaces.length)
@@ -5997,7 +6226,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
         if (event.key === 'n' || event.key === '/') {
             event.preventDefault()
-            actions.summonAddBar()
+            // The notes surface has no add bar — a note is a document, not a
+            // row typed into a field — so N makes one and opens it instead.
+            if (ui.view === 'notes' && ui.activeListId != null) actions.newNote()
+            else actions.summonAddBar()
         } else if (event.key === 'g') {
             // Grid view exists only on the grocery surface; ignore elsewhere.
             if (ui.view === 'lists') preferencesToggle('isGridView')

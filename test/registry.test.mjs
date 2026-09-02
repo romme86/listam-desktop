@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reduceRegistry, REGISTRY_LIST_TYPE, REGISTRY_LIST_ID } from '@listam/domain/list-registry'
 import { createListReduction } from '@listam/domain/list-reducer'
+import { NOTES_LIST_TYPE } from '@listam/domain/identity'
 import {
     newListMeta,
     newGroupMeta,
@@ -30,6 +31,19 @@ test('newListMeta builds a well-formed registry meta-item; board writes the lega
 
     // ...and reduceRegistry reads the canonical type back.
     assert.equal(reg(meta).lists[0].type, 'board')
+})
+
+test('a notes list travels under its own type — no wire translation, unlike board', () => {
+    // Notes follows the todo precedent: written and read as 'notes', with no
+    // legacy value and no dual-read shim. A translation here (the board's
+    // 'kanban' fold) would make every peer disagree about the list's type.
+    const meta = newListMeta({ id: 'fieldnotes', name: 'Field notes', type: NOTES_LIST_TYPE, groupId: 'home', order: 0 }, 5)
+    assert.equal(meta.regType, NOTES_LIST_TYPE)
+    assert.equal(reg(meta).lists[0].type, NOTES_LIST_TYPE)
+
+    // ...and the type survives a rename, like every other sibling field.
+    const renamed = patchListMeta(reg(meta), 'fieldnotes', { name: 'Notes' }, 9)
+    assert.equal(renamed.regType, NOTES_LIST_TYPE)
 })
 
 test('patchListMeta preserves sibling fields and bumps updatedAt', () => {

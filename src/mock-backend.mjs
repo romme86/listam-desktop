@@ -29,7 +29,7 @@ import { normalizeListItem } from '@listam/domain/list-reducer'
 import { buildListMetaItem, buildGroupMetaItem, isRegistryItem } from '@listam/domain/list-registry'
 import { buildMovedItem, isSameSurfaceMove } from '@listam/domain/list-move'
 import { BOARD_WRITE_TYPE, isBoardType, normalizeBoardConfig, applyStatusTransition, doneStatusesOf } from '@listam/domain/board'
-import { TODO_LIST_TYPE, isTodoType } from '@listam/domain/identity'
+import { TODO_LIST_TYPE, isTodoType, NOTES_LIST_TYPE, isNotesType } from '@listam/domain/identity'
 import { buildValueReturnItem } from '@listam/domain/labels'
 import { buildPresenceItem } from '@listam/domain/presence'
 import { buildItemPlanEntry, buildListPlanEntry, toDateKey, shiftDateKey } from '@listam/domain/plan'
@@ -67,6 +67,7 @@ function mockInviteEvent({ mint = false } = {}) {
 
 const DEFAULT_LIST = 'default'
 const HARDWARE_LIST = 'hardware'
+const NOTES_LIST = 'fieldnotes'
 const PROJECTS_GROUP = 'projects'
 
 const FIXTURE_TEXTS = [
@@ -167,11 +168,36 @@ export function createMockBackend() {
         id: `mock-${++nextId}`,
     })).filter(Boolean)
 
-    // Registry meta-items declaring the named list + its group (the read path the
-    // dynamic rail consumes for non-default lists).
+    // A notes list — named lists only, there is no built-in Notes surface.
+    // Plain notes (title only, exactly what the voice notetaker writes) sit
+    // alongside notes that have grown a block body, so ?mock=1 exercises both
+    // index row shapes; the archived one exercises the receding treatment.
+    const notesFixtures = [
+        { text: 'Ask about the boiler service interval', updatedAt: NOWMS - 20 * 60 * 1000 },
+        { text: 'Cabin weekend', updatedAt: NOWMS - 3 * HOUR, blocks: [
+            { id: 'nblk-1', type: 'markdown', text: 'Leave **Friday** after lunch, back Sunday evening.' },
+            { id: 'nblk-2', type: 'checklist', items: [{ text: 'Firewood', done: true }, { text: 'Snow chains', done: false }] },
+            { id: 'nblk-3', type: 'table', rows: [['Leg', 'Driver'], ['Out', 'A'], ['Back', 'B']] },
+        ] },
+        { text: 'Espresso grind settings', updatedAt: NOWMS - 2 * DAY, blocks: [
+            { id: 'nblk-4', type: 'markdown', text: '18g in, 36g out, 27s. One notch finer for the Ethiopian.' },
+        ] },
+        { text: 'Old passport renewal steps', isDone: true, updatedAt: NOWMS - 30 * DAY },
+    ].map((note) => normalizeListItem({
+        listId: NOTES_LIST,
+        listType: NOTES_LIST_TYPE,
+        isDone: false,
+        ...note,
+        timeOfCompletion: note.isDone ? 1 : 0,
+        id: `mock-${++nextId}`,
+    })).filter(Boolean)
+
+    // Registry meta-items declaring the named lists + their group (the read path
+    // the dynamic rail consumes for non-default lists).
     const registryFixtures = [
         buildGroupMetaItem({ id: PROJECTS_GROUP, name: 'Projects', order: 0, updatedAt: 1 }),
         buildListMetaItem({ id: HARDWARE_LIST, name: 'Hardware', type: 'shopping', groupId: PROJECTS_GROUP, order: 0, updatedAt: 1 }),
+        buildListMetaItem({ id: NOTES_LIST, name: 'Field notes', type: NOTES_LIST_TYPE, groupId: PROJECTS_GROUP, order: 1, updatedAt: 1 }),
     ]
 
     // Value-return enabled on the built-in Board + Todo so ?mock=1 exercises the
@@ -192,6 +218,7 @@ export function createMockBackend() {
         buildItemPlanEntry({ listId: DEFAULT_LIST, itemId: todoFixtures[1].id, plannedFor: shiftDateKey(todayKey, -1), planOrder: 1000, updatedAt: 2 }),
         buildItemPlanEntry({ listId: DEFAULT_LIST, itemId: boardFixtures[1].id, plannedFor: shiftDateKey(todayKey, -3), planOrder: 1000, updatedAt: 2 }),
         buildListPlanEntry({ listId: HARDWARE_LIST, listType: 'shopping', plannedFor: shiftDateKey(todayKey, -2), planOrder: 2000, updatedAt: 2 }),
+        buildItemPlanEntry({ listId: NOTES_LIST, itemId: notesFixtures[1].id, plannedFor: todayKey, planOrder: 3000, updatedAt: 2 }),
     ]
 
     // Presence fixtures so ?mock=1 renders the per-peer status (online-now,
@@ -202,7 +229,7 @@ export function createMockBackend() {
         buildPresenceItem({ writerKey: B, lastActiveAt: NOWMS - 2 * HOUR, lastInteractionAt: NOWMS - 2 * HOUR - 5 * 60 * 1000, sessionStartedAt: NOWMS - 5 * HOUR, cumulativeOnlineMs: Math.round(3.08 * HOUR), sessionCount: 1, updatedAt: NOWMS - 2 * HOUR }),
     ]
 
-    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...registryFixtures, ...valueFixtures, ...planFixtures, ...presenceFixtures])
+    const reduction = reductionFromItems([...items, ...boardFixtures, ...todoFixtures, ...hardwareItems, ...notesFixtures, ...registryFixtures, ...valueFixtures, ...planFixtures, ...presenceFixtures])
     items = reduction.allItems()
 
     function emit(event) {
@@ -318,7 +345,7 @@ export function createMockBackend() {
                 const sourceListId = payload?.listId
                 if (!sourceListId) return JSON.stringify({ ok: false, reason: 'bad-list' })
                 const requestedType = payload?.type || payload?.listType || 'shopping'
-                const isDefaultGrocery = sourceListId === DEFAULT_LIST && !isBoardType(requestedType) && !isTodoType(requestedType)
+                const isDefaultGrocery = sourceListId === DEFAULT_LIST && !isBoardType(requestedType) && !isTodoType(requestedType) && !isNotesType(requestedType)
                 const baseKey = (++nextShareId).toString(16).padStart(64, '0')
                 // Match the real backend's canonical promotion id exactly so
                 // mock navigation and owner selection exercise the same shape.
@@ -335,7 +362,7 @@ export function createMockBackend() {
                 })
 
                 if (isDefaultGrocery) {
-                    const sourceItems = items.filter((item) => item?.listId === DEFAULT_LIST && !isRegistryItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType))
+                    const sourceItems = items.filter((item) => item?.listId === DEFAULT_LIST && !isRegistryItem(item) && !isBoardType(item.listType) && !isTodoType(item.listType) && !isNotesType(item.listType))
                     for (const source of sourceItems) {
                         const promoted = { ...source, listId, listType: requestedType, baseKey, updatedAt: Date.now() }
                         reduction.applyOperation({ type: 'add', value: promoted })
