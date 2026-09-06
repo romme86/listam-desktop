@@ -108,13 +108,17 @@ class Driver {
         const id = ++this.nextId
         const response = new Promise((resolve) => this.pending.set(id, resolve))
         this.proc.stdin.write(JSON.stringify({ id, op, ...fields }) + '\n')
-        const exitRejection = once(this.proc, 'exit').then(() => {
+        const exitWatch = new AbortController()
+        const exitRejection = once(this.proc, 'exit', { signal: exitWatch.signal }).then(() => {
             throw new Error(`backend driver exited mid-request '${op}' (code ${this.exitCode})\nstderr tail: ${this.stderr.slice(-2000)}`)
         })
         // The exit branch fires eventually even when the response won the race;
         // keep its rejection handled so teardown never reports it.
         exitRejection.catch(() => {})
-        return Promise.race([response, exitRejection])
+        return Promise.race([response, exitRejection]).finally(() => {
+            exitWatch.abort()
+            this.pending.delete(id)
+        })
     }
 
     // `peer` is the OTHER side of the exchange, included in the failure message.

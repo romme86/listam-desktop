@@ -29,6 +29,7 @@ import { RPC_PERSIST_SECRET } from '@listam/protocol'
 import { createLogger } from '@listam/logging'
 import { createFileSecretStore, prepareDesktopSecrets, persistDesktopSecret } from './secret-store.mjs'
 import { normalizeLeafBridgePort } from './leaf-bridge-config.mjs'
+import { LEAF_EXPERIMENT_ENABLED } from '@listam/domain'
 import { createLeafBridgeManager } from './leaf-bridge-manager.mjs'
 import { createVoiceHost } from './voice-host-worker.mjs'
 
@@ -204,6 +205,10 @@ function createRpc(handler) {
 }
 
 async function handleFrame(frame) {
+    if (!LEAF_EXPERIMENT_ENABLED && (frame.kind === 'bridge' || frame.kind === 'voice')) {
+        send({ kind: 'res', id: frame.id, data: JSON.stringify({ running: false, enabled: false, error: 'Leaf experiment is paused' }) })
+        return
+    }
     if (frame.kind === 'renderer-trace') {
         recordRendererRequestTrace(frame)
     } else if (frame.kind === 'bridge') {
@@ -378,6 +383,7 @@ function workerEnv() {
 }
 
 async function maybeStartVoice() {
+    if (!LEAF_EXPERIMENT_ENABLED) return
     const env = workerEnv()
     if (env.LISTAM_VOICE_ENABLED !== '1' || !env.LISTAM_VOICE_MODEL) return
     await voiceHost.start({
@@ -401,6 +407,7 @@ function readLeafBridgePort() {
 }
 
 async function maybeStartLeafBridge() {
+    if (!LEAF_EXPERIMENT_ENABLED) return
     const port = readLeafBridgePort()
     if (port <= 0) return
     await bridgeManager.start(port)

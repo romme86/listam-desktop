@@ -31,6 +31,7 @@ import {
     createInviteQrPayload,
 } from '@listam/protocol'
 import { groupByCategory, getDisplayCategoryName } from '@listam/grocery'
+import { LEAF_EXPERIMENT_ENABLED } from '@listam/domain'
 import {
     SERVICE_UUID,
     CHAR_CONFIG_UUID,
@@ -4704,8 +4705,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 renderInviteBlock(state),
             ),
             renderNetDiagnostics(state),
-            renderLeafBridge(state),
-            renderVoice(state),
+            LEAF_EXPERIMENT_ENABLED ? renderLeafBridge(state) : null,
+            LEAF_EXPERIMENT_ENABLED ? renderVoice(state) : null,
         )
     }
 
@@ -5434,8 +5435,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                         h('button', {
                             class: 'fingerprint-chip',
                             type: 'button',
-                            title: t('desktop.peers.copy'),
-                            'aria-label': t('desktop.peers.copy'),
+                            title: t('desktop.leaf.copy'),
+                            'aria-label': t('desktop.leaf.copy'),
                             onclick: () => copyText(key, 'desktop.settings.deviceKey.copied'),
                         }, tablerIcon('copy', { size: 12 })),
                     )

@@ -3,6 +3,7 @@
 // stands in. Everything downstream — store, i18n, UI — is identical.
 import { RPC_REQUEST_SYNC, RPC_GET_MEMBERS, RPC_GET_KEY, RPC_NET_SUSPEND, RPC_NET_RESUME } from '@listam/protocol'
 import { createLogger } from '@listam/logging'
+import { LEAF_EXPERIMENT_ENABLED } from '@listam/domain'
 import { createDesktopStore } from './store.mjs'
 import { buildI18n, loadLocaleChoice, persistLocaleChoice } from './i18n.mjs'
 import { loadUiPreferences, persistUiPreferences, createThemeController } from './prefs.mjs'
@@ -120,7 +121,7 @@ async function boot() {
         // when the user left it enabled. Failures surface via leafBridge.error
         // in the settings dialog rather than blocking boot.
         const prefs = store.getState().preferences
-        if (prefs.leafBridgeEnabled) {
+        if (LEAF_EXPERIMENT_ENABLED && prefs.leafBridgeEnabled) {
             backend.client.bridge('start', { port: prefs.leafBridgePort })
                 .then((status) => { if (status) store.setState({ leafBridge: status }) })
                 .catch((error) => log.error('[listam] leaf-bridge auto-start failed', { message: error?.message }))
@@ -128,7 +129,7 @@ async function boot() {
         // Desktop-hosted voice: resume the audio bridge + whisper pipeline when
         // the user left voice enabled with a model configured. Items land in this
         // base directly; errors surface via state.voice.error in Settings.
-        if (prefs.voiceEnabled && prefs.voiceModelPath) {
+        if (LEAF_EXPERIMENT_ENABLED && prefs.voiceEnabled && prefs.voiceModelPath) {
             // Force whisper's -l from the resolved UI locale (en/es/de/fr/it/pt)
             // unless the user pinned a specific voice language. Without a forced
             // locale whisper auto-detects per clip and mishears short Italian
