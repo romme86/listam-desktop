@@ -281,6 +281,9 @@ pipe.on('end', () => {
 })
 
 async function main() {
+    // A fresh Pear store (including --tmp-store) may not exist until the app
+    // writes it. Create it before the secret store and storage lease are opened.
+    fs.mkdirSync(Pear.config.storage, { recursive: true, mode: 0o700 })
     secretStore = createFileSecretStore({
         fs,
         path: join(Pear.config.storage, 'listam-desktop-secrets.json'),

@@ -105,6 +105,7 @@ import { createServersSection } from './ui/servers.mjs'
 import { createBackupOps } from './ui/backup.mjs'
 import { createCompactionOps } from './ui/compaction.mjs'
 import { createOverviewSection } from './ui/overview.mjs'
+import { renderPlanCalendar } from './ui/plan-calendar.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
 import {
@@ -2571,6 +2572,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         actions,
         now,
         renderAll,
+        openDialog,
         selectSurface,
         builtinDisplayName,
         typePredicate,
@@ -5238,6 +5240,39 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
         if (kind === 'command-palette') {
             content = renderCommandPalette(state)
+        } else if (kind === 'plan-move') {
+            const draft = ui.dialog
+            const pick = (dateKey) => {
+                // ISO date-only parsing measures calendar days in UTC, avoiding
+                // an off-by-one week when the local DST offset changes.
+                ui.weekOffset = Math.floor((Date.parse(dateKey) - Date.parse(toDateKey(now()))) / (7 * 86400000))
+                ui.planDate = dateKey
+                actions.movePlanToDay(draft.ref, dateKey)
+                closeDialog()
+            }
+            const calendar = renderPlanCalendar({ draft, today: toDateKey(now()), i18n: locale.i18n, onPick: pick })
+            content = dialogFrame(t('plan.pickDate'), [
+                h('p', { class: 'plan-calendar-entry' }, draft.label),
+                calendar,
+            ], [
+                h('button', { class: 'btn btn-secondary', onclick: () => pick(toDateKey(now())) }, t('plan.today')),
+                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.cancel')),
+            ])
+            content.classList.add('plan-calendar-dialog')
+            content.setAttribute('aria-label', t('plan.pickDate'))
+            // Keep keyboard navigation inside this modal, and restore the active
+            // day if a background update rebuilds it while the calendar is focused.
+            content.addEventListener('keydown', (event) => {
+                if (event.key !== 'Tab') return
+                const fields = [...content.querySelectorAll('button:not([disabled]), input')].filter((el) => el.tabIndex >= 0)
+                const first = fields[0]
+                const last = fields[fields.length - 1]
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+            })
+            if (dialogDom.shouldEnter(kind) || dialogHost.querySelector('.plan-calendar-day:focus')) {
+                queueMicrotask(() => calendar.querySelector('[tabindex="0"]')?.focus())
+            }
         } else if (kind === 'plan-day') {
             const item = ui.dialog.item
             const today = toDateKey(now())

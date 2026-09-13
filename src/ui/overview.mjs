@@ -26,7 +26,7 @@ import { isBoardType, selectBoardConfig, doneStatusesOf } from '../ticket.mjs'
 
 /**
  * Build the Overview renderer while keeping navigation and writes in mountApp.
- * Markup is intentionally unchanged from the original inline implementation.
+ * Calendar dialogs and plan writes stay owned by mountApp.
  */
 export function createOverviewSection ({
     main,
@@ -36,6 +36,7 @@ export function createOverviewSection ({
     actions,
     now,
     renderAll,
+    openDialog,
     selectSurface,
     builtinDisplayName,
     typePredicate,
@@ -155,17 +156,38 @@ export function createOverviewSection ({
         // or a week column re-plans it to that day (movePlanToDay). This is what
         // makes single-item days, done rows, and carried-over rows movable — not
         // only the multi-row days that also support reordering.
-        const planDragSource = (rec) => ({
-            draggable: 'true',
-            ondragstart: (event) => {
-                ui.planDrag = { ref: rec.ref, fromDate: rec.plannedFor }
-                event.dataTransfer.effectAllowed = 'move'
-                try { event.dataTransfer.setData('text/plain', rec.ref) } catch { /* some platforms reject */ }
-                event.currentTarget.classList.add('dragging')
-                event.stopPropagation()
-            },
-            ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
-        })
+        const planControls = (resolved) => {
+            const rec = resolved.rec
+            let dragged = false
+            const grip = h('button', {
+                type: 'button', class: 'plan-grip', draggable: 'true',
+                'aria-label': t('plan.pickDate'), title: t('plan.planFor'),
+                'aria-haspopup': 'dialog', dataset: { planRef: rec.ref },
+                onpointerdown: () => { dragged = false },
+                onclick: (event) => {
+                    event.stopPropagation()
+                    if (dragged && event.detail !== 0) return
+                    openDialog({ kind: 'plan-move', ref: rec.ref, label: resolved.label, dateKey: rec.plannedFor, month: rec.plannedFor.slice(0, 7),
+                        onClose: () => queueMicrotask(() => {
+                            const handle = [...main.querySelectorAll('.plan-grip')].find((el) => el.dataset.planRef === rec.ref)
+                            handle?.focus({ preventScroll: true })
+                        }),
+                    })
+                },
+            }, tablerIcon('grip-vertical', { size: 14 }))
+            return { grip, dnd: {
+                draggable: 'true',
+                ondragstart: (event) => {
+                    dragged = true
+                    ui.planDrag = { ref: rec.ref, fromDate: rec.plannedFor }
+                    event.dataTransfer.effectAllowed = 'move'
+                    try { event.dataTransfer.setData('text/plain', rec.ref) } catch { /* some platforms reject */ }
+                    event.currentTarget.classList.add('dragging')
+                    event.stopPropagation()
+                },
+                ondragend: (event) => { event.currentTarget.classList.remove('dragging', 'drop-before', 'drop-after'); ui.planDrag = null },
+            } }
+        }
         // A plan row can be a drop target for either an ordered collection (the
         // carry-over tray, whose records retain different origin dates) or one
         // day's agenda. Dropping across days inserts at the indicated row,
@@ -204,11 +226,11 @@ export function createOverviewSection ({
             // Every row is a drag source (drop on a day pill/column to re-plan it to
             // another day) and a drop target, so a carry-over item can be inserted
             // before/after even when Today currently contains only one item.
-            // The whole row is the drag surface — the grip is just the affordance,
-            // shown on every row so "move to another day" is always discoverable.
+            // The whole row remains draggable; clicking its grip opens the calendar.
             const records = Array.isArray(dayRecords) ? dayRecords : []
-            const dnd = { ...planDragSource(resolved.rec), ...(records.length > 0 ? planReorderTarget(resolved.rec, records, index) : {}) }
-            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
+            const controls = planControls(resolved)
+            const dnd = { ...controls.dnd, ...(records.length > 0 ? planReorderTarget(resolved.rec, records, index) : {}) }
+            const { grip } = controls
             if (resolved.kind === 'list') {
                 return h('div', { class: `plan-row plan-list-card${opts.spotlight ? ' spotlight' : ''}`, ...dnd },
                     grip,
@@ -270,11 +292,12 @@ export function createOverviewSection ({
         // Its origin day stays intact while the tray's shared planOrder changes.
         const carryRow = (resolved, carryRecords, index) => {
             const rec = resolved.rec
+            const controls = planControls(resolved)
             const dnd = {
-                ...planDragSource(rec),
+                ...controls.dnd,
                 ...(carryRecords.length > 1 ? planReorderTarget(rec, carryRecords, index, { collection: true }) : {}),
             }
-            const grip = h('span', { class: 'plan-grip', 'aria-hidden': 'true' }, tablerIcon('grip-vertical', { size: 14 }))
+            const { grip } = controls
             const badge = h('span', {
                 class: 'plan-carry-badge label-sm',
                 title: parsePlanKey(rec.plannedFor).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }),
@@ -404,7 +427,10 @@ export function createOverviewSection ({
 
         // Page the strip a week at a time so past days are reachable; a Today jump
         // snaps back to the current week whenever the strip has drifted off it.
-        const rangeLabel = `${parsePlanKey(week[0]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} – ${parsePlanKey(week[6]).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+        const rangeDate = (key) => parsePlanKey(key).toLocaleDateString(undefined, {
+            day: 'numeric', month: 'short', year: key.slice(0, 4) !== today.slice(0, 4) ? 'numeric' : undefined,
+        })
+        const rangeLabel = `${rangeDate(week[0])} – ${rangeDate(week[6])}`
         const stripNav = h('div', { class: 'plan-strip-nav' },
             h('button', {
                 class: 'plan-week-btn', 'aria-label': t('plan.prevWeek'), title: t('plan.prevWeek'),
@@ -558,4 +584,3 @@ export function createOverviewSection ({
 
     return { renderOverviewPane }
 }
-

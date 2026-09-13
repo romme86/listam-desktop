@@ -1920,14 +1920,51 @@ html.board-drawer-open { overflow: hidden; }
 .plan-day-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem; }
 .plan-day-custom { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 
+.plan-calendar-dialog { width: min(420px, calc(100vw - 2rem)); }
+.plan-calendar-entry { margin: 0.5rem 0 1.25rem; overflow-wrap: anywhere; }
+.plan-calendar-nav { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+.plan-calendar-month { flex: 1; min-width: 0; text-align: center; }
+.plan-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0.25rem; }
+.plan-calendar-weekday { padding: 0.5rem 0; text-align: center; color: var(--ink-mute); }
+.plan-calendar-day {
+    position: relative;
+    min-height: 40px;
+    padding: 0.5rem 0;
+    border: 0;
+    border-radius: var(--r-field);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+}
+.plan-calendar-day:hover { background: var(--surface-2); }
+.plan-calendar-day.selected { background: var(--ink); color: var(--surface-0); }
+.plan-calendar-day.today::after {
+    content: '';
+    position: absolute;
+    bottom: 3px;
+    left: calc(50% - 2px);
+    width: 4px;
+    height: 4px;
+    background: var(--ink);
+}
+.plan-calendar-day.selected.today::after { background: var(--signal); }
+
 @media (max-width: 980px) {
     .plan-planner { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Drag handle on reorderable plan rows (the whole row is the drag source). */
+/* Click to choose a date, or drag to move/reorder the plan row. */
 .plan-grip {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    flex: none;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-field);
+    background: transparent;
     color: var(--ink-faint);
     cursor: grab;
     opacity: 0;
@@ -1935,6 +1972,7 @@ html.board-drawer-open { overflow: hidden; }
     margin-left: -0.25rem;
 }
 .plan-row:hover .plan-grip, .plan-row:focus-within .plan-grip { opacity: 0.7; }
+.plan-row .plan-grip:hover, .plan-row .plan-grip:focus-visible { opacity: 1; color: var(--ink); background: var(--surface-2); }
 
 /* Flag a board ticket into the day plan — hover-revealed, acid when flagged. */
 .ticket-card { position: relative; }
