@@ -1,8 +1,8 @@
 ﻿// Windows resources for Listam.exe, filled in by CMake (see CMakeLists.txt).
 //
-// Use an explicit UTF-8 code page. Clang's preprocessing step can consume the
-// BOM before llvm-rc reads this file; relying on the BOM alone rejects the
-// accented company name on Windows. Keep this directive in the parent .rc.
+// Encode non-ASCII metadata as wide Unicode escapes. llvm-rc's narrow-string
+// decoding still depends on its input code page after Clang preprocessing.
+// The L prefix makes \x00C9 the Unicode character, independent of that page.
 #pragma code_page(65001)
 
 // cmake-pear wires an icon into the MSIX package only, and adds no VERSIONINFO
@@ -26,11 +26,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0"  // US English, Unicode
         BEGIN
-            VALUE "CompanyName",      "(É) UN CASINO"
+            VALUE "CompanyName",      L"(\x00C9) UN CASINO"
             VALUE "FileDescription",  "Listam - local-first shared lists"
             VALUE "FileVersion",      "@LISTAM_VERSION@"
             VALUE "InternalName",     "Listam"
-            VALUE "LegalCopyright",   "Copyright (C) (É) UN CASINO"
+            VALUE "LegalCopyright",   L"Copyright (C) (\x00C9) UN CASINO"
             VALUE "OriginalFilename", "Listam.exe"
             VALUE "ProductName",      "Listam"
             VALUE "ProductVersion",   "@LISTAM_VERSION@"

@@ -222,6 +222,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed' }
   }
 
+  # Compile the resource first so metadata/encoding failures surface before
+  # compiling the large native dependency graph. This script selects Ninja.
+  cmake --build build --target CMakeFiles/listam_appling.dir/listam_appling.rc.res
+  if ($LASTEXITCODE -ne 0) { throw 'Windows resource compilation failed' }
+
   # -- pin bare-headers ------------------------------------------------------
   # cmake-bare installs bare-headers@latest for every bare addon, ignoring the
   # lockfile that pins bare-module@6.0.1 (October 2025). bare-headers 1.29.0
@@ -337,6 +342,12 @@ finally {
 
 $exe = Join-Path $buildDir 'Listam.exe'
 if (-not (Test-Path $exe)) { throw "build finished but $exe is missing" }
+
+$metadata = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+$expectedCompany = "($([char]0x00C9)) UN CASINO"
+if ($metadata.CompanyName -ne $expectedCompany -or $metadata.FileVersion -ne $Version) {
+  throw "Windows resource metadata differs from the requested company/version"
+}
 
 # -- code signing --------------------------------------------------------------
 # Sign here rather than via cmake-pear's code_sign_windows, which registers
