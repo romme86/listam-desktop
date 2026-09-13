@@ -9,7 +9,7 @@ project(listam_appling C CXX ASM)
 
 set(LISTAM_ID "h1jwexik1m9c75rqng8hico4oxqgmm8xskws684skmjepksq5r3o"
     CACHE STRING "z32 drive key the appling boots (production channel)")
-set(LISTAM_VERSION "0.21.0" CACHE STRING "App version (kept in sync with package.json)")
+set(LISTAM_VERSION "0.22.0" CACHE STRING "App version (kept in sync with package.json)")
 
 # MSIX package Publisher identity. For a Microsoft Store submission this must be
 # the exact `CN=...` string from Partner Center -> Product identity, or the
