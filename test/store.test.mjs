@@ -400,6 +400,16 @@ test('write refusals set writeBlock; success and reset clear it', () => {
     assert.equal(store.getState().writeBlock, null)
 })
 
+test('local save refusals use the save-failure banner while legacy stalled writes keep their network message', () => {
+    const store = createDesktopStore()
+    for (const reason of ['local-save-failed', 'outbox-full', 'base-unavailable', 'invalid-mutation', 'cross-base-move']) {
+        store.applyClientEvent({ type: 'message', payload: { type: 'sync-stalled', reason, message: 'Could not save that change.' } })
+        assert.equal(store.getState().writeBlock, 'write-refused')
+    }
+    store.applyClientEvent({ type: 'message', payload: { type: 'sync-stalled' } })
+    assert.equal(store.getState().writeBlock, 'sync-stalled')
+})
+
 test('diagnostics entries are redacted and bounded', () => {
     const store = createDesktopStore()
     const hexKey = 'a'.repeat(64)

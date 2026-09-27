@@ -6156,7 +6156,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                             ? 'main.notification.writeBackendUnresponsive'
                             : state.writeBlock === 'storage-fenced'
                                 ? 'main.notification.writeStorageFenced'
-                                : 'main.notification.writeSyncStalled'))
+                                : state.writeBlock === 'write-refused'
+                                    ? 'main.notification.writeRefused'
+                                    : 'main.notification.writeSyncStalled'))
             : null
         const updateBanner = ui.updateReady
             ? h('div', { class: 'notice update-ready', dataset: { updateReady: 'true' } },

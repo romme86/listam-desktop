@@ -589,7 +589,10 @@ export function createDesktopStore(initial = {}) {
                 // The backend refused a mutation (see @listam/backend lib/item.mjs
                 // write gates) — remember why so the UI can say so instead of
                 // dropping the change silently.
-                setState({ writeBlock: type, diagnostics: recordDiagnostic(type, undefined, now) })
+                setState({
+                    writeBlock: type === 'sync-stalled' && payload.reason ? 'write-refused' : type,
+                    diagnostics: recordDiagnostic(type, payload.reason, now),
+                })
                 return type
             case 'storage-fenced':
                 // Terminal, unlike the write blocks above: another process owns
