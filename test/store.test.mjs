@@ -809,3 +809,46 @@ test('a reset returns a fresh invite envelope, not the shared initial object', (
     assert.equal(afterReset.liveInvites, 0)
     assert.equal(afterReset.expiresAt, null)
 })
+
+test('a base projection is atomic, clears missing buckets and preserves other bases', () => {
+    const store = createDesktopStore()
+    const receive = (items, extra = {}) => store.applyClientEvent({ type: 'message', payload: {
+        type: 'projection-snapshot', role: 'personal', baseKey: 'personal-key', source: 'local-cache', items, ...extra,
+    } })
+    let notifications = 0
+    store.subscribe(() => notifications++)
+    receive([item('local', 'Local'), buildPeerLabelItem({ writerKey: 'a'.repeat(64), name: 'Phone', updatedAt: 1 })], { pendingWriteIds: ['local'] })
+    assert.equal(notifications, 1)
+    assert.equal(store.getState().items.some((entry) => entry.id === 'local'), true)
+    receive([item('shared', 'Shared', { listId: 'shared-list' })], { role: 'shared', baseKey: 'shared-key', pendingWriteIds: ['shared'] })
+    receive([], { pendingWriteIds: [] })
+    assert.deepEqual(store.getState().items.map((entry) => entry.id), ['shared'])
+    assert.equal(store.getState().items[0].baseKey, 'shared-key')
+    assert.deepEqual(store.getState().pendingWriteIds, ['shared'])
+})
+
+test('a malformed base projection cannot erase the previous visible state', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'add-from-backend', item: item('keep', 'Keep') })
+    store.applyClientEvent({ type: 'message', payload: { type: 'projection-snapshot', role: 'personal', baseKey: 'personal', source: 'verified-view', items: [{ text: 'no identity' }] } })
+    assert.equal(store.getState().items.some((entry) => entry.id === 'keep'), true)
+})
+
+test('readiness waits for every preview base and pending edit, and closes retired previews', () => {
+    const store = createDesktopStore()
+    const receive = (baseKey, source, pendingWriteIds = []) => store.applyClientEvent({ type: 'message', payload: {
+        type: 'projection-snapshot', role: baseKey === 'personal' ? 'personal' : 'shared', baseKey, source, pendingWriteIds, items: [],
+    } })
+    receive('personal', 'local-cache')
+    receive('shared', 'peer-snapshot')
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('personal', 'verified-view')
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('shared', 'verified-view', ['edit'])
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('shared', 'verified-view')
+    assert.equal(store.getState().isCatchingUp, false)
+    receive('retired', 'peer-snapshot')
+    store.applyClientEvent({ type: 'message', payload: { type: 'projection-closed', baseKey: 'retired' } })
+    assert.equal(store.getState().isCatchingUp, false)
+})

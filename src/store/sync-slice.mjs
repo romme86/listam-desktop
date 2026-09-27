@@ -37,6 +37,8 @@ export const initialSyncState = {
     // could not flush. The row still exists locally and will sync later — the UI
     // marks it rather than pretending the edit was lost or that it landed.
     pendingWriteIds: [],
+    pendingWriteIdsByBase: {},
+    projectionSourcesByBase: {},
 }
 
 const syncSlice = createSlice({
@@ -85,6 +87,10 @@ const syncSlice = createSlice({
         // refusal, and showing a stale badge is worse than briefly showing none.
         writesReplayed(state) {
             if (state.pendingWriteIds.length) state.pendingWriteIds = []
+            state.pendingWriteIdsByBase = {}
+        },
+        projectionClosed(state, action) {
+            delete state.projectionSourcesByBase[action.payload]
         },
         peerCountSet(state, action) { state.peerCount = Number.isFinite(action.payload) ? Math.max(0, action.payload) : 0 },
         workletReadySet(state, action) { state.isWorkletReady = !!action.payload },
@@ -118,6 +124,20 @@ const syncSlice = createSlice({
                 isWorkletReady: state.isWorkletReady,
             })
         },
+    },
+    extraReducers: (builder) => {
+        builder.addCase('sync/projectionSnapshotReceived', (state, { payload }) => {
+            state.projectionSourcesByBase ??= {}
+            state.projectionSourcesByBase[payload.baseKey] = payload.source
+            if (!payload.pendingWriteIds) return
+            state.pendingWriteIdsByBase ??= {}
+            const previous = new Set(state.pendingWriteIdsByBase[payload.baseKey] ?? [])
+            state.pendingWriteIdsByBase[payload.baseKey] = payload.pendingWriteIds
+            state.pendingWriteIds = [...new Set([
+                ...state.pendingWriteIds.filter((id) => !previous.has(id)),
+                ...Object.values(state.pendingWriteIdsByBase).flat(),
+            ])]
+        })
     },
 })
 

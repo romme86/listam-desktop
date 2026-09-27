@@ -20,6 +20,7 @@ import devicesReducer, { devicesActions, selectMembershipRoster } from './store/
 import boardConfigReducer, { boardConfigActions } from './store/board-config-slice.mjs'
 import labelsReducer, { labelsActions } from './store/labels-slice.mjs'
 import presenceReducer, { presenceActions } from './store/presence-slice.mjs'
+import { decodeProjectionSnapshot } from '@listam/client/sync-list-snapshot'
 
 // Rebuild a reduction from a flat, possibly multi-list snapshot. Items are
 // grouped by their normalized listId and replayed as per-list 'list' operations
@@ -202,6 +203,7 @@ export function selectDesktopState(rootState) {
             ...selectAllItems(rootState),
             ...Object.values(rootState.labels.itemsById),
             ...Object.values(rootState.presence.itemsById),
+            ...Object.values(rootState.presence.liveItemsById ?? {}),
         ],
         inviteKey: rootState.sync.autobaseInviteKey,
         invite: rootState.sync.invite,
@@ -215,6 +217,8 @@ export function selectDesktopState(rootState) {
         isJoining: rootState.sync.isJoining,
         backendReady: rootState.sync.isWorkletReady,
         synced: rootState.sync.hasReceivedSnapshot,
+        isCatchingUp: rootState.sync.pendingWriteIds.length > 0
+            || Object.values(rootState.sync.projectionSourcesByBase ?? {}).some((source) => source !== 'verified-view'),
         roster: selectMembershipRoster(rootState),
         boardConfig: rootState.boardConfig.config,
         boardConfigCanAdminister: rootState.boardConfig.canAdminister,
@@ -474,6 +478,21 @@ export function createDesktopStore(initial = {}) {
     function applyMessagePayload(payload, now) {
         const type = payload?.type
         switch (type) {
+            case 'ephemeral-presence':
+                reduxStore.dispatch(presenceActions.livePresenceApplied(payload.item))
+                return type
+            case 'projection-snapshot': {
+                const snapshot = decodeProjectionSnapshot(payload)
+                if (!snapshot) return null
+                transaction(() => {
+                    reduxStore.dispatch({ type: 'sync/projectionSnapshotReceived', payload: snapshot })
+                    reduxStore.dispatch(syncActions.snapshotReceived())
+                    reduxStore.dispatch(runtimeSlice.actions.patched({
+                        diagnostics: recordDiagnostic('projection-snapshot', { source: snapshot.source, items: snapshot.items.length }, now),
+                    }))
+                })
+                return type
+            }
             case 'peer-count':
                 setState({
                     peerCount: typeof payload.count === 'number' ? payload.count : 0,
@@ -514,6 +533,9 @@ export function createDesktopStore(initial = {}) {
                     epoch: Number.isInteger(payload.epoch) ? payload.epoch : null,
                     diagnostics: recordDiagnostic(`base-state ${payload.baseId ?? 'unknown'} epoch ${payload.epoch ?? '?'}`, undefined, now),
                 })
+                return type
+            case 'projection-closed':
+                if (typeof payload.baseKey === 'string') reduxStore.dispatch(syncActions.projectionClosed(payload.baseKey))
                 return type
             case 'join-error':
                 // The reason is the useful half. `message` is the backend's

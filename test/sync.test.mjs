@@ -296,7 +296,7 @@ test('desktop contract: share one list to its own base, peer joins and co-edits'
     // personal copies were tombstoned. (The shared base also carries its own
     // self-describing registry meta-item — listType 'registry' — which syncs too;
     // filter it out to assert on the actual list items.)
-    const sharedContent = (items) => items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry')
+    const sharedContent = (items) => contentItems(items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry')
     const afterShare = await host.waitFor(
         (d) => sharedContent(d.items).length >= 2 &&
                d.items.filter((i) => i.listId === 'groceries' && !i.baseKey).length === 0,
@@ -383,7 +383,11 @@ test('desktop contract: explicit catch-up restores a shared list after backend r
     // that attaches late would. RPC_REQUEST_SYNC alone must fully hydrate it.
     await restarted.request('clear-view')
     await restarted.request('sync')
-    const caughtUp = await restarted.request('dump')
+    // Startup opens independent shared bases in the background. One sync
+    // request must hydrate the renderer as those local bases become ready.
+    const caughtUp = await restarted.waitFor((dump) => (
+        dump.items.filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2').length === 2
+    ), { timeoutMs: 30_000, intervalMs: 50 })
     const restored = caughtUp.items
         .filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2')
         .map((item) => item.text)
@@ -393,9 +397,9 @@ test('desktop contract: explicit catch-up restores a shared list after backend r
     const sharedSnapshot = caughtUp.syncSnapshots.find((snapshot) => (
         snapshot && !Array.isArray(snapshot) && snapshot.baseKey === shared.baseKey
     ))
-    assert.equal(sharedSnapshot?.listId, 'spesa-2')
-    assert.equal(sharedSnapshot?.listType, 'shopping')
-    assert.deepEqual(sharedSnapshot.list.map((item) => item.text).sort(), ['Bread', 'Milk'])
+    assert.equal(sharedSnapshot?.type, 'projection-snapshot')
+    assert.equal(sharedSnapshot?.role, 'shared')
+    assert.deepEqual(sharedSnapshot.items.filter((item) => item.listId === 'spesa-2').map((item) => item.text).sort(), ['Bread', 'Milk'])
 })
 
 // Cross-device auto-join: your TWO devices share one personal base (B joins A's
@@ -439,11 +443,11 @@ test('desktop contract: a paired device auto-joins your shared list (no invite)'
     // With no invite for the SHARED list, B auto-opens it from the propagated
     // creds and replicates its items (tagged with the shared base key).
     const bAuto = await b.waitFor(
-        (d) => d.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').length >= 2,
+        (d) => contentItems(d.items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry').length >= 2,
         { timeoutMs: 90_000 },
     )
     assert.deepEqual(
-        bAuto.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').map((i) => i.text).sort(),
+        contentItems(bAuto.items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry').map((i) => i.text).sort(),
         ['Bread', 'Milk'],
         'paired device auto-opened the shared list without an invite',
     )

@@ -41,6 +41,7 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE, isNotesType, NOTES_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
+import { connectionStatusKey, syncBeaconState } from './ui/connection-status.mjs'
 import { reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
     shortKey,
@@ -2588,9 +2589,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const summary = selectSummary(items)
         const title = activeSurface(state)?.name || t('desktop.rail.groceries')
 
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -2645,9 +2644,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const items = sortByOrder(itemsForActiveList(state))
         const summary = selectSummary(items)
         const title = activeSurface(state)?.name || t('desktop.rail.todo')
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -2711,9 +2708,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // The open note resolves against ALL notes, not the filtered index: a
         // search that hides the row must not close the document under it.
         const open = notes.find((note) => note.id === ui.activeNoteId) ?? null
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -3241,10 +3236,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // that exist: recovery → attention (danger square), joining → syncing (half
     // disc), peers>0 → live (breathing acid), else local (hollow ring).
     function beaconState(state) {
-        if (state.recovery) return 'attention'
-        if (state.isJoining || state.joinPhase) return 'syncing'
-        if (state.peerCount > 0) return 'live'
-        return 'local'
+        return syncBeaconState(state)
     }
     // A clickable beacon → the devices popover (names + roles + count). Used at the
     // four sync/summary sites; the infra dots (server/leaf/roster) keep their own.
@@ -4447,7 +4439,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         })
         const sectionBlock = (labelKey, ...children) => h('div', { class: 'inspector-section' },
             h('h3', { class: 'category-heading label-sm' }, t(labelKey)), ...children)
-        const bs = state.peerCount > 0 ? 'live' : 'local'
+        const bs = beaconState(state)
         const aside = h('aside', { class: 'item-inspector' },
             h('div', { class: 'inspector-head' },
                 h('div', { class: 'inspector-kicker-row' },
@@ -4480,7 +4472,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('span', {}, item.updatedAt > 1e12 ? t('inspector.edited', { time: relativeTime(now() - item.updatedAt) }) : ''),
                 h('span', { class: 'inspector-foot-status' },
                     h('span', { class: `dot ${bs}` }),
-                    h('span', {}, state.peerCount > 0 ? t('header.status.synced', { count: state.peerCount }) : t('header.status.online')),
+                    h('span', {}, t(connectionStatusKey(state, 'header.status.online'), { count: state.peerCount })),
                 ),
             ),
         )
