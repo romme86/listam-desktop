@@ -1164,15 +1164,33 @@ kbd {
 }
 .board-add:hover { background: var(--surface-2); color: var(--ink-mute); }
 
+/* Finished work recedes — the design-guide board screen dims its Done column
+   too. Pointing at the column, or at one card, brings it back. Keyed on the
+   default `done` state id: a board whose done state was renamed keeps full
+   weight until the card itself carries the flag (that needs the renderer). */
+.board-column[data-status="done"] .board-col-head { opacity: 0.6; }
+.board-column[data-status="done"] .ticket-card { opacity: 0.55; }
+.board-column[data-status="done"]:hover .board-col-head,
+.board-column[data-status="done"] .ticket-card:hover,
+.board-column[data-status="done"] .ticket-card:focus-visible,
+.board-column[data-status="done"] .ticket-card.selected { opacity: 1; }
+
 .ticket-card {
     background: var(--card);
+    /* The card edge is a drawn line, not a tonal step: --card sits only 1.08:1
+       above the board behind it in the dark theme, so without a border the card
+       edges all but vanish. The design-guide board screen draws one too. */
+    border: 1px solid var(--line);
     border-radius: var(--r-row);
-    padding: 0.75rem;
+    padding: 0.625rem 0.75rem;
     display: flex; flex-direction: column; gap: 0.5rem;
     cursor: grab;
-    transition: background var(--t-fast) var(--ease);
+    transition: background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
 }
 .ticket-card:hover { background: var(--surface-2); }
+/* Every other focusable row (.item-row, .grid-card, .note-row) draws this ring;
+   the board card was the one that fell back to the browser default. */
+.ticket-card:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 .ticket-card.dragging { opacity: 0.4; }
 
 /* An unfinished draft: created the moment the panel opened, never committed.
@@ -1180,13 +1198,15 @@ kbd {
    the state is legible at board zoom without tinting the text underneath. */
 .ticket-card.draft {
     background: var(--draft-tint);
+    border-color: var(--draft);
     box-shadow: inset 3px 0 0 0 var(--draft);
 }
 .ticket-card.draft:hover { background: var(--draft-tint); box-shadow: inset 3px 0 0 0 var(--draft), inset 0 0 0 1px var(--draft); }
 .ticket-card.draft.selected { box-shadow: inset 3px 0 0 0 var(--draft), inset 0 0 0 2px var(--ink); }
 .draft-pill {
     font-size: 0.65rem; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
     background: var(--draft); color: var(--ink-block);
 }
 .ticket-title.untitled { color: var(--ink-faint); font-style: italic; }
@@ -1196,18 +1216,34 @@ kbd {
 .btn.btn-danger-text:hover { color: var(--danger); background: var(--danger-container); }
 .ticket-title { font-size: 0.9rem; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .ticket-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
-.ticket-card-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-faint); }
-.ticket-card-meta > .timeliness-badge, .ticket-card-meta > .ticket-timer { margin-left: auto; }
+/* One type style for the whole row. --ink-faint on --card is 4.47:1 in the
+   light theme — under the AA floor at 11px — and the row previously mixed two
+   greys (.value-badge used --ink-mute) and two sizes (11px vs 12.5px). The
+   chips now read left to right in a fixed order: the old margin-left:auto on
+   the timer dropped it alone at the right of a wrapped second line, so the
+   same field sat in a different place on every card. */
+.ticket-card-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-mute); }
+.ticket-card-meta .value-badge { font-size: inherit; color: inherit; }
+.ticket-card-meta .value-badge svg { color: inherit; }
+.ticket-card-meta .ticket-avatar { width: 18px; height: 18px; }
 .ticket-meta { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); }
 
+/* Priority is a ramp of WEIGHT, not of hue: filled for urgent, outlined for
+   high, plain text below that. The old fills were hardcoded light hex with no
+   dark counterpart, so in the dark theme a near-white chip out-shouted the
+   title above it — while `low`, on --surface-2, was the only one you couldn't
+   see. The line-height was inherited (24px on a 10.4px font), which made this
+   one-word row 27px tall: taller than the title line it sat under. */
 .priority-pill {
-    font-size: 0.65rem; font-family: var(--font-mono);
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    font-size: 0.65rem; font-family: var(--font-mono); line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
 }
-.priority-pill.urgent { background: #FCEBEB; color: #791F1F; }
-.priority-pill.high { background: #FAEEDA; color: #633806; }
-.priority-pill.medium { background: #E6F1FB; color: #0C447C; }
-.priority-pill.low { background: var(--surface-2); color: var(--ink-mute); }
+.priority-pill.urgent { background: var(--danger-container); color: var(--on-danger-container); }
+.priority-pill.high { color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+/* Below `high` the label is plain text — the word itself carries the value.
+   Both steps stay on --ink-mute: --ink-faint is 4.47:1 on --card in the light
+   theme, the very floor the meta row above just moved off. */
+.priority-pill.medium, .priority-pill.low { color: var(--ink-mute); padding-left: 0; padding-right: 0; }
 
 .ticket-avatar {
     width: 20px; height: 20px; border-radius: 50%;
@@ -1219,13 +1255,19 @@ kbd {
 .prop-person { display: inline-flex; align-items: center; gap: 0.4rem; }
 .ticket-timer { display: inline-flex; align-items: center; gap: 0.3rem; font-family: var(--font-mono); }
 .timer-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--signal); }
+/* Outline chips: a finished ticket should not be the loudest thing on the
+   board. on_time was filled with --signal, the brightest token in the system,
+   so completed work out-shouted work in flight. Only the bad outcome keeps a
+   colour — on-time and undertime differ by their label text, not by hue, and
+   the old undertime hex (#FAEEDA/#633806) had no dark counterpart. */
 .timeliness-badge {
-    font-size: 0.65rem; font-family: var(--font-mono);
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    font-size: 0.65rem; font-family: var(--font-mono); line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    box-shadow: inset 0 0 0 1px currentColor;
 }
-.timeliness-badge.on_time { background: var(--signal); color: var(--on-signal); }
-.timeliness-badge.overtime { background: var(--danger-container); color: var(--on-danger-container); }
-.timeliness-badge.undertime { background: #FAEEDA; color: #633806; }
+.timeliness-badge.on_time { color: var(--ink-mute); }
+.timeliness-badge.overtime { color: var(--danger); }
+.timeliness-badge.undertime { color: var(--ink-mute); }
 
 /* ----- rigor create dialog ----- */
 .field-label { display: block; margin: 0.75rem 0 0.35rem; color: var(--ink-mute); }
