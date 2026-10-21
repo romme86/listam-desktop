@@ -574,6 +574,7 @@ export function createDesktopStore(initial = {}) {
             case 'write-replayed':
                 setState({ diagnostics: recordDiagnostic(type, undefined, now) })
                 reduxStore.dispatch(syncActions.writesReplayed())
+                if (payload.queued === 0 && getState().writeBlock === 'write-needs-decision') clearWriteBlock()
                 return type
             case 'write-needs-decision':
                 // Queued edits whose world moved on (epoch rotated, list moved

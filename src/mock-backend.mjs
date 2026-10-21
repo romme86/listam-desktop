@@ -259,6 +259,7 @@ export function createMockBackend() {
         } } })
     }
 
+    const invitationSets = new Map()
     const client = {
         async send(command, payload) {
             if (command === RPC_ADD) {
@@ -327,7 +328,14 @@ export function createMockBackend() {
                 }
                 return JSON.stringify({ ok: true })
             } else if (command === RPC_CREATE_INVITE) {
-                emit(mockInviteEvent({ mint: true }))
+                const scope = payload?.baseKey || 'project'
+                const current = (invitationSets.get(scope) || []).filter((entry) => entry.expiresAt > Date.now())
+                const created = payload?.listOnly ? [] : Array.from({ length: payload?.count || 1 }, () => ({
+                    key: `mockinvite${++nextId}`.padEnd(64, 'x'), expiresAt: Date.now() + (payload?.ttlMs || MOCK_INVITE_TTL_MS), singleUse: true,
+                }))
+                invitationSets.set(scope, [...current, ...created])
+                if (!payload?.baseKey && created.length) emit({ type: 'invite-key', ...created.at(-1), liveInvites: current.length + created.length, maxInvites: 32 })
+                return JSON.stringify({ ok: true, invites: payload?.listOnly ? current : created, liveInvites: current.length + created.length, maxInvites: 32 })
             } else if (command === RPC_GET_KEY) {
                 emit(mockInviteEvent())
             } else if (command === RPC_CANCEL_JOIN) {

@@ -1,3 +1,4 @@
+import { createInvitePanel, renderInvitePanel } from './ui/invite-panel.mjs'
 // Desktop UI: a fixed sidebar plus three panes (lists, peers & devices,
 // diagnostics), rendered with plain DOM against the kinetic-minimalist tokens
 // in app.css. All user-facing copy resolves through the shared @listam/i18n
@@ -1684,21 +1685,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // hit by reflex when the user meant to share one list (that lives in the
         // per-list settings dialog via shareList).
         shareProject() {
-            // RPC_GET_KEY, not RPC_CREATE_INVITE. Since the invite book became
-            // additive, CREATE_INVITE always mints (`{ fresh: true }`,
-            // @listam/backend backend.mjs:506), so opening Share five times used
-            // to leave five live codes and push toward the eight-code cap, which
-            // evicts the OLDEST live code — the one already handed to somebody.
-            // GET_KEY re-publishes the code that is live, minting only when none
-            // is. Minting is the "New code" button's job and nothing else's.
-            send(RPC_GET_KEY)
-            openDialog({ kind: 'share' })
+            showInvitationDialog('share')
         },
-        // Mint an ADDITIONAL code. RPC_CREATE_INVITE no longer replaces the last
-        // one, so handing a second friend a code cannot silently kill the first
-        // friend's — which is exactly what happened on 2026-08-26.
         regenerateInvite() {
-            send(RPC_CREATE_INVITE)
+            showInvitationDialog('share')
         },
         // Abort a join that is still pairing. Without this the guest stays behind
         // joinViaInvite's single-flight guard for the rest of its 120s deadline,
@@ -1756,7 +1746,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ui.selectedTicketId = null
                     ui.ticketDocId = null
                 }
-                openDialog({ kind: 'share-list', invite: result.invite })
+                showInvitationDialog('share-list', result.baseKey, [{ key: result.invite, expiresAt: result.expiresAt, singleUse: true }])
             } else if (result && result.reason === 'cannot-share-builtin') {
                 // Legacy built-in Board/Todo surfaces still multiplex listId
                 // 'default' and cannot be promoted independently.
@@ -1791,10 +1781,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             } finally {
                 store.setState({ isJoining: false })
             }
-            store.pushNotice(
-                result && result.ok ? locale.i18n.t('joinList.joined') : locale.i18n.t('joinList.failed'),
-                result && result.ok ? 'success' : 'error',
-            )
+            if (result?.ok) store.pushNotice(locale.i18n.t('joinList.joined'), 'success')
+            else openDialog({ kind: 'join-list', value, errorKey: joinErrorKey(result?.reason) })
         },
         async requestJoin(input) {
             const value = input.trim().replace(/\s+/g, '')
@@ -1991,6 +1979,42 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // ancestor transform on .main.
     const drawerHost = h('div', {})
     root.append(titlebar, shell, hintsHost, noticesHost, drawerHost, dialogHost)
+
+    function showInvitationDialog(kind, baseKey = null, invites = []) {
+        const model = createInvitePanel(invites)
+        model.busy = true
+        openDialog({ kind, baseKey, invitePanel: model })
+        void send(RPC_CREATE_INVITE, { baseKey, listOnly: true }).then((reply) => {
+            const result = parseReply(reply)
+            if (result?.ok) {
+                model.invites = result.invites
+                model.qrKey = result.invites.length === 1 ? result.invites[0].key : null
+            } else model.error = result || { reason: 'invite-failed' }
+        }).catch(() => { model.error = { reason: 'invite-failed' } }).finally(() => {
+            model.busy = false
+            if (ui.dialog?.invitePanel === model) renderAll()
+        })
+    }
+
+    async function generateInvitationBatch(model, baseKey) {
+        if (model.busy) return
+        model.busy = true
+        model.error = null
+        renderAll()
+        try {
+            const result = parseReply(await send(RPC_CREATE_INVITE, { baseKey, count: model.count, ttlMs: model.ttlMs }))
+            if (result?.ok) {
+                const previous = new Map(model.invites.map((invite) => [invite.key, invite]))
+                for (const invite of result.invites) previous.set(invite.key, invite)
+                model.invites = [...previous.values()]
+                model.qrKey = result.invites.length === 1 ? result.invites[0].key : null
+            } else model.error = result || { reason: 'invite-failed' }
+        } catch { model.error = { reason: 'invite-failed' } }
+        finally {
+            model.busy = false
+            if (ui.dialog?.invitePanel === model) renderAll()
+        }
+    }
 
     // A dialog may register an `onClose` hook (the ticket create panel does: it
     // owns a real row and a pending autosave, and both have to settle however
@@ -3579,6 +3603,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     event.preventDefault()
                     event.stopPropagation()
                     reorderItemByStep(group, item, event.key === 'ArrowDown' ? 1 : -1)
+                    return
+                }
+                // The card is an <article>, so Enter and Space are not free the
+                // way they are on a <button>: without this a focused card could
+                // only ever be opened with the mouse.
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    actions.openTicket(item.id)
                 }
             },
             onfocus: () => { ui.focusedItemId = item.id },
@@ -4116,6 +4149,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         ed.innerHTML = isMarkdown ? markdownToHtml(ui.blockDraft) : inlineBlockToHtml(ui.blockDraft)
         seedRichCaretAnchors(ed)
         ed.classList.toggle('is-empty', ui.blockDraft === '')
+        // Only now: the caret helpers above read the editor's own DOM, so they
+        // cannot run until `ed` exists.
+        syncSlashMenu()
 
         // Remember the caret across re-renders (the app rebuilds this editor on
         // every P2P/local store update); null means "place at end" on next build.
@@ -4799,7 +4835,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const regenerate = h('button', {
             class: 'btn btn-secondary',
             onclick: () => actions.regenerateInvite(),
-        }, t('invite.regenerate'))
+        }, t('invite.batch.generate'))
         // Rendering a QR for a dead code invites a second failed join. Say it is
         // expired and offer the one action that helps.
         if (invite.expired) {
@@ -4890,7 +4926,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('h3', { class: 'category-heading label-sm' }, t('members.title')),
                 h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
             ),
-            buildServersSection(t),
+            env.web ? null : buildServersSection(t),
             // Whole-project sharing, moved here out of Settings: this is the pane
             // where a user is already thinking about who else is on the project,
             // and the invite the button mints renders in the next section down.
@@ -5511,51 +5547,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
-        } else if (kind === 'share') {
-            content = dialogFrame(t('share.project.dialogTitle'), [
-                h('p', { class: 'dialog-body' }, t('share.project.dialogMessage')),
-                // The dialog keeps its own "not ready yet" copy: it is opened by a
-                // deliberate Share action, so an absent code means the mint is
-                // still in flight, not that none was ever asked for.
-                renderInviteBlock(state, {
-                    showCopy: false,
-                    emptyKey: 'invite.share.notReady',
-                    emptyClass: 'dialog-body',
+        } else if (kind === 'share' || kind === 'share-list') {
+            const scope = kind === 'share-list' ? 'list' : 'project'
+            const model = ui.dialog.invitePanel
+            content = dialogFrame(t(scope === 'list' ? 'shareList.title' : 'share.project.dialogTitle'), [
+                h('p', { class: 'body-md' }, t(scope === 'list' ? 'shareList.message' : 'share.project.dialogMessage')),
+                renderInvitePanel({ model, scope, t, now: now(), refresh: renderAll,
+                    generate: () => generateInvitationBatch(model, ui.dialog.baseKey),
+                    copy: async (key) => {
+                        try { await navigator.clipboard.writeText(key); store.pushNotice(t('desktop.peers.copied'), 'success') }
+                        catch { store.pushNotice(t('invite.share.failed'), 'error') }
+                    },
                 }),
-            ], [
-                // Same expiry test the block above uses: the body already refuses
-                // to draw a QR for a dead code, so the footer must not still offer
-                // to put one on the clipboard.
-                describeInvite({ key: state.inviteKey, ...(state.invite ?? {}) }, now()).expired === false && state.inviteKey
-                    ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy'))
-                    : null,
-                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-        } else if (kind === 'share-list') {
-            const invite = ui.dialog.invite || ''
-            const copyShareInvite = async () => {
-                if (!invite) return
-                try { await navigator.clipboard.writeText(invite); store.pushNotice(t('desktop.peers.copied'), 'success') }
-                catch { store.pushNotice(t('invite.share.failed'), 'error') }
-            }
-            content = dialogFrame(t('shareList.title'), [
-                h('p', { class: 'dialog-body' }, t('shareList.message')),
-                h('div', { class: 'invite-share-layout' },
-                    createInviteQr(createInviteQrPayload(invite, 'list'), t('shareList.title')),
-                    h('div', { class: 'invite-code' }, invite),
-                ),
-            ], [
-                h('button', { class: 'btn btn-secondary', onclick: copyShareInvite }, t('desktop.peers.copy')),
-                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
+            ], [h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.close'))], { className: 'invite-dialog' })
         } else if (kind === 'join-list') {
             const joinListInput = h('input', {
-                class: 'input',
+                class: 'input', value: ui.dialog.value || '', id: 'join-list-code',
                 placeholder: t('invite.dialog.placeholder'),
                 onkeydown: (event) => { if (event.key === 'Enter') actions.joinList(joinListInput.value) },
             })
             content = dialogFrame(t('joinList.title'), [
                 h('p', { class: 'dialog-body' }, t('joinList.subtitle')),
+                ui.dialog.errorKey ? h('p', { class: 'invite-panel-error', role: 'alert' }, t(ui.dialog.errorKey)) : null,
                 joinListInput,
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
@@ -6313,10 +6326,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('h3', { class: 'category-heading label-sm' }, t('list.members.title')),
                 h('p', { class: 'list-settings-hint' }, t(access.baseKey ? 'list.members.sharedHint' : 'list.members.projectHint')),
                 members.length ? h('ul', { class: 'list-members-rows' }, ...members.map((member) => {
-                    const name = peerLabelMap().get(member.writerKey)
+                    const name = peerLabelMap().get(member.writerKey)?.trim() || 'anonymous'
                     return h('li', { class: 'list-member' },
                         h('div', { class: 'list-member-identity' },
-                            name ? h('span', { class: 'list-member-name' }, name) : null,
+                            h('span', { class: 'list-member-name' }, name),
                             fingerprintChip(member.writerKey),
                         ),
                         h('span', { class: 'role-chip' }, t(member.isSelf ? 'members.role.self' : member.isOwner ? 'members.role.owner' : 'members.role.member')),
@@ -6421,7 +6434,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                                 ? 'main.notification.writeStorageFenced'
                                 : state.writeBlock === 'write-refused'
                                     ? 'main.notification.writeRefused'
-                                    : 'main.notification.writeSyncStalled'))
+                                    : state.writeBlock === 'write-needs-decision'
+                                        ? 'main.notification.writeNeedsDecision'
+                                        : 'main.notification.writeSyncStalled'))
             : null
         const updateBanner = ui.updateReady
             ? h('div', { class: 'notice update-ready', dataset: { updateReady: 'true' } },
@@ -6541,6 +6556,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (next) selectSurface(store.getState(), next)
         } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
+            // On a board this walks DOM order, which is column by column: ↓ off
+            // the bottom of a column lands at the top of the next one. ←/→
+            // below is what moves across columns deliberately.
             const rows = [...root.querySelectorAll('[data-item-id]')]
             if (rows.length === 0) return
             const index = rows.findIndex((row) => row.dataset.itemId === ui.focusedItemId)
@@ -6692,8 +6710,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             renderAll()
         }, PRESENCE_TICK_MS)
         setInterval(() => {
-            if (ui.view !== 'peers' && ui.dialog?.kind !== 'share') return
-            if (!store.getState().inviteKey) return
+            if (ui.view !== 'peers' && !['share', 'share-list'].includes(ui.dialog?.kind)) return
             renderAll()
         }, INVITE_TICK_MS)
     }

@@ -223,6 +223,9 @@ function applyItemProjection(state, entry, operation) {
     if (!routing && !isFromAuthoritativeBase(normalized, state.baseByListId)) return
     const itemId = baseScopedKey(normalized)
     if (isPlanItem(normalized)) {
+        // Plan adds can be delayed replays of the same deterministic ref.
+        // They must not undo a more recent clear or date change.
+        if (state.itemsById[itemId] && isStaleUpdate(state.itemsById[itemId], normalized)) return
         if (operation === 'delete') delete state.itemsById[itemId]
         else state.itemsById[itemId] = normalized
         return

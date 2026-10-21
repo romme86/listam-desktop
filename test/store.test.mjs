@@ -46,6 +46,21 @@ function item(id, text, overrides = {}) {
     }
 }
 
+test('late plan events cannot resurrect a cleared item or undo a newer date', () => {
+    const store = createDesktopStore()
+    const old = buildItemPlanEntry({ listId: 'default', itemId: 'task', plannedFor: '2026-10-19', updatedAt: 10 })
+    const cleared = { ...old, plannedFor: '', updatedAt: 20 }
+    store.applyClientEvent({ type: 'update-from-backend', item: cleared })
+    for (const type of ['add-from-backend', 'update-from-backend', 'delete-from-backend']) {
+        store.applyClientEvent({ type, item: old })
+        assert.deepEqual(store.getState().items.filter(isPlanItem), [cleared])
+    }
+    const moved = { ...old, plannedFor: '2026-10-22', updatedAt: 30 }
+    store.applyClientEvent({ type: 'update-from-backend', item: moved })
+    store.applyClientEvent({ type: 'add-from-backend', item: cleared })
+    assert.deepEqual(store.getState().items.filter(isPlanItem), [moved])
+})
+
 test('desktop state is owned by named Redux slices with a flat compatibility view', () => {
     const store = createDesktopStore({ preferences: { theme: 'dark' } })
     const root = store.getReduxState()
@@ -566,6 +581,18 @@ test('queued edits whose world moved on raise a block that asks the user', () =>
     }, 1)
 
     assert.equal(store.getState().writeBlock, 'write-needs-decision')
+})
+
+test('recovering the entire journal clears its stale warning, but partial recovery does not', () => {
+    const store = createDesktopStore()
+    store.setState({ writeBlock: 'write-needs-decision' })
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 1, queued: 2 } })
+    assert.equal(store.getState().writeBlock, 'write-needs-decision')
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 2, queued: 0 } })
+    assert.equal(store.getState().writeBlock, null)
+    store.setState({ writeBlock: 'storage-fenced' })
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 1, queued: 0 } })
+    assert.equal(store.getState().writeBlock, 'storage-fenced')
 })
 
 // applyItemProjection now mutates itemsById/itemIds directly instead of

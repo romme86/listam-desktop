@@ -25,6 +25,12 @@ const JOIN_ERROR_KEYS = Object.freeze({
     'cancelled': 'joining.failed.cancelled',
     'incomplete-credentials': 'joining.failed.incompleteCredentials',
     'unknown': 'joining.failed.unknown',
+    'bad-invite': 'joining.failed.inviteInvalid',
+    'not-ready': 'joining.failed.notReady',
+    'join-timeout': 'joining.failed.historyTimeout',
+    'cannot-join-builtin': 'joining.failed.wrongInvite',
+    'list-id-conflict': 'joining.failed.listConflict',
+    'registry-write-failed': 'joining.failed.registryWrite',
 })
 
 /**
