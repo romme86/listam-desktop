@@ -1165,15 +1165,24 @@ kbd {
 .board-add:hover { background: var(--surface-2); color: var(--ink-mute); }
 
 /* Finished work recedes — the design-guide board screen dims its Done column
-   too. Pointing at the column, or at one card, brings it back. Keyed on the
-   default `done` state id: a board whose done state was renamed keeps full
-   weight until the card itself carries the flag (that needs the renderer). */
-.board-column[data-status="done"] .board-col-head { opacity: 0.6; }
-.board-column[data-status="done"] .ticket-card { opacity: 0.55; }
-.board-column[data-status="done"]:hover .board-col-head,
-.board-column[data-status="done"] .ticket-card:hover,
-.board-column[data-status="done"] .ticket-card:focus-visible,
-.board-column[data-status="done"] .ticket-card.selected { opacity: 1; }
+   too. Both flags come from the board CONFIG (state.isDone), not from a literal
+   id, so a board that renamed its done state still recedes. */
+.board-column.done .board-col-head { opacity: 0.6; }
+.board-column.done:hover .board-col-head { opacity: 1; }
+.ticket-card.done { opacity: 0.55; }
+.ticket-card.done:hover,
+.ticket-card.done:focus-visible,
+.ticket-card.done.selected { opacity: 1; }
+
+/* An empty column keeps its head, its count and its + Add at about half width.
+   Five default states at 240px need 1264px and a 1440px window offers 1024, so
+   what fell off the right edge was the Done column — while Blocked and Review
+   each held a full 240px of nothing. */
+.board-column.empty { flex: 0 1 124px; min-width: 124px; }
+.board-column.empty .board-col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+    .board-column.empty { flex: 0 1 108px; min-width: 104px; }
+}
 
 .ticket-card {
     background: var(--card);
@@ -1184,14 +1193,23 @@ kbd {
     border-radius: var(--r-row);
     padding: 0.625rem 0.75rem;
     display: flex; flex-direction: column; gap: 0.5rem;
-    cursor: grab;
+    /* A click OPENS the ticket; dragging is the secondary gesture. `grab` here
+       advertised the wrong one as primary. */
+    cursor: pointer;
     transition: background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
 }
 .ticket-card:hover { background: var(--surface-2); }
 /* Every other focusable row (.item-row, .grid-card, .note-row) draws this ring;
    the board card was the one that fell back to the browser default. */
 .ticket-card:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
-.ticket-card.dragging { opacity: 0.4; }
+.ticket-card.dragging { opacity: 0.4; cursor: grabbing; }
+
+/* The card's single accent, so it can only ever mean one thing. The renderer
+   picks it in order — unfinished draft, then blocked, then urgency — and
+   medium/low get none at all, which is what keeps an ordinary board quiet. */
+.ticket-card.edge-urgent { box-shadow: inset 3px 0 0 0 var(--danger); }
+.ticket-card.edge-high { box-shadow: inset 3px 0 0 0 var(--ink-faint); }
+.ticket-card.edge-blocked { box-shadow: inset 3px 0 0 0 var(--draft); }
 
 /* An unfinished draft: created the moment the panel opened, never committed.
    A solid amber edge rather than a wash, so the card still reads as a card and
@@ -1222,10 +1240,45 @@ kbd {
    chips now read left to right in a fixed order: the old margin-left:auto on
    the timer dropped it alone at the right of a wrapped second line, so the
    same field sat in a different place on every card. */
-.ticket-card-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-mute); }
-.ticket-card-meta .value-badge { font-size: inherit; color: inherit; }
-.ticket-card-meta .value-badge svg { color: inherit; }
+.ticket-card-meta {
+    display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;
+    color: var(--ink-mute);
+}
+/* Two fixed groups — who on the left, when on the right — and NO wrapping, so
+   a field is in the same place on every card. The left group clips rather than
+   pushing the right one off; nothing ever lands alone on a second line. */
+.ticket-card-meta .meta-left { display: flex; align-items: center; gap: 0.5rem; min-width: 0; overflow: hidden; }
+.ticket-card-meta .meta-right { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; flex: none; }
 .ticket-card-meta .ticket-avatar { width: 18px; height: 18px; }
+/* In the row, priority is a word: the left edge carries the colour, and only
+   urgent/high ever reach the row at all. */
+.ticket-card-meta .priority-pill { padding: 0; background: none; box-shadow: none; text-transform: uppercase; letter-spacing: 0.04em; }
+.ticket-card-meta .priority-pill.urgent { color: var(--danger); }
+.ticket-card-meta .priority-pill.high { color: var(--ink); }
+
+/* Due is plain text until it is late. Red on a card means exactly one thing. */
+.ticket-due { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); white-space: nowrap; }
+.ticket-due.today { color: var(--ink); }
+.ticket-due.overdue { color: var(--danger); }
+
+/* Progress is a 2px rule under the title rather than a number to decode; the
+   n/n sits in the row below for anyone who wants the exact count. */
+.ticket-progress { height: 2px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.ticket-progress > span { display: block; height: 2px; background: var(--ink-faint); }
+
+/* Why a blocked ticket is blocked, on the card. One line, clipped. */
+.ticket-reason { display: flex; align-items: center; gap: 0.3rem; min-width: 0; color: var(--draft); font-family: var(--font-mono); }
+.ticket-reason > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ticket-reason > svg { flex: none; }
+
+/* The planning numbers are real but secondary, so they cost the resting card
+   no height at all and appear while it is hovered, focused or selected. */
+.ticket-extras { display: none; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-faint); }
+.ticket-extras .value-badge { font-size: inherit; color: inherit; }
+.ticket-extras .value-badge svg { color: inherit; }
+.ticket-card:hover .ticket-extras,
+.ticket-card:focus-visible .ticket-extras,
+.ticket-card.selected .ticket-extras { display: flex; }
 .ticket-meta { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); }
 
 /* Priority is a ramp of WEIGHT, not of hue: filled for urgent, outlined for

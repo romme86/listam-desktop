@@ -150,6 +150,8 @@ import {
     doneStatusesOf,
     groupByStatus,
     ticketBadges,
+    buildTicketCardModel,
+    dueLabel,
     selectWriterStats,
     validateRigorDraft,
     buildStatusChange,
@@ -2472,6 +2474,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     let renderedHints = null
     let renderedHintsI18n = null
+    let renderedHintsBoard = null
     function renderHints(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const show = state.preferences.showKeyHints
@@ -2479,9 +2482,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // The footer is independent of list/backend state. Keeping the same DOM
         // node across background updates prevents its entrance animation from
         // restarting and preserves keyboard focus on its close button.
-        if (renderedHints === show && renderedHintsI18n === locale.i18n) return
+        // The board earns one different hint, so the view is part of the cache
+        // key — otherwise the bar keeps whichever one it rendered first.
+        const boardView = ui.view === 'board'
+        if (renderedHints === show && renderedHintsI18n === locale.i18n && renderedHintsBoard === boardView) return
         renderedHints = show
         renderedHintsI18n = locale.i18n
+        renderedHintsBoard = boardView
         if (!show) {
             hintsHost.replaceChildren()
             return
@@ -2490,7 +2497,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ['N', t('desktop.hints.add')],
             ['G', t('desktop.hints.view')],
             ['[ ]', t('desktop.hints.list')],
-            ['Space', t('desktop.hints.done')],
+            // Space toggles done on a list row; on a board there is nothing to
+            // toggle, so the slot advertises the key that does work there.
+            boardView ? ['↵', t('desktop.shortcuts.openTicket')] : ['Space', t('desktop.hints.done')],
             ['F', t('desktop.hints.flag')],
             ['Del', t('desktop.hints.delete')],
             ['⌘Z', t('desktop.hints.undo')],
@@ -3397,7 +3406,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const tickets = sortByOrder(col.tickets)
         const count = s.wipLimit > 0 ? `${tickets.length}/${s.wipLimit}` : String(tickets.length)
         return h('div', {
-            class: 'board-column',
+            // `done` comes from the config, not from the literal id, so a board
+            // that renamed its done state still recedes. `empty` narrows a
+            // column with nothing in it: 5 default states at 240px overflow a
+            // 1440px window, which pushed Done off-screen entirely.
+            class: `board-column${s.isDone ? ' done' : ''}${tickets.length === 0 ? ' empty' : ''}`,
             dataset: { status: s.id },
             ondragover: (event) => { event.preventDefault(); event.currentTarget.classList.add('drag-over') },
             ondragleave: (event) => { event.currentTarget.classList.remove('drag-over') },
@@ -3417,54 +3430,75 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('span', { class: 'board-col-count label-sm' }, count),
             ),
             h('div', { class: 'board-col-body' },
-                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i, rigorOn)),
+                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i, rigorOn, s.id === 'blocked')),
                 h('button', { class: 'board-add', onclick: () => actions.newTicket() },
                     tablerIcon('plus', { size: 14 }), t('board.add')),
             ),
         )
     }
 
-    function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false) {
+    function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false, blocked = false) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const b = ticketBadges(item, nowMs)
-        // An unfinished draft: the create panel materialized this row and never
-        // committed it. Amber, so an incomplete ticket is never mistaken for a
-        // real one, and a click resumes the panel instead of opening the drawer.
-        const draftCard = isDraftTicket(item)
-        const chips = []
-        if (draftCard) chips.push(h('span', { class: 'draft-pill' }, t('ticket.draft.badge')))
-        if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
-        const meta = []
-        if (b.assignee) { const pd = peerDisplay(b.assignee); meta.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials)) }
-        if (b.checklistTotal > 0) {
-            meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
+        // Every "which chips does this card earn" rule lives in the model, so
+        // it is reachable without a DOM: test/ticket-card-model.test.mjs.
+        const m = buildTicketCardModel(item, { now: nowMs, rigorOn, blocked })
+        const draftCard = m.draft
+
+        // The meta row is two FIXED groups — who on the left, when on the right
+        // — so a field sits in the same place on every card and the eye learns
+        // one layout. It never wraps; the secondary numbers live in `extras`,
+        // which the card reveals on hover/focus instead of spending a row on.
+        const left = []
+        // Urgency is carried by the left edge, but an edge is colour alone, so
+        // the word rides along in the row. Keyed off `edge` rather than off
+        // `priority` so the two can never disagree; medium and low say nothing,
+        // which is what makes urgent legible on a board where most are neither.
+        if (m.edge === 'urgent' || m.edge === 'high') {
+            left.push(h('span', { class: `priority-pill ${m.edge}` }, t(`ticket.priority.${m.edge}`)))
         }
-        // Value-return rates (only present when the surface has the feature on).
-        meta.push(...valueBadges(item))
-        // Rigor mode surfaces the two planning estimates (time + complexity) on
-        // every card so the board is scannable without opening each ticket.
-        if (rigorOn) {
-            if (b.estimatedHours) {
-                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.estimate') },
-                    tablerIcon('clock', { size: 13 }), `${b.estimatedHours}h`))
-            }
-            if (b.estimatedComplexity) {
-                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.complexity') },
-                    tablerIcon('activity', { size: 13 }), `${b.estimatedComplexity}`))
-            }
+        if (m.assignee) {
+            const pd = peerDisplay(m.assignee)
+            left.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials))
         }
-        if (b.isDone && b.timeliness) {
-            const delta = deltaPercent(b.inProgressHours, b.estimatedHours)
-            const suffix = delta != null ? ` ${delta > 0 ? '+' : ''}${delta}%` : ''
-            meta.push(h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + suffix))
-        } else if (b.running) {
-            // The estimate is already shown by the clock chip in rigor mode, so
-            // only the non-rigor timer appends the "/ Xh" pace suffix.
-            const pace = !rigorOn && b.estimatedHours ? ` / ${b.estimatedHours}h` : ''
-            meta.push(h('span', { class: 'ticket-timer' },
+        if (m.progress) {
+            left.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.tasks') },
+                tablerIcon('checklist', { size: 13 }), `${m.progress.done}/${m.progress.total}`))
+        }
+        if (m.notes > 0) {
+            left.push(h('span', { class: 'ticket-meta', title: t('ticket.meta.notes') },
+                tablerIcon('notes', { size: 13 }), String(m.notes)))
+        }
+
+        const right = []
+        if (m.due) {
+            right.push(h('span', { class: `ticket-due ${m.due.kind}`, title: t('ticket.due.label') },
+                tablerIcon('calendar', { size: 13 }), dueLabel(m.due, { t, locale: locale.i18n.locale })))
+        }
+        if (m.timer) {
+            const pace = m.timer.estimateHours ? ` / ${m.timer.estimateHours}h` : ''
+            right.push(h('span', { class: 'ticket-timer' },
                 h('span', { class: 'timer-dot' }),
-                `${formatDuration(b.inProgressMs)}${pace}`))
+                `${formatDuration(m.timer.ms)}${pace}`))
         }
+        if (m.timeliness) {
+            const suffix = m.timeliness.delta != null ? ` ${m.timeliness.delta > 0 ? '+' : ''}${m.timeliness.delta}%` : ''
+            right.push(h('span', { class: `timeliness-badge ${m.timeliness.kind}` },
+                t(`ticket.timeliness.${m.timeliness.kind}`) + suffix))
+        }
+
+        const extras = []
+        for (const extra of m.extras) {
+            if (extra.kind === 'estimate') {
+                extras.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.estimate') },
+                    tablerIcon('clock', { size: 13 }), `${extra.value}h`))
+            } else if (extra.kind === 'complexity') {
+                extras.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.complexity') },
+                    tablerIcon('activity', { size: 13 }), String(extra.value)))
+            }
+        }
+        // Value/delay keep their own renderer so the card, the list row and the
+        // inspector all draw them the same way.
+        if (m.extras.some((extra) => extra.kind === 'value')) extras.push(...valueBadges(item))
         // Cards carry the cross-column drag (ui.boardDrag → column drop changes
         // status) AND within-column reorder: when the dragged card belongs to
         // this column, the card itself becomes the drop target (midpoint =
@@ -3472,8 +3506,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // column's status-change drop.
         const inColumn = (drag) => drag && group.some((ticket) => ticket && ticket.id === drag.id)
         return h('article', {
-            class: `ticket-card${draftCard ? ' draft' : ''}${ui.selectedTicketId === item.id ? ' selected' : ''}`,
+            class: `ticket-card${draftCard ? ' draft' : ''}${m.done ? ' done' : ''}${m.edge ? ` edge-${m.edge}` : ''}${ui.selectedTicketId === item.id ? ' selected' : ''}`,
             tabindex: '0',
+            role: 'button',
+            'aria-label': m.title || t('ticket.draft.untitled'),
             draggable: 'true',
             dataset: { itemId: item.id, status: item.status || 'todo' },
             onclick: () => actions.openTicket(item.id),
@@ -3518,9 +3554,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 title: plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
                 onclick: (event) => { event.stopPropagation(); actions.toggleItemPlan(item) },
             }, tablerIcon('flag', { size: 13 })),
-            h('div', { class: `ticket-title${item.text ? '' : ' untitled'}`, title: item.text || t('ticket.draft.untitled') }, item.text || t('ticket.draft.untitled')),
-            chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
-            meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
+            h('div', { class: `ticket-title${m.untitled ? ' untitled' : ''}`, title: m.title || t('ticket.draft.untitled') }, m.title || t('ticket.draft.untitled')),
+            // A blocked ticket's reason is the most useful thing it can say,
+            // and until now the field had no reader anywhere in the app.
+            m.reason ? h('div', { class: 'ticket-reason label-sm', title: m.reason },
+                tablerIcon('alert-triangle', { size: 13 }), h('span', {}, m.reason)) : null,
+            m.progress ? h('div', { class: 'ticket-progress', role: 'img', 'aria-label': `${m.progress.done}/${m.progress.total}` },
+                h('span', { style: `width:${m.progress.pct}%` })) : null,
+            draftCard ? h('div', { class: 'ticket-chips' }, h('span', { class: 'draft-pill' }, t('ticket.draft.badge'))) : null,
+            (left.length || right.length) ? h('div', { class: 'ticket-card-meta label-sm' },
+                h('div', { class: 'meta-left' }, ...left),
+                h('div', { class: 'meta-right' }, ...right),
+            ) : null,
+            extras.length ? h('div', { class: 'ticket-extras label-sm' }, ...extras) : null,
         )
     }
 
@@ -3723,6 +3769,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             propRow(tablerIcon('calendar', { size: 14 }), t('ticket.detail.due'), dueInput),
             propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.timeSpent'), h('span', { class: 'prop-readonly' }, formatDuration(b.inProgressMs))),
         ]
+        // The blocked-reason field had a rigor RULE but no input anywhere in the
+        // app, so the rule could never be satisfied and the card had nothing to
+        // show. It appears only where it means something: in the blocked state.
+        if ((item.status || '') === 'blocked') {
+            rows.splice(1, 0, propRow(tablerIcon('alert-triangle', { size: 14 }), t('ticket.blocked.reason'),
+                editableText({
+                    id: 'tf-blocked-reason',
+                    value: item.blockedReason || '',
+                    placeholder: t('ticket.blocked.placeholder'),
+                    className: 'prop-input',
+                    onCommit: (value) => actions.updateTicket(item, { blockedReason: value.trim() }),
+                })))
+        }
         if (b.isDone && b.timeliness) {
             const d = deltaPercent(b.inProgressHours, b.estimatedHours)
             rows.push(propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.timeliness'),
@@ -5887,6 +5946,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ['G', t('desktop.shortcuts.toggleView')],
                 ['[ ]', t('desktop.shortcuts.switchList')],
                 ['↑ ↓', t('desktop.shortcuts.navigate')],
+                ['← →', t('desktop.shortcuts.boardColumn')],
+                ['⇧ ← →', t('desktop.shortcuts.boardMove')],
+                ['↵', t('desktop.shortcuts.openTicket')],
                 ['Space', t('desktop.shortcuts.toggleDone')],
                 ['F', t('desktop.shortcuts.flag')],
                 ['⇧ F', t('desktop.shortcuts.flagFor')],
@@ -6285,6 +6347,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ? rows[Math.min(rows.length - 1, index + 1)]
                 : rows[Math.max(0, index <= 0 ? 0 : index - 1)]
             next?.focus()
+        } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && ui.view === 'board') {
+            // ←/→ walks the columns; ⇧←/→ takes the focused ticket with it.
+            // Status was mouse-only until now: there was no keyboard way to
+            // move a ticket across the board at all.
+            const state = store.getState()
+            const item = state.items.find((entry) => entry && entry.id === ui.focusedItemId)
+            if (!item) return
+            event.preventDefault()
+            const states = selectBoardConfig(state).states
+            const step = event.key === 'ArrowRight' ? 1 : -1
+            const from = Math.max(0, states.findIndex((s) => s.id === (item.status || states[0]?.id)))
+            if (event.shiftKey) {
+                const target = states[from + step]
+                if (target) actions.moveTicket(item, target.id)
+                return
+            }
+            // Plain arrow moves FOCUS, so it skips columns with nothing to
+            // focus rather than stalling on the first empty one.
+            for (let i = from + step; i >= 0 && i < states.length; i += step) {
+                const card = root.querySelector(`.board-column[data-status="${states[i].id}"] .ticket-card`)
+                if (card) { card.focus(); return }
+            }
         } else if (event.key === 'f' || event.key === 'F') {
             // Flag the focused item into the day-plan. Arrows only move DOM focus,
             // so resolve the item object from the store. Plain F = today, Shift+F =
