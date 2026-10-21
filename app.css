@@ -2244,3 +2244,40 @@ html.board-drawer-open { overflow: hidden; }
     /* The index stops being a column of its own and stacks over the document. */
     .notes-split { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
 }
+
+/* List options: quiet metadata disclosures and readable, borderless sections. */
+.list-settings-dialog { width: min(600px, calc(100vw - 2rem)); }
+.list-settings-dialog > .dialog-body { display: flex; flex-direction: column; gap: 1rem; padding-top: 1rem; }
+.list-settings-dialog .category-heading { padding: 0; margin: 0; color: var(--ink); }
+.list-settings-dialog > .dialog-body > .category-heading { margin-bottom: -0.5rem; }
+.list-settings-dialog .input, .list-settings-dialog .prop-select { width: 100%; margin: 0; min-height: 44px; box-sizing: border-box; }
+.list-settings-dialog .list-settings-hint { font-family: var(--font-sans); font-size: 14px; line-height: 1.5; color: var(--ink-mute); margin: 0.5rem 0 0; overflow-wrap: anywhere; }
+.list-info-button { min-height: 44px; justify-content: flex-start; text-align: left; white-space: normal; }
+.list-info-panel { margin-top: 0.75rem; padding: 1rem; background: var(--surface-2); border-radius: var(--r-field); }
+.list-info-panel[hidden] { display: none; }
+.list-settings-dialog .list-identity { margin: 0; display: grid; gap: 0.75rem; }
+.list-settings-dialog .list-identity-row { grid-template-columns: minmax(6rem, 1fr) minmax(0, 2fr); font-size: 12px; line-height: 1.5; }
+.list-settings-dialog .list-identity-row dt { color: var(--ink-mute); }
+.list-settings-dialog .list-identity-row dd { color: var(--ink); }
+.list-members, .list-rigor { padding-top: 0.5rem; }
+.list-members-rows { display: grid; gap: 0.75rem; list-style: none; padding: 0; margin: 1rem 0 0; }
+.list-member { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; }
+.list-member-identity { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem; min-width: 0; }
+.list-member-name { color: var(--ink); font-size: 16px; overflow-wrap: anywhere; }
+.list-member .fingerprint-chip { min-height: 36px; max-width: 100%; font-size: 12px; }
+.list-member .role-chip { flex-shrink: 0; }
+.list-sharing { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; }
+.list-sharing .list-info { flex: 1 1 14rem; }
+.list-sharing > .btn { min-height: 44px; }
+.list-settings-dialog .switch-row { align-items: flex-start; margin: 0; }
+.list-rigor-switch { display: flex; align-items: center; justify-content: center; width: 44px; min-height: 44px; flex-shrink: 0; border: 0; padding: 0; background: transparent; cursor: pointer; border-radius: var(--r-field); }
+.list-rigor-switch:disabled { cursor: not-allowed; opacity: 0.6; }
+.list-settings-dialog .value-toggle { margin: 0; }
+.list-settings-dialog .switch-hint { font-family: var(--font-sans); font-size: 14px; line-height: 1.5; }
+.list-settings-dialog button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.list-settings-dialog .dialog-actions { justify-content: space-between; flex-wrap: wrap; }
+@media (max-width: 480px) {
+    .list-settings-dialog { padding: 1.25rem; max-height: calc(100dvh - 2rem); }
+    .list-settings-dialog .list-identity-row { grid-template-columns: 1fr; gap: 0.15rem; }
+    .list-settings-dialog .dialog-actions .btn { min-height: 44px; }
+}

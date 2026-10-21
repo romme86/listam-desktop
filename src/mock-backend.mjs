@@ -12,6 +12,7 @@ import {
     RPC_CREATE_INVITE,
     RPC_GET_KEY,
     RPC_REQUEST_SYNC,
+    RPC_GET_MEMBERS,
     RPC_GET_BOARD_CONFIG,
     RPC_SET_BOARD_CONFIG,
     RPC_EXPORT_DATA,
@@ -242,8 +243,20 @@ export function createMockBackend() {
         emit({ type: 'sync-list', items, raw: JSON.stringify(items) })
     }
 
-    function emitBoardConfig() {
-        emit({ type: 'message', raw: '', payload: { type: 'board-config', config: boardConfig, canAdminister: true } })
+    const sharedBoardConfigs = new Map()
+    const mockBaseKey = (payload) => payload?.listId === DEFAULT_LIST ? null : payload?.baseKey || null
+    function emitBoardConfig(baseKey = null) {
+        const config = baseKey ? sharedBoardConfigs.get(baseKey) || normalizeBoardConfig(null) : boardConfig
+        emit({ type: 'message', raw: '', payload: { type: 'board-config', config, canAdminister: true, ...(baseKey ? { baseKey } : {}) } })
+    }
+    function emitMembers(baseKey = null) {
+        emit({ type: 'message', raw: '', payload: { type: 'membership-roster', ...(baseKey ? { baseKey } : {}), roster: {
+            canAdminister: true, currentEpoch: 1, localWriterKey: 'a1'.repeat(32),
+            writers: [
+                { writerKey: 'a1'.repeat(32), isOwner: true, isSelf: true },
+                { writerKey: 'b2'.repeat(32), isOwner: false, isSelf: false },
+            ],
+        } } })
     }
 
     const client = {
@@ -405,11 +418,16 @@ export function createMockBackend() {
                 return JSON.stringify({ ok: true, sequence: 1, buckets: 3, items: items.length, readiness })
             } else if (command === RPC_REQUEST_SYNC) {
                 syncList()
+            } else if (command === RPC_GET_MEMBERS) {
+                emitMembers(mockBaseKey(payload))
             } else if (command === RPC_GET_BOARD_CONFIG) {
-                emitBoardConfig()
+                emitBoardConfig(mockBaseKey(payload))
             } else if (command === RPC_SET_BOARD_CONFIG) {
-                boardConfig = normalizeBoardConfig({ ...boardConfig, ...(payload?.config || {}) })
-                emitBoardConfig()
+                const baseKey = mockBaseKey(payload)
+                if (baseKey) sharedBoardConfigs.set(baseKey, normalizeBoardConfig({ ...sharedBoardConfigs.get(baseKey), ...(payload?.config || {}) }))
+                else boardConfig = normalizeBoardConfig({ ...boardConfig, ...(payload?.config || {}) })
+                emitBoardConfig(baseKey)
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_JOIN_KEY) {
                 emit({ type: 'message', payload: { type: 'join-phase', phase: 'pairing' }, raw: '' })
                 setTimeout(() => emit({ type: 'message', payload: { type: 'join-error', message: 'Mock backend cannot join peers' }, raw: '' }), 800)

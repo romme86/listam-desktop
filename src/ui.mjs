@@ -41,6 +41,7 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE, isNotesType, NOTES_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
+import { listAccess } from './ui/list-access.mjs'
 import { connectionStatusKey, syncBeaconState } from './ui/connection-status.mjs'
 import { reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
@@ -1214,7 +1215,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ? item.description
                     : ticketDescriptionFromBlocks(item.blocks)
                 if (description !== (item.description || '')) payload = { ...item, description }
-                const config = selectBoardConfig(store.getState())
+                const config = selectBoardConfig(listAccess(store.getState(), targetListId))
                 const candidate = { text: item.text, description, checklist: item.checklist, estimatedHours: item.estimatedHours, estimatedComplexity: item.estimatedComplexity }
                 if (config.rigorOn && validateRigorDraft(candidate, config).missing.length > 0) {
                     const tasks = (Array.isArray(item.checklist) && item.checklist.length) ? item.checklist.map((task) => task.text) : ['']
@@ -1282,7 +1283,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // longer blocks the ticket's CREATION (the panel materializes it on
             // open), so it blocks its first move instead. With rigor off there
             // is nothing to satisfy and nothing is pinned.
-            const gate = canMoveTicket(item, selectBoardConfig(store.getState()))
+            const gate = canMoveTicket(item, selectBoardConfig(listAccess(store.getState(), item.listId)))
             if (!gate.ok) {
                 store.pushNotice(locale.i18n.t('ticket.draft.pinned'), 'error')
                 return
@@ -1605,8 +1606,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockMenu = null
             renderAll()
         },
-        setRigor(on) {
-            send(RPC_SET_BOARD_CONFIG, { config: { rigorOn: !!on } })
+        setRigor(on, listId = DEFAULT_LIST_ID) {
+            return send(RPC_SET_BOARD_CONFIG, { listId, baseKey: listAccess(store.getState(), listId).baseKey, config: { rigorOn: !!on } })
         },
         cycleTheme() {
             store.setPreferences({ theme: nextTheme(store.getState().preferences.theme) })
@@ -1955,6 +1956,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function openDialog(dialog) {
         runDialogClose()
         ui.dialog = dialog
+        if (dialog.kind === 'list-settings') {
+            const payload = { listId: dialog.listId, baseKey: listAccess(store.getState(), dialog.listId).baseKey }
+            send(RPC_GET_MEMBERS, payload)
+            send(RPC_GET_BOARD_CONFIG, payload)
+        }
         renderAll()
     }
     function closeDialog() {
@@ -2024,7 +2030,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const plan = planTicketDraftSettlement({
             item,
             draft,
-            config: selectBoardConfig(store.getState()),
+            config: selectBoardConfig(listAccess(store.getState(), item?.listId)),
             valueOn,
             isDraft: isDraftTicket(item),
         })
@@ -3137,9 +3143,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // The board config is owner-signed shared state held by the backend; fetch
     // it once when a board surface first renders.
     function requestBoardConfigOnce() {
-        if (ui.boardConfigRequested) return
-        ui.boardConfigRequested = true
-        send(RPC_GET_BOARD_CONFIG)
+        const listId = ui.activeListId || DEFAULT_LIST_ID
+        const baseKey = listAccess(store.getState(), listId).baseKey
+        const key = baseKey || 'personal'
+        if (ui.boardConfigRequested === key) return
+        ui.boardConfigRequested = key
+        send(RPC_GET_BOARD_CONFIG, { listId, baseKey })
     }
 
     // ticketInitials / nameInitials / shortKey are imported from
@@ -3312,7 +3321,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderBoardPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, ui.activeListId))
         const columns = groupByStatus(itemsForActiveList(state), config)
         const nowMs = now()
         const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs, config.rigorOn)))
@@ -3618,7 +3627,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderTicketSummary(item, state, { full = false } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, now())
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, item.listId))
         const stateName = config.states.find((s) => s.id === item.status)?.name || item.status || t('ticket.detail.none')
         const chips = [h('span', { class: 'role-chip' }, stateName)]
         if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
@@ -3727,7 +3736,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     function renderPropertyRail(item, state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, item.listId))
         const b = ticketBadges(item, now())
         const writers = state.roster?.writers ?? []
 
@@ -5744,7 +5753,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             const listId = ui.dialog.listId
             const isGroceryBuiltin = !isBoardType(type) && !isTodoType(type)
             const resolvedName = builtinDisplayName(type, reduceSurfaceLabels(state.items))
-            const nameInput = h('input', { class: 'input', value: resolvedName })
+            const nameInput = h('input', { id: 'list-settings-name', class: 'input', value: resolvedName, 'aria-label': t('desktop.list.rename') })
             // Empty clears the override (reverts to the localized default).
             const commitName = () => { const nv = nameInput.value.trim(); if (nv !== resolvedName) actions.renameBuiltin(listId, type, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
@@ -5754,18 +5763,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
                 listIdentityBlock(listId, type),
-                isGroceryBuiltin ? h('h3', { class: 'category-heading label-sm' }, t('shareList.title')) : null,
-                isGroceryBuiltin ? h('div', {},
-                    h('button', {
-                        class: 'btn btn-secondary',
-                        onclick: () => {
-                            const name = nameInput.value.trim() || resolvedName
-                            closeDialog()
-                            actions.shareList(listId, { type, name, builtin: true })
-                        },
-                    }, t('shareList.button')),
-                    h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
-                ) : null,
+                listMembersBlock(listId),
+                isGroceryBuiltin ? listSharingBlock(false, () => {
+                    const name = nameInput.value.trim() || resolvedName
+                    closeDialog()
+                    actions.shareList(listId, { type, name, builtin: true })
+                }) : null,
+                listRigorToggle(listId, type),
                 valueReturnToggleRow(listId, type),
             ], [
                 h('button', {
@@ -5777,14 +5781,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     },
                 }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-            queueMicrotask(() => nameInput.focus())
+            ], { className: 'list-settings-dialog' })
+            if (dialogDom.shouldEnter(kind)) queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings') {
             const registry = reduceRegistry(state.items)
             const entry = registry.lists.find((l) => l.id === ui.dialog.listId)
             if (!entry) { closeDialog(); return }
             const listId = ui.dialog.listId
-            const nameInput = h('input', { class: 'input', value: entry.name })
+            const nameInput = h('input', { id: 'list-settings-name', class: 'input', value: entry.name, 'aria-label': t('desktop.list.rename') })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
             nameInput.addEventListener('blur', commitName)
@@ -5794,7 +5798,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (!groupChoices.some((g) => g.id === GENERAL_GROUP_ID)) groupChoices.unshift({ id: GENERAL_GROUP_ID, name: t('desktop.group.general') })
             const currentGroupId = groupChoices.some((g) => g.id === entry.groupId) ? entry.groupId : GENERAL_GROUP_ID
             const groupSelect = h('select', {
-                class: 'prop-select',
+                id: 'list-settings-group', class: 'prop-select',
+                'aria-label': t('desktop.list.group'),
                 onchange: (event) => actions.moveListToGroup(listId, event.target.value || GENERAL_GROUP_ID),
             }, ...groupChoices.map((g) => {
                 const opt = h('option', { value: g.id }, g.name)
@@ -5807,29 +5812,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
                 listIdentityBlock(listId, entry.type),
-                h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
-                // The built-in surfaces multiplex listId 'default' and cannot be
-                // shared on their own (the backend refuses it) — show why instead
-                // of a share button that would only error.
-                listId === DEFAULT_LIST_ID
-                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.builtinBlocked'))
-                    : entry.baseKey
-                        // Already shared: say so, and offer a fresh invite for
-                        // the next person (the backend re-mints on demand).
-                        ? h('div', {},
-                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, `${t('shareList.shared')} — ${t('share.list.hint')}`),
-                            h('button', {
-                                class: 'btn btn-secondary',
-                                onclick: () => { closeDialog(); actions.shareList(listId) },
-                            }, t('shareList.showInvite')),
-                        )
-                        : h('div', {},
-                            h('button', {
-                                class: 'btn btn-secondary',
-                                onclick: () => { closeDialog(); actions.shareList(listId) },
-                            }, t('shareList.button')),
-                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
-                        ),
+                listMembersBlock(listId),
+                listSharingBlock(!!entry.baseKey, () => { closeDialog(); actions.shareList(listId) }, listId === DEFAULT_LIST_ID),
+                listRigorToggle(listId, entry.type),
                 valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {
@@ -5841,8 +5826,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     },
                 }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-            queueMicrotask(() => nameInput.focus())
+            ], { className: 'list-settings-dialog' })
+            if (dialogDom.shouldEnter(kind)) queueMicrotask(() => nameInput.focus())
         } else if (kind === 'group-settings') {
             const group = reduceRegistry(state.items).groups.find((g) => g.id === ui.dialog.groupId)
             if (!group) { closeDialog(); return }
@@ -5993,7 +5978,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
             ])
         } else if (kind === 'add-ticket') {
-            const config = selectBoardConfig(state)
+            const config = selectBoardConfig(listAccess(state, ui.dialog.targetListId || ui.activeListId))
             const rigorOn = config.rigorOn
             const draft = ui.dialog.draft
             // Two modes share this panel. `draftId` is the LIVE one: the row
@@ -6141,19 +6126,86 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             queueMicrotask(() => valF.inp.focus())
         }
 
+        // Info disclosures stay open across background syncs without rebuilding
+        // the dialog on click (which would throw keyboard focus away).
+        function listInfo(key, label, children) {
+            const expanded = !!ui.dialog[key]
+            const panel = h('div', { id: `list-info-${key}`, class: 'list-info-panel', hidden: expanded ? null : '' }, ...children)
+            const button = h('button', {
+                id: `list-info-button-${key}`, type: 'button', class: 'btn btn-secondary list-info-button',
+                'aria-expanded': String(expanded), 'aria-controls': `list-info-${key}`,
+                onclick: () => {
+                    const open = !ui.dialog[key]
+                    ui.dialog[key] = open
+                    panel.hidden = !open
+                    button.setAttribute('aria-expanded', String(open))
+                },
+            }, tablerIcon('info-circle', { size: 18 }), label)
+            return h('section', { class: 'list-info' }, button, panel)
+        }
+
         function listIdentityBlock(listId, listType) {
-            const surfaceId = `${listId}:${listType || DEFAULT_LIST_TYPE}`
-            const row = (label, value) => h('div', { class: 'list-identity-row' },
-                h('dt', {}, label),
-                h('dd', {}, value || '—'),
-            )
-            return h('section', { class: 'list-identity' },
-                h('h3', { class: 'category-heading label-sm' }, t('list.identity.title')),
-                h('dl', {},
+            const row = (label, value) => h('div', { class: 'list-identity-row' }, h('dt', {}, label), h('dd', {}, value || '—'))
+            const access = listAccess(state, listId)
+            return listInfo('identityOpen', t('list.identity.title'), [
+                h('dl', { class: 'list-identity' },
                     row(t('list.identity.project'), state.baseId),
                     row(t('list.identity.list'), listId),
-                    row(t('list.identity.surface'), surfaceId),
-                    row(t('list.identity.epoch'), state.epoch == null ? '—' : String(state.epoch)),
+                    row(t('list.identity.surface'), `${listId}:${listType || DEFAULT_LIST_TYPE}`),
+                    row(t('list.identity.epoch'), String(access.roster?.currentEpoch ?? (access.baseKey ? null : state.epoch) ?? '—')),
+                ),
+            ])
+        }
+
+        function listMembersBlock(listId) {
+            const access = listAccess(state, listId)
+            const members = access.roster?.writers || []
+            return h('section', { class: 'list-members' },
+                h('h3', { class: 'category-heading label-sm' }, t('list.members.title')),
+                h('p', { class: 'list-settings-hint' }, t(access.baseKey ? 'list.members.sharedHint' : 'list.members.projectHint')),
+                members.length ? h('ul', { class: 'list-members-rows' }, ...members.map((member) => {
+                    const name = peerLabelMap().get(member.writerKey)
+                    return h('li', { class: 'list-member' },
+                        h('div', { class: 'list-member-identity' },
+                            name ? h('span', { class: 'list-member-name' }, name) : null,
+                            fingerprintChip(member.writerKey),
+                        ),
+                        h('span', { class: 'role-chip' }, t(member.isSelf ? 'members.role.self' : member.isOwner ? 'members.role.owner' : 'members.role.member')),
+                    )
+                })) : h('p', { class: 'list-settings-hint' }, t(access.roster ? 'members.subtitle.none' : 'list.members.unavailable')),
+            )
+        }
+
+        function listSharingBlock(shared, onShare, blocked = false) {
+            return h('section', { class: 'list-sharing' },
+                listInfo('sharingOpen', t('list.sharing.info'), [
+                    h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
+                    h('p', { class: 'list-settings-hint' }, blocked ? t('shareList.builtinBlocked') : `${shared ? t('shareList.shared') + ' — ' : ''}${t('share.list.hint')}`),
+                ]),
+                blocked ? null : h('button', { type: 'button', class: 'btn btn-secondary', onclick: onShare },
+                    tablerIcon('share', { size: 16 }), t(shared ? 'shareList.showInvite' : 'shareList.button')),
+            )
+        }
+
+        function listRigorToggle(listId, type) {
+            if (!isBoardType(type)) return null
+            const access = listAccess(state, listId)
+            const config = selectBoardConfig(access)
+            const canEdit = !!access.boardConfig && !!access.canAdminister
+            const hintId = 'list-rigor-hint'
+            return h('section', { class: 'list-rigor' },
+                h('div', { class: 'switch-row' },
+                    h('div', { class: 'switch-text' },
+                        h('span', { id: 'list-rigor-label', class: 'switch-title label-sm' }, t('settings.rigor.label')),
+                        h('p', { id: hintId, class: 'list-settings-hint' }, t(!access.boardConfig ? 'list.members.unavailable' : canEdit ? 'settings.rigor.ownerHelp' : 'settings.rigor.readonlyHelp')),
+                        !access.baseKey ? h('p', { class: 'list-settings-hint' }, t('list.rigor.projectHint')) : null,
+                    ),
+                    h('button', {
+                        id: 'list-rigor-switch', type: 'button', class: 'list-rigor-switch',
+                        role: 'switch', 'aria-checked': String(config.rigorOn), 'aria-labelledby': 'list-rigor-label', 'aria-describedby': hintId,
+                        disabled: canEdit ? null : '',
+                        onclick: () => actions.setRigor(!config.rigorOn, listId),
+                    }, h('span', { class: `switch${config.rigorOn ? ' on' : ''}`, 'aria-hidden': 'true' }, h('span', { class: 'switch-knob' }))),
                 ),
             )
         }
@@ -6188,7 +6240,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // your base), member-remove, storage-reset, server-shutdown — render on
         // the inverse surface with a danger square marker, so they feel like a
         // mode, not an ordinary dialog. One pattern, reused per kind.
-        return h('div', { class: `dialog${opts.trust ? ' trust-dialog' : ''}`, role: 'dialog', 'aria-modal': 'true' },
+        return h('div', { class: `dialog${opts.trust ? ' trust-dialog' : ''}${opts.className ? ` ${opts.className}` : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
             opts.trust
                 ? h('div', { class: 'trust-marker' }, h('span', { class: 'trust-square', 'aria-hidden': 'true' }), h('span', { class: 'label-sm' }, t('trust.irreversible')))
                 : null,
@@ -6355,7 +6407,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             const item = state.items.find((entry) => entry && entry.id === ui.focusedItemId)
             if (!item) return
             event.preventDefault()
-            const states = selectBoardConfig(state).states
+            const states = selectBoardConfig(listAccess(state, item.listId)).states
             const step = event.key === 'ArrowRight' ? 1 : -1
             const from = Math.max(0, states.findIndex((s) => s.id === (item.status || states[0]?.id)))
             if (event.shiftKey) {

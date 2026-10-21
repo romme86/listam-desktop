@@ -150,6 +150,7 @@ const DEFAULT_RUNTIME_STATE = Object.freeze({
     diagnostics: [],
     leafBridge: null,
     voice: null,
+    sharedListState: {},
 })
 
 const RUNTIME_KEYS = [...Object.keys(DEFAULT_RUNTIME_STATE), 'bootError']
@@ -462,7 +463,7 @@ export function createDesktopStore(initial = {}) {
                     reduxStore.dispatch(boardConfigActions.boardConfigReset())
                     reduxStore.dispatch(labelsActions.labelsCleared())
                     reduxStore.dispatch(presenceActions.presenceCleared())
-                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic('reset', undefined, now) }))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({ sharedListState: {}, diagnostics: recordDiagnostic('reset', undefined, now) }))
                 })
                 return 'reset'
             case 'message':
@@ -607,12 +608,22 @@ export function createDesktopStore(initial = {}) {
                 })
                 return type
             case 'membership-roster':
+                if (payload.baseKey) {
+                    const shared = getState().sharedListState
+                    setState({ sharedListState: { ...shared, [payload.baseKey]: { ...shared[payload.baseKey], roster: payload.roster ?? null } } })
+                    return type
+                }
                 setState({
                     roster: payload.roster ?? null,
                     diagnostics: recordDiagnostic('membership-roster', undefined, now),
                 })
                 return type
             case 'board-config':
+                if (payload.baseKey) {
+                    const shared = getState().sharedListState
+                    setState({ sharedListState: { ...shared, [payload.baseKey]: { ...shared[payload.baseKey], boardConfig: payload.config ?? null, canAdminister: !!payload.canAdminister } } })
+                    return type
+                }
                 setState({
                     boardConfig: payload.config ?? null,
                     boardConfigCanAdminister: !!payload.canAdminister,
