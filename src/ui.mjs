@@ -1521,7 +1521,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 renderAll()
             })
         },
-        startBlockEdit(item, block) {
+        startBlockEdit(item, block, focus = null) {
             // Switching blocks: flush the block being edited first so its draft
             // is never lost.
             if (ui.blockEditingId && ui.blockEditingId !== block.id) {
@@ -1531,6 +1531,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockDraft = draftFor(block)
             ui.blockCaret = null
             seedBlockDraft(block)
+            ui.blockFieldFocus = focus
             ui.blockMenu = null
             renderAll()
         },
@@ -4009,7 +4010,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             case 'checklist': {
                 const items = Array.isArray(block.items) ? block.items : []
                 if (!items.length) return blockMutedView(t('ticket.block.placeholder.checklist'), edit)
-                return h('ul', { class: 'block-checklist' }, ...items.map((it, i) => h('li', { class: it.done ? 'done' : '', onclick: edit },
+                return h('ul', { class: 'block-checklist' }, ...items.map((it, i) => h('li', { class: it.done ? 'done' : '', onclick: () => actions.startBlockEdit(item, block, { key: `item-${i}`, move: true }) },
                     h('input', { type: 'checkbox', checked: it.done ? '' : null, onclick: (e) => e.stopPropagation(), onchange: () => actions.toggleChecklistBlockItem(item, block.id, i) }),
                     Object.assign(h('span'), { innerHTML: renderInlineMarkdown(it.text || '') }),
                 )))
@@ -4017,7 +4018,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             case 'numberedList': {
                 const items = Array.isArray(block.items) ? block.items : []
                 if (!items.length) return blockMutedView(t('ticket.block.placeholder.numberedList'), edit)
-                return h('ol', { class: 'block-numbered', onclick: edit }, ...items.map((it) => Object.assign(h('li'), { innerHTML: renderInlineMarkdown(it.text || '') })))
+                return h('ol', { class: 'block-numbered' }, ...items.map((it, i) => Object.assign(h('li', { onclick: () => actions.startBlockEdit(item, block, { key: `item-${i}`, move: true }) }), { innerHTML: renderInlineMarkdown(it.text || '') })))
             }
             case 'links': {
                 const links = Array.isArray(block.links) ? block.links : []

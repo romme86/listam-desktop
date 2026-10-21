@@ -66,6 +66,18 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
                 id: `block-${block.id}-${key}`, class: 'block-list-text block-rich', contenteditable: 'true',
                 role: 'textbox', 'aria-label': t('ticket.block.item'), 'data-placeholder': t('ticket.block.item'),
                 onkeyup: () => remember(key, field), onmouseup: () => remember(key, field),
+                onmousedown: (event) => {
+                    if (event.button !== 0 || document.activeElement === field) return
+                    event.preventDefault()
+                    field.focus()
+                    const range = document.createRange()
+                    range.selectNodeContents(field)
+                    range.collapse(false)
+                    const selection = window.getSelection()
+                    selection.removeAllRanges()
+                    selection.addRange(range)
+                    remember(key, field)
+                },
                 onblur: blur,
             })
             field.innerHTML = inlineMarkdownToHtml(row.text || '')
@@ -168,14 +180,15 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
     }
     queueMicrotask(() => {
         if (!wrap.isConnected) return
-        const target = fields.get(focus?.key) || fields.values().next().value
+        const key = fields.has(focus?.key) ? focus.key : fields.keys().next().value
+        const target = fields.get(key)
         // Enter's explicit next-row target wins over surface focus restoration.
         if (!target || (wrap.contains(document.activeElement) && !focus?.move)) return
         target.focus()
         const offset = focus?.offset ?? (target.isContentEditable ? target.textContent.length : target.value.length)
         if (target.isContentEditable) rich.setOffset(target, offset)
         else target.setSelectionRange(offset, offset)
-        if (focus?.move) setFocus({ ...focus, move: false })
+        setFocus({ key, offset })
     })
     return wrap
 }
