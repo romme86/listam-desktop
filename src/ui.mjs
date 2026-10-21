@@ -4675,8 +4675,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
                 ),
             ),
-            // The property rail stays on the left; tasks and body occupy the
-            // wider writing column on the right, as in the full view.
+            // Tasks and body occupy the writing column on the left, with the
+            // property rail on the right, as in the full view.
             // DOM order summary→body→rail so the narrow-window fallback stacks
             // with the prominent content first; the grid places by area.
             h('div', { class: 'detail-split-scroll two-col' },
