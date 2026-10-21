@@ -46,6 +46,21 @@ function item(id, text, overrides = {}) {
     }
 }
 
+test('late plan events cannot resurrect a cleared item or undo a newer date', () => {
+    const store = createDesktopStore()
+    const old = buildItemPlanEntry({ listId: 'default', itemId: 'task', plannedFor: '2026-10-19', updatedAt: 10 })
+    const cleared = { ...old, plannedFor: '', updatedAt: 20 }
+    store.applyClientEvent({ type: 'update-from-backend', item: cleared })
+    for (const type of ['add-from-backend', 'update-from-backend', 'delete-from-backend']) {
+        store.applyClientEvent({ type, item: old })
+        assert.deepEqual(store.getState().items.filter(isPlanItem), [cleared])
+    }
+    const moved = { ...old, plannedFor: '2026-10-22', updatedAt: 30 }
+    store.applyClientEvent({ type: 'update-from-backend', item: moved })
+    store.applyClientEvent({ type: 'add-from-backend', item: cleared })
+    assert.deepEqual(store.getState().items.filter(isPlanItem), [moved])
+})
+
 test('desktop state is owned by named Redux slices with a flat compatibility view', () => {
     const store = createDesktopStore({ preferences: { theme: 'dark' } })
     const root = store.getReduxState()
@@ -400,6 +415,16 @@ test('write refusals set writeBlock; success and reset clear it', () => {
     assert.equal(store.getState().writeBlock, null)
 })
 
+test('local save refusals use the save-failure banner while legacy stalled writes keep their network message', () => {
+    const store = createDesktopStore()
+    for (const reason of ['local-save-failed', 'outbox-full', 'base-unavailable', 'invalid-mutation', 'cross-base-move']) {
+        store.applyClientEvent({ type: 'message', payload: { type: 'sync-stalled', reason, message: 'Could not save that change.' } })
+        assert.equal(store.getState().writeBlock, 'write-refused')
+    }
+    store.applyClientEvent({ type: 'message', payload: { type: 'sync-stalled' } })
+    assert.equal(store.getState().writeBlock, 'sync-stalled')
+})
+
 test('diagnostics entries are redacted and bounded', () => {
     const store = createDesktopStore()
     const hexKey = 'a'.repeat(64)
@@ -556,6 +581,18 @@ test('queued edits whose world moved on raise a block that asks the user', () =>
     }, 1)
 
     assert.equal(store.getState().writeBlock, 'write-needs-decision')
+})
+
+test('recovering the entire journal clears its stale warning, but partial recovery does not', () => {
+    const store = createDesktopStore()
+    store.setState({ writeBlock: 'write-needs-decision' })
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 1, queued: 2 } })
+    assert.equal(store.getState().writeBlock, 'write-needs-decision')
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 2, queued: 0 } })
+    assert.equal(store.getState().writeBlock, null)
+    store.setState({ writeBlock: 'storage-fenced' })
+    store.applyClientEvent({ type: 'message', payload: { type: 'write-replayed', count: 1, queued: 0 } })
+    assert.equal(store.getState().writeBlock, 'storage-fenced')
 })
 
 // applyItemProjection now mutates itemsById/itemIds directly instead of
@@ -808,4 +845,47 @@ test('a reset returns a fresh invite envelope, not the shared initial object', (
 
     assert.equal(afterReset.liveInvites, 0)
     assert.equal(afterReset.expiresAt, null)
+})
+
+test('a base projection is atomic, clears missing buckets and preserves other bases', () => {
+    const store = createDesktopStore()
+    const receive = (items, extra = {}) => store.applyClientEvent({ type: 'message', payload: {
+        type: 'projection-snapshot', role: 'personal', baseKey: 'personal-key', source: 'local-cache', items, ...extra,
+    } })
+    let notifications = 0
+    store.subscribe(() => notifications++)
+    receive([item('local', 'Local'), buildPeerLabelItem({ writerKey: 'a'.repeat(64), name: 'Phone', updatedAt: 1 })], { pendingWriteIds: ['local'] })
+    assert.equal(notifications, 1)
+    assert.equal(store.getState().items.some((entry) => entry.id === 'local'), true)
+    receive([item('shared', 'Shared', { listId: 'shared-list' })], { role: 'shared', baseKey: 'shared-key', pendingWriteIds: ['shared'] })
+    receive([], { pendingWriteIds: [] })
+    assert.deepEqual(store.getState().items.map((entry) => entry.id), ['shared'])
+    assert.equal(store.getState().items[0].baseKey, 'shared-key')
+    assert.deepEqual(store.getState().pendingWriteIds, ['shared'])
+})
+
+test('a malformed base projection cannot erase the previous visible state', () => {
+    const store = createDesktopStore()
+    store.applyClientEvent({ type: 'add-from-backend', item: item('keep', 'Keep') })
+    store.applyClientEvent({ type: 'message', payload: { type: 'projection-snapshot', role: 'personal', baseKey: 'personal', source: 'verified-view', items: [{ text: 'no identity' }] } })
+    assert.equal(store.getState().items.some((entry) => entry.id === 'keep'), true)
+})
+
+test('readiness waits for every preview base and pending edit, and closes retired previews', () => {
+    const store = createDesktopStore()
+    const receive = (baseKey, source, pendingWriteIds = []) => store.applyClientEvent({ type: 'message', payload: {
+        type: 'projection-snapshot', role: baseKey === 'personal' ? 'personal' : 'shared', baseKey, source, pendingWriteIds, items: [],
+    } })
+    receive('personal', 'local-cache')
+    receive('shared', 'peer-snapshot')
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('personal', 'verified-view')
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('shared', 'verified-view', ['edit'])
+    assert.equal(store.getState().isCatchingUp, true)
+    receive('shared', 'verified-view')
+    assert.equal(store.getState().isCatchingUp, false)
+    receive('retired', 'peer-snapshot')
+    store.applyClientEvent({ type: 'message', payload: { type: 'projection-closed', baseKey: 'retired' } })
+    assert.equal(store.getState().isCatchingUp, false)
 })

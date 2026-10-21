@@ -1,3 +1,4 @@
+import { createInvitePanel, renderInvitePanel } from './ui/invite-panel.mjs'
 // Desktop UI: a fixed sidebar plus three panes (lists, peers & devices,
 // diagnostics), rendered with plain DOM against the kinetic-minimalist tokens
 // in app.css. All user-facing copy resolves through the shared @listam/i18n
@@ -41,6 +42,8 @@ import {
 } from '@listam/provisioning'
 import { DEFAULT_LIST_ID, DEFAULT_LIST_TYPE, isTodoType, TODO_LIST_TYPE, isNotesType, NOTES_LIST_TYPE } from '@listam/domain/identity'
 import { computeReorder, sortByOrder } from '@listam/domain/ordering'
+import { listAccess } from './ui/list-access.mjs'
+import { connectionStatusKey, syncBeaconState } from './ui/connection-status.mjs'
 import { reduceRegistry, isListNameTaken } from '@listam/domain/list-registry'
 import {
     shortKey,
@@ -149,6 +152,12 @@ import {
     doneStatusesOf,
     groupByStatus,
     ticketBadges,
+    buildTicketCardModel,
+    dueLabel,
+    blockShorthand,
+    slashQuery,
+    splitAtCaret,
+    lineAtCaret,
     selectWriterStats,
     validateRigorDraft,
     buildStatusChange,
@@ -445,6 +454,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
+    // The draft text a block opens its editor with. A fresh checklist
+    // serializes to "[ ]" — blockToText trims each line's trailing space — so
+    // without this the first thing typed lands flush against the bracket.
+    const draftFor = (block) => {
+        const text = blockToText(block)
+        return block && block.type === 'checklist' && /\[[ xX]\]$/.test(text) ? `${text} ` : text
+    }
     // Rigor-task ids follow the same session-unique scheme as block ids so a
     // task added post-creation never collides with a creation-time `task-N-…` id.
     let taskIdSeq = 0
@@ -1211,7 +1227,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ? item.description
                     : ticketDescriptionFromBlocks(item.blocks)
                 if (description !== (item.description || '')) payload = { ...item, description }
-                const config = selectBoardConfig(store.getState())
+                const config = selectBoardConfig(listAccess(store.getState(), targetListId))
                 const candidate = { text: item.text, description, checklist: item.checklist, estimatedHours: item.estimatedHours, estimatedComplexity: item.estimatedComplexity }
                 if (config.rigorOn && validateRigorDraft(candidate, config).missing.length > 0) {
                     const tasks = (Array.isArray(item.checklist) && item.checklist.length) ? item.checklist.map((task) => task.text) : ['']
@@ -1279,7 +1295,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // longer blocks the ticket's CREATION (the panel materializes it on
             // open), so it blocks its first move instead. With rigor off there
             // is nothing to satisfy and nothing is pinned.
-            const gate = canMoveTicket(item, selectBoardConfig(store.getState()))
+            const gate = canMoveTicket(item, selectBoardConfig(listAccess(store.getState(), item.listId)))
             if (!gate.ok) {
                 store.pushNotice(locale.i18n.t('ticket.draft.pinned'), 'error')
                 return
@@ -1501,7 +1517,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 actions.commitBlocks(item, blocksWithPendingEdit(item))
             }
             ui.blockEditingId = block.id
-            ui.blockDraft = blockToText(block)
+            ui.blockDraft = draftFor(block)
             ui.blockCaret = null
             seedTableDraft(block)
             ui.blockMenu = null
@@ -1524,8 +1540,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockMenu = null
             renderAll()
         },
-        insertBlock(item, type, afterId = null) {
-            const block = createBlock(type, nextBlockId())
+        // `seed` is text the new block starts with — what the writer had
+        // already typed past a shorthand, or into the trailing composer.
+        insertBlock(item, type, afterId = null, seed = '') {
+            const fresh = createBlock(type, nextBlockId())
+            const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
             const blocks = normalizeBlocks(item.blocks)
             let next
             if (afterId == null) {
@@ -1538,23 +1557,53 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // A divider has nothing to edit, so it lands placed (not in edit mode).
             if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
                 ui.blockEditingId = block.id
-                ui.blockDraft = blockToText(block)
+                ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
             seedTableDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, next)
             renderAll()
         },
-        replaceBlock(item, blockId, type) {
-            const block = createBlock(type, blockId)
+        replaceBlock(item, blockId, type, seed = '') {
+            const fresh = createBlock(type, blockId)
+            const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
             const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId ? block : b))
             ui.blockMenu = null
             if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
                 ui.blockEditingId = blockId
-                ui.blockDraft = blockToText(block)
+                ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
             seedTableDraft(type === 'divider' ? null : block)
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        // A shorthand ("- ") or a /command typed at the caret becomes a real
+        // block. Whatever prose sat above that line stays where it was; the
+        // line itself is consumed, and anything right of the caret rides into
+        // the new block. One write, so the prose and the new block can never
+        // land as two separate commits with a render between them.
+        // `split` is supplied by the rich editor, which knows where its own
+        // paragraphs are: its caret offset counts RENDERED text, while the
+        // draft carries "\n\n" between paragraphs, so the two cannot be
+        // measured with the same ruler. The plain textarea path has no such
+        // gap — its value IS the draft — and lets this compute the split.
+        promoteAtCaret(item, block, type, split = null) {
+            const { before, after } = split || splitAtCaret(ui.blockDraft, ui.blockCaret)
+            // Nothing above it: the block simply becomes the new type.
+            if (!before.trim()) { actions.replaceBlock(item, block.id, type, after); return }
+            const fresh = createBlock(type, nextBlockId())
+            const seeded = after ? { ...fresh, ...blockFromText(type, after) } : fresh
+            const blocks = normalizeBlocks(item.blocks).flatMap((b) => (
+                b.id === block.id ? [{ ...b, ...blockFromText(b.type, before) }, seeded] : [b]
+            ))
+            ui.blockMenu = null
+            if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
+                ui.blockEditingId = seeded.id
+                ui.blockDraft = draftFor(seeded)
+                ui.blockCaret = null
+            }
+            seedTableDraft(type === 'divider' ? null : seeded)
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -1602,8 +1651,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockMenu = null
             renderAll()
         },
-        setRigor(on) {
-            send(RPC_SET_BOARD_CONFIG, { config: { rigorOn: !!on } })
+        setRigor(on, listId = DEFAULT_LIST_ID) {
+            return send(RPC_SET_BOARD_CONFIG, { listId, baseKey: listAccess(store.getState(), listId).baseKey, config: { rigorOn: !!on } })
         },
         cycleTheme() {
             store.setPreferences({ theme: nextTheme(store.getState().preferences.theme) })
@@ -1636,21 +1685,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // hit by reflex when the user meant to share one list (that lives in the
         // per-list settings dialog via shareList).
         shareProject() {
-            // RPC_GET_KEY, not RPC_CREATE_INVITE. Since the invite book became
-            // additive, CREATE_INVITE always mints (`{ fresh: true }`,
-            // @listam/backend backend.mjs:506), so opening Share five times used
-            // to leave five live codes and push toward the eight-code cap, which
-            // evicts the OLDEST live code — the one already handed to somebody.
-            // GET_KEY re-publishes the code that is live, minting only when none
-            // is. Minting is the "New code" button's job and nothing else's.
-            send(RPC_GET_KEY)
-            openDialog({ kind: 'share' })
+            showInvitationDialog('share')
         },
-        // Mint an ADDITIONAL code. RPC_CREATE_INVITE no longer replaces the last
-        // one, so handing a second friend a code cannot silently kill the first
-        // friend's — which is exactly what happened on 2026-08-26.
         regenerateInvite() {
-            send(RPC_CREATE_INVITE)
+            showInvitationDialog('share')
         },
         // Abort a join that is still pairing. Without this the guest stays behind
         // joinViaInvite's single-flight guard for the rest of its 120s deadline,
@@ -1708,7 +1746,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     ui.selectedTicketId = null
                     ui.ticketDocId = null
                 }
-                openDialog({ kind: 'share-list', invite: result.invite })
+                showInvitationDialog('share-list', result.baseKey, [{ key: result.invite, expiresAt: result.expiresAt, singleUse: true }])
             } else if (result && result.reason === 'cannot-share-builtin') {
                 // Legacy built-in Board/Todo surfaces still multiplex listId
                 // 'default' and cannot be promoted independently.
@@ -1743,10 +1781,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             } finally {
                 store.setState({ isJoining: false })
             }
-            store.pushNotice(
-                result && result.ok ? locale.i18n.t('joinList.joined') : locale.i18n.t('joinList.failed'),
-                result && result.ok ? 'success' : 'error',
-            )
+            if (result?.ok) store.pushNotice(locale.i18n.t('joinList.joined'), 'success')
+            else openDialog({ kind: 'join-list', value, errorKey: joinErrorKey(result?.reason) })
         },
         async requestJoin(input) {
             const value = input.trim().replace(/\s+/g, '')
@@ -1944,6 +1980,42 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     const drawerHost = h('div', {})
     root.append(titlebar, shell, hintsHost, noticesHost, drawerHost, dialogHost)
 
+    function showInvitationDialog(kind, baseKey = null, invites = []) {
+        const model = createInvitePanel(invites)
+        model.busy = true
+        openDialog({ kind, baseKey, invitePanel: model })
+        void send(RPC_CREATE_INVITE, { baseKey, listOnly: true }).then((reply) => {
+            const result = parseReply(reply)
+            if (result?.ok) {
+                model.invites = result.invites
+                model.qrKey = result.invites.length === 1 ? result.invites[0].key : null
+            } else model.error = result || { reason: 'invite-failed' }
+        }).catch(() => { model.error = { reason: 'invite-failed' } }).finally(() => {
+            model.busy = false
+            if (ui.dialog?.invitePanel === model) renderAll()
+        })
+    }
+
+    async function generateInvitationBatch(model, baseKey) {
+        if (model.busy) return
+        model.busy = true
+        model.error = null
+        renderAll()
+        try {
+            const result = parseReply(await send(RPC_CREATE_INVITE, { baseKey, count: model.count, ttlMs: model.ttlMs }))
+            if (result?.ok) {
+                const previous = new Map(model.invites.map((invite) => [invite.key, invite]))
+                for (const invite of result.invites) previous.set(invite.key, invite)
+                model.invites = [...previous.values()]
+                model.qrKey = result.invites.length === 1 ? result.invites[0].key : null
+            } else model.error = result || { reason: 'invite-failed' }
+        } catch { model.error = { reason: 'invite-failed' } }
+        finally {
+            model.busy = false
+            if (ui.dialog?.invitePanel === model) renderAll()
+        }
+    }
+
     // A dialog may register an `onClose` hook (the ticket create panel does: it
     // owns a real row and a pending autosave, and both have to settle however
     // the panel goes away). closeDialog is the ONE choke point every dismissal
@@ -1952,6 +2024,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function openDialog(dialog) {
         runDialogClose()
         ui.dialog = dialog
+        if (dialog.kind === 'list-settings') {
+            const payload = { listId: dialog.listId, baseKey: listAccess(store.getState(), dialog.listId).baseKey }
+            send(RPC_GET_MEMBERS, payload)
+            send(RPC_GET_BOARD_CONFIG, payload)
+        }
         renderAll()
     }
     function closeDialog() {
@@ -2021,7 +2098,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const plan = planTicketDraftSettlement({
             item,
             draft,
-            config: selectBoardConfig(store.getState()),
+            config: selectBoardConfig(listAccess(store.getState(), item?.listId)),
             valueOn,
             isDraft: isDraftTicket(item),
         })
@@ -2471,6 +2548,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     let renderedHints = null
     let renderedHintsI18n = null
+    let renderedHintsBoard = null
     function renderHints(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         const show = state.preferences.showKeyHints
@@ -2478,9 +2556,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // The footer is independent of list/backend state. Keeping the same DOM
         // node across background updates prevents its entrance animation from
         // restarting and preserves keyboard focus on its close button.
-        if (renderedHints === show && renderedHintsI18n === locale.i18n) return
+        // The board earns one different hint, so the view is part of the cache
+        // key — otherwise the bar keeps whichever one it rendered first.
+        const boardView = ui.view === 'board'
+        if (renderedHints === show && renderedHintsI18n === locale.i18n && renderedHintsBoard === boardView) return
         renderedHints = show
         renderedHintsI18n = locale.i18n
+        renderedHintsBoard = boardView
         if (!show) {
             hintsHost.replaceChildren()
             return
@@ -2489,7 +2571,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ['N', t('desktop.hints.add')],
             ['G', t('desktop.hints.view')],
             ['[ ]', t('desktop.hints.list')],
-            ['Space', t('desktop.hints.done')],
+            // Space toggles done on a list row; on a board there is nothing to
+            // toggle, so the slot advertises the key that does work there.
+            boardView ? ['↵', t('desktop.shortcuts.openTicket')] : ['Space', t('desktop.hints.done')],
             ['F', t('desktop.hints.flag')],
             ['Del', t('desktop.hints.delete')],
             ['⌘Z', t('desktop.hints.undo')],
@@ -2588,9 +2672,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const summary = selectSummary(items)
         const title = activeSurface(state)?.name || t('desktop.rail.groceries')
 
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -2645,9 +2727,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const items = sortByOrder(itemsForActiveList(state))
         const summary = selectSummary(items)
         const title = activeSurface(state)?.name || t('desktop.rail.todo')
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -2711,9 +2791,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // The open note resolves against ALL notes, not the filtered index: a
         // search that hides the row must not close the document under it.
         const open = notes.find((note) => note.id === ui.activeNoteId) ?? null
-        const statusKey = !state.backendReady
-            ? 'header.status.starting'
-            : state.peerCount > 0 ? 'header.status.synced' : 'header.status.ready'
+        const statusKey = connectionStatusKey(state)
 
         replaceChildren(main,
             h('header', { class: 'page-header' },
@@ -3133,9 +3211,12 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // The board config is owner-signed shared state held by the backend; fetch
     // it once when a board surface first renders.
     function requestBoardConfigOnce() {
-        if (ui.boardConfigRequested) return
-        ui.boardConfigRequested = true
-        send(RPC_GET_BOARD_CONFIG)
+        const listId = ui.activeListId || DEFAULT_LIST_ID
+        const baseKey = listAccess(store.getState(), listId).baseKey
+        const key = baseKey || 'personal'
+        if (ui.boardConfigRequested === key) return
+        ui.boardConfigRequested = key
+        send(RPC_GET_BOARD_CONFIG, { listId, baseKey })
     }
 
     // ticketInitials / nameInitials / shortKey are imported from
@@ -3241,10 +3322,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // that exist: recovery → attention (danger square), joining → syncing (half
     // disc), peers>0 → live (breathing acid), else local (hollow ring).
     function beaconState(state) {
-        if (state.recovery) return 'attention'
-        if (state.isJoining || state.joinPhase) return 'syncing'
-        if (state.peerCount > 0) return 'live'
-        return 'local'
+        return syncBeaconState(state)
     }
     // A clickable beacon → the devices popover (names + roles + count). Used at the
     // four sync/summary sites; the infra dots (server/leaf/roster) keep their own.
@@ -3311,7 +3389,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderBoardPane(state) {
         const t = locale.i18n.t.bind(locale.i18n)
         requestBoardConfigOnce()
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, ui.activeListId))
         const columns = groupByStatus(itemsForActiveList(state), config)
         const nowMs = now()
         const board = h('div', { class: 'board-grid' }, ...columns.map((col) => renderBoardColumn(col, nowMs, config.rigorOn)))
@@ -3358,7 +3436,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // can never leave a gap where the next keystroke lands on <body>.
             const snapshot = drawerDom.capture(drawerHost, drawerKey)
             const drawer = renderTicketDrawer(item, state)
-            if (mountedDrawerKind !== 'ticket') drawer.classList.add('enter')
+            const opening = mountedDrawerKind !== 'ticket'
+            if (opening) drawer.classList.add('enter')
             mountedDrawerKind = 'ticket'
             replaceChildren(drawerHost,
                 h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
@@ -3370,6 +3449,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     if (ui.blockCaret != null) setRichCaretOffset(field, ui.blockCaret)
                 },
             })
+            // A ticket with nothing written in it opens with the caret already
+            // in the composer: there is nothing to read, so the only thing
+            // anyone can want is to type. A ticket that HAS a body is opened to
+            // be read — taking focus there would scroll it to its own bottom.
+            if (opening && normalizeBlocks(item.blocks).length === 0) {
+                queueMicrotask(() => drawerHost.querySelector('#ticket-composer')?.focus())
+            }
             return
         }
         // Non-modal list-item Inspector (grocery/todo). No scrim — the list stays
@@ -3405,7 +3491,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const tickets = sortByOrder(col.tickets)
         const count = s.wipLimit > 0 ? `${tickets.length}/${s.wipLimit}` : String(tickets.length)
         return h('div', {
-            class: 'board-column',
+            // `done` comes from the config, not from the literal id, so a board
+            // that renamed its done state still recedes. `empty` narrows a
+            // column with nothing in it: 5 default states at 240px overflow a
+            // 1440px window, which pushed Done off-screen entirely.
+            class: `board-column${s.isDone ? ' done' : ''}${tickets.length === 0 ? ' empty' : ''}`,
             dataset: { status: s.id },
             ondragover: (event) => { event.preventDefault(); event.currentTarget.classList.add('drag-over') },
             ondragleave: (event) => { event.currentTarget.classList.remove('drag-over') },
@@ -3425,54 +3515,75 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('span', { class: 'board-col-count label-sm' }, count),
             ),
             h('div', { class: 'board-col-body' },
-                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i, rigorOn)),
+                ...tickets.map((ticket, i) => renderTicketCard(ticket, nowMs, tickets, i, rigorOn, s.id === 'blocked')),
                 h('button', { class: 'board-add', onclick: () => actions.newTicket() },
                     tablerIcon('plus', { size: 14 }), t('board.add')),
             ),
         )
     }
 
-    function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false) {
+    function renderTicketCard(item, nowMs, group = [], index = 0, rigorOn = false, blocked = false) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const b = ticketBadges(item, nowMs)
-        // An unfinished draft: the create panel materialized this row and never
-        // committed it. Amber, so an incomplete ticket is never mistaken for a
-        // real one, and a click resumes the panel instead of opening the drawer.
-        const draftCard = isDraftTicket(item)
-        const chips = []
-        if (draftCard) chips.push(h('span', { class: 'draft-pill' }, t('ticket.draft.badge')))
-        if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
-        const meta = []
-        if (b.assignee) { const pd = peerDisplay(b.assignee); meta.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials)) }
-        if (b.checklistTotal > 0) {
-            meta.push(h('span', { class: 'ticket-meta' }, tablerIcon('checklist', { size: 13 }), `${b.checklistDone}/${b.checklistTotal}`))
+        // Every "which chips does this card earn" rule lives in the model, so
+        // it is reachable without a DOM: test/ticket-card-model.test.mjs.
+        const m = buildTicketCardModel(item, { now: nowMs, rigorOn, blocked })
+        const draftCard = m.draft
+
+        // The meta row is two FIXED groups — who on the left, when on the right
+        // — so a field sits in the same place on every card and the eye learns
+        // one layout. It never wraps; the secondary numbers live in `extras`,
+        // which the card reveals on hover/focus instead of spending a row on.
+        const left = []
+        // Urgency is carried by the left edge, but an edge is colour alone, so
+        // the word rides along in the row. Keyed off `edge` rather than off
+        // `priority` so the two can never disagree; medium and low say nothing,
+        // which is what makes urgent legible on a board where most are neither.
+        if (m.edge === 'urgent' || m.edge === 'high') {
+            left.push(h('span', { class: `priority-pill ${m.edge}` }, t(`ticket.priority.${m.edge}`)))
         }
-        // Value-return rates (only present when the surface has the feature on).
-        meta.push(...valueBadges(item))
-        // Rigor mode surfaces the two planning estimates (time + complexity) on
-        // every card so the board is scannable without opening each ticket.
-        if (rigorOn) {
-            if (b.estimatedHours) {
-                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.estimate') },
-                    tablerIcon('clock', { size: 13 }), `${b.estimatedHours}h`))
-            }
-            if (b.estimatedComplexity) {
-                meta.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.complexity') },
-                    tablerIcon('activity', { size: 13 }), `${b.estimatedComplexity}`))
-            }
+        if (m.assignee) {
+            const pd = peerDisplay(m.assignee)
+            left.push(h('span', { class: `ticket-avatar${pd.isSelf || pd.isOwner ? ' is-self' : ''}`, title: pd.title }, pd.initials))
         }
-        if (b.isDone && b.timeliness) {
-            const delta = deltaPercent(b.inProgressHours, b.estimatedHours)
-            const suffix = delta != null ? ` ${delta > 0 ? '+' : ''}${delta}%` : ''
-            meta.push(h('span', { class: `timeliness-badge ${b.timeliness}` }, t(`ticket.timeliness.${b.timeliness}`) + suffix))
-        } else if (b.running) {
-            // The estimate is already shown by the clock chip in rigor mode, so
-            // only the non-rigor timer appends the "/ Xh" pace suffix.
-            const pace = !rigorOn && b.estimatedHours ? ` / ${b.estimatedHours}h` : ''
-            meta.push(h('span', { class: 'ticket-timer' },
+        if (m.progress) {
+            left.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.tasks') },
+                tablerIcon('checklist', { size: 13 }), `${m.progress.done}/${m.progress.total}`))
+        }
+        if (m.notes > 0) {
+            left.push(h('span', { class: 'ticket-meta', title: t('ticket.meta.notes') },
+                tablerIcon('notes', { size: 13 }), String(m.notes)))
+        }
+
+        const right = []
+        if (m.due) {
+            right.push(h('span', { class: `ticket-due ${m.due.kind}`, title: t('ticket.due.label') },
+                tablerIcon('calendar', { size: 13 }), dueLabel(m.due, { t, locale: locale.i18n.locale })))
+        }
+        if (m.timer) {
+            const pace = m.timer.estimateHours ? ` / ${m.timer.estimateHours}h` : ''
+            right.push(h('span', { class: 'ticket-timer' },
                 h('span', { class: 'timer-dot' }),
-                `${formatDuration(b.inProgressMs)}${pace}`))
+                `${formatDuration(m.timer.ms)}${pace}`))
         }
+        if (m.timeliness) {
+            const suffix = m.timeliness.delta != null ? ` ${m.timeliness.delta > 0 ? '+' : ''}${m.timeliness.delta}%` : ''
+            right.push(h('span', { class: `timeliness-badge ${m.timeliness.kind}` },
+                t(`ticket.timeliness.${m.timeliness.kind}`) + suffix))
+        }
+
+        const extras = []
+        for (const extra of m.extras) {
+            if (extra.kind === 'estimate') {
+                extras.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.estimate') },
+                    tablerIcon('clock', { size: 13 }), `${extra.value}h`))
+            } else if (extra.kind === 'complexity') {
+                extras.push(h('span', { class: 'ticket-meta', title: t('ticket.detail.complexity') },
+                    tablerIcon('activity', { size: 13 }), String(extra.value)))
+            }
+        }
+        // Value/delay keep their own renderer so the card, the list row and the
+        // inspector all draw them the same way.
+        if (m.extras.some((extra) => extra.kind === 'value')) extras.push(...valueBadges(item))
         // Cards carry the cross-column drag (ui.boardDrag → column drop changes
         // status) AND within-column reorder: when the dragged card belongs to
         // this column, the card itself becomes the drop target (midpoint =
@@ -3480,8 +3591,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // column's status-change drop.
         const inColumn = (drag) => drag && group.some((ticket) => ticket && ticket.id === drag.id)
         return h('article', {
-            class: `ticket-card${draftCard ? ' draft' : ''}${ui.selectedTicketId === item.id ? ' selected' : ''}`,
+            class: `ticket-card${draftCard ? ' draft' : ''}${m.done ? ' done' : ''}${m.edge ? ` edge-${m.edge}` : ''}${ui.selectedTicketId === item.id ? ' selected' : ''}`,
             tabindex: '0',
+            role: 'button',
+            'aria-label': m.title || t('ticket.draft.untitled'),
             draggable: 'true',
             dataset: { itemId: item.id, status: item.status || 'todo' },
             onclick: () => actions.openTicket(item.id),
@@ -3490,6 +3603,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     event.preventDefault()
                     event.stopPropagation()
                     reorderItemByStep(group, item, event.key === 'ArrowDown' ? 1 : -1)
+                    return
+                }
+                // The card is an <article>, so Enter and Space are not free the
+                // way they are on a <button>: without this a focused card could
+                // only ever be opened with the mouse.
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    actions.openTicket(item.id)
                 }
             },
             onfocus: () => { ui.focusedItemId = item.id },
@@ -3526,9 +3648,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 title: plannedRefs.has(planItemKey(item.listId, item.id)) ? t('plan.inPlan') : `${t('plan.flag')} (today)`,
                 onclick: (event) => { event.stopPropagation(); actions.toggleItemPlan(item) },
             }, tablerIcon('flag', { size: 13 })),
-            h('div', { class: `ticket-title${item.text ? '' : ' untitled'}`, title: item.text || t('ticket.draft.untitled') }, item.text || t('ticket.draft.untitled')),
-            chips.length ? h('div', { class: 'ticket-chips' }, ...chips) : null,
-            meta.length ? h('div', { class: 'ticket-card-meta label-sm' }, ...meta) : null,
+            h('div', { class: `ticket-title${m.untitled ? ' untitled' : ''}`, title: m.title || t('ticket.draft.untitled') }, m.title || t('ticket.draft.untitled')),
+            // A blocked ticket's reason is the most useful thing it can say,
+            // and until now the field had no reader anywhere in the app.
+            m.reason ? h('div', { class: 'ticket-reason label-sm', title: m.reason },
+                tablerIcon('alert-triangle', { size: 13 }), h('span', {}, m.reason)) : null,
+            m.progress ? h('div', { class: 'ticket-progress', role: 'img', 'aria-label': `${m.progress.done}/${m.progress.total}` },
+                h('span', { style: `width:${m.progress.pct}%` })) : null,
+            draftCard ? h('div', { class: 'ticket-chips' }, h('span', { class: 'draft-pill' }, t('ticket.draft.badge'))) : null,
+            (left.length || right.length) ? h('div', { class: 'ticket-card-meta label-sm' },
+                h('div', { class: 'meta-left' }, ...left),
+                h('div', { class: 'meta-right' }, ...right),
+            ) : null,
+            extras.length ? h('div', { class: 'ticket-extras label-sm' }, ...extras) : null,
         )
     }
 
@@ -3580,7 +3712,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderTicketSummary(item, state, { full = false } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, now())
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, item.listId))
         const stateName = config.states.find((s) => s.id === item.status)?.name || item.status || t('ticket.detail.none')
         const chips = [h('span', { class: 'role-chip' }, stateName)]
         if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
@@ -3590,12 +3722,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         } else if (b.running) {
             chips.push(h('span', { class: 'ticket-timer' }, h('span', { class: 'timer-dot' }), `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
         }
-        const meta = []
-        if (b.estimatedHours) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.estimate')} ${b.estimatedHours}h`))
-        if (item.estimatedComplexity) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.complexity')} ${item.estimatedComplexity}%`))
-        if (b.inProgressMs > 0) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.timeSpent')} ${formatDuration(b.inProgressMs)}`))
+        // No summary meta strip: estimate, complexity and time in progress are
+        // all rows in the property rail two inches to the right. Saying them
+        // twice on one screen is most of what made this drawer feel busy.
+        //
         // The rigor task checklist is a top-level field (distinct from body
-        // blocks); surface it so the done-gate stays toggleable from the detail.
+        // blocks); surface it so the done-gate stays toggleable from the detail
+        // — but only once it HAS tasks. An empty "Tasks" heading over an empty
+        // add bar was a second, competing place to write on every new ticket.
         const checklist = Array.isArray(item.checklist) ? item.checklist : []
         return h('div', { class: `ticket-summary${full ? ' full' : ''}` },
             h('div', { class: 'ticket-summary-chips' }, ...chips),
@@ -3609,20 +3743,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // The free-text description now lives in the block body: it is
             // folded into the first markdown block on open (foldLegacyText),
             // so the summary keeps only the structured bits.
-            meta.length ? h('div', { class: 'ticket-summary-meta label-sm' }, ...meta) : null,
-            h('div', { class: 'ticket-summary-tasks' },
+            checklist.length ? h('div', { class: 'ticket-summary-tasks' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
-                checklist.length
-                    ? h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
-                        h('label', { class: 'detail-task-main' },
-                            h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
-                            h('span', {}, task.text),
-                        ),
-                        h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
-                    )))
-                    : null,
+                h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
+                    h('label', { class: 'detail-task-main' },
+                        h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
+                        h('span', {}, task.text),
+                    ),
+                    h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
+                ))),
                 renderTaskAddBar(item, t),
-            ),
+            ) : null,
         )
     }
 
@@ -3689,7 +3820,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     function renderPropertyRail(item, state) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const config = selectBoardConfig(state)
+        const config = selectBoardConfig(listAccess(state, item.listId))
         const b = ticketBadges(item, now())
         const writers = state.roster?.writers ?? []
 
@@ -3731,6 +3862,19 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             propRow(tablerIcon('calendar', { size: 14 }), t('ticket.detail.due'), dueInput),
             propRow(tablerIcon('clock', { size: 14 }), t('ticket.detail.timeSpent'), h('span', { class: 'prop-readonly' }, formatDuration(b.inProgressMs))),
         ]
+        // The blocked-reason field had a rigor RULE but no input anywhere in the
+        // app, so the rule could never be satisfied and the card had nothing to
+        // show. It appears only where it means something: in the blocked state.
+        if ((item.status || '') === 'blocked') {
+            rows.splice(1, 0, propRow(tablerIcon('alert-triangle', { size: 14 }), t('ticket.blocked.reason'),
+                editableText({
+                    id: 'tf-blocked-reason',
+                    value: item.blockedReason || '',
+                    placeholder: t('ticket.blocked.placeholder'),
+                    className: 'prop-input',
+                    onCommit: (value) => actions.updateTicket(item, { blockedReason: value.trim() }),
+                })))
+        }
         if (b.isDone && b.timeliness) {
             const d = deltaPercent(b.inProgressHours, b.estimatedHours)
             rows.push(propRow(tablerIcon('flag', { size: 14 }), t('ticket.detail.timeliness'),
@@ -3868,6 +4012,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderSlashMenu(item, spec) {
         const t = locale.i18n.t.bind(locale.i18n)
         const pick = (type) => {
+            // Opened by typing "/" inside a block: the slash sits on its own
+            // line somewhere in the prose, so the pick splits there instead of
+            // replacing the whole block and losing what is above it.
+            if (spec.promote) {
+                const target = normalizeBlocks(item.blocks).find((b) => b.id === spec.blockId)
+                if (target) { actions.promoteAtCaret(item, target, type, spec.split ? spec.split() : null); return }
+            }
             if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, type)
             else actions.insertBlock(item, type, spec.mode === 'after' ? spec.blockId : null)
         }
@@ -3939,20 +4090,52 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const t = locale.i18n.t.bind(locale.i18n)
         const isMarkdown = block.type === 'markdown'
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
-        const menu = isMarkdown ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
-        // The inline menu opens while the draft is "/" plus an optional filter
-        // word ("/tab" → Table) and Esc only dismisses the menu, not the edit.
+        const slashSpec = { mode: 'replace', blockId: block.id, promote: true }
+        const menu = isMarkdown ? renderSlashMenu(item, slashSpec) : null
+        // The inline menu opens while the CARET'S LINE is "/" plus an optional
+        // filter word ("/tab" → Table), and Esc only dismisses the menu, not
+        // the edit. It used to test the whole draft, so "/" was dead in any
+        // block that already had a word in it — while two hints advertised it.
         let slashDismissed = false
-        const slashActive = () => !slashDismissed && /^\/[\p{L}\p{N}]*$/u.test(ui.blockDraft)
+
+        // The caret's own paragraph element, which is what "the line" means in
+        // a rich editor. Everything that has to know where the line starts asks
+        // the DOM, never the draft string.
+        const caretParagraph = () => {
+            const sel = window.getSelection()
+            if (!sel || sel.rangeCount === 0) return null
+            let node = sel.getRangeAt(0).startContainer
+            if (!ed.contains(node)) return null
+            if (node.nodeType === 3) node = node.parentNode
+            while (node && node.parentNode && node.parentNode !== ed) node = node.parentNode
+            return node && node.parentNode === ed ? node : null
+        }
+        const caretLine = () => (caretParagraph()?.textContent || '').split(ZWSP).join('')
+        // What stays behind and what rides along when the caret's line is
+        // promoted to a block of its own. The line itself is consumed.
+        const splitAroundCaretLine = () => {
+            const para = caretParagraph()
+            const kids = [...ed.children]
+            const at = para ? kids.indexOf(para) : -1
+            if (at < 0) return { before: htmlToMarkdown(ed.innerHTML).trim(), after: '' }
+            return {
+                before: htmlToMarkdown(kids.slice(0, at).map((k) => k.outerHTML).join('')).trim(),
+                after: htmlToMarkdown(kids.slice(at + 1).map((k) => k.outerHTML).join('')).trim(),
+            }
+        }
+        slashSpec.split = splitAroundCaretLine
+
+        const slashActive = () => !slashDismissed && slashQuery(caretLine()) !== null
         const syncSlashMenu = () => {
             if (!menu) return
-            if (!ui.blockDraft.startsWith('/')) slashDismissed = false
-            const on = slashActive()
+            const query = slashQuery(caretLine())
+            if (query === null) slashDismissed = false
+            const on = !slashDismissed && query !== null
             menu.classList.toggle('hidden', !on)
             menu.classList.toggle('open', on)
-            if (on) menu._slash.filterTo(ui.blockDraft.slice(1))
+            if (on) menu._slash.filterTo(query)
         }
-        if (menu) { menu.classList.add('block-slash-inline'); syncSlashMenu() }
+        if (menu) menu.classList.add('block-slash-inline')
 
         const ed = h('div', {
             class: `block-md block-rich block-editor block-rich-${block.type}`,
@@ -3966,6 +4149,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         ed.innerHTML = isMarkdown ? markdownToHtml(ui.blockDraft) : inlineBlockToHtml(ui.blockDraft)
         seedRichCaretAnchors(ed)
         ed.classList.toggle('is-empty', ui.blockDraft === '')
+        // Only now: the caret helpers above read the editor's own DOM, so they
+        // cannot run until `ed` exists.
+        syncSlashMenu()
 
         // Remember the caret across re-renders (the app rebuilds this editor on
         // every P2P/local store update); null means "place at end" on next build.
@@ -3981,6 +4167,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (isMarkdown && applyHeadingInputRule(ed)) { sync(); return }
             applyInlineInputRules()
             sync()
+            // "- ", "1. ", "> ", "```", "---" on their own line become the block
+            // they describe. Typing the structure IS choosing it, so the menu
+            // is left to the shapes no shorthand can spell.
+            if (!isMarkdown) return
+            const line = caretLine()
+            const shorthand = blockShorthand(line)
+            if (shorthand) actions.promoteAtCaret(item, block, shorthand, splitAroundCaretLine())
         })
         ed.addEventListener('keyup', remember)
         ed.addEventListener('mouseup', remember)
@@ -4232,7 +4425,29 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             },
             onkeydown: (event) => {
                 if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item) }
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
+                if (event.key !== 'Enter' || event.shiftKey) return
+                if (block.type !== 'checklist' && block.type !== 'numberedList') return
+                const caret = ta.selectionStart
+                const line = lineAtCaret(ta.value, caret)
+                // Enter on an empty item ends the list and opens prose under
+                // it. Leaving a list used to need a commit, a click and a menu.
+                if (!line.trim() || /^\[[ xX]?\]\s*$/.test(line)) {
+                    event.preventDefault()
+                    ui.blockDraft = ta.value
+                    ui.blockCaret = caret
+                    actions.promoteAtCaret(item, block, 'markdown')
+                    return
+                }
+                // Otherwise Enter opens the next item, already marked up, so
+                // the list keeps its shape without anyone typing the syntax.
+                if (block.type !== 'checklist') return
+                event.preventDefault()
+                const next = `${ta.value.slice(0, caret)}\n[ ] ${ta.value.slice(caret)}`
+                ta.value = next
+                ui.blockDraft = next
+                const at = caret + 5
+                try { ta.setSelectionRange(at, at) } catch { /* ignore */ }
             },
             onblur: () => queueMicrotask(() => {
                 const live = root.querySelector('.block-editor')
@@ -4324,6 +4539,43 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return row
     }
 
+    // The trailing composer: an always-present empty line at the end of the
+    // body. It owns no state — the first keystroke hands its text to a real
+    // block and the block editor takes over — so nothing uncommitted ever
+    // lives in it, and merely opening a ticket writes nothing.
+    function renderComposer(item) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const placeholder = t('ticket.block.composer')
+        const el = h('div', {
+            id: 'ticket-composer',
+            class: 'block-composer block-md block-rich',
+            contenteditable: 'true',
+            role: 'textbox',
+            'aria-label': placeholder,
+            'data-placeholder': placeholder,
+            spellcheck: 'true',
+            oninput: () => {
+                const text = (el.textContent || '').replace(/​/g, '')
+                if (!text) return
+                el.textContent = ''
+                // Hand the keyboard over before the block exists. The rebuild
+                // that follows restores focus to whatever was focused when it
+                // started — which, without this, is the composer, so the new
+                // block's editor would lose the race for every keystroke.
+                el.blur()
+                // "/" still opens the menu, for the shapes no shorthand spells.
+                if (text === '/') { actions.openBlockMenu({ mode: 'end' }); return }
+                const shorthand = blockShorthand(text, text.length)
+                if (shorthand) { actions.insertBlock(item, shorthand); return }
+                actions.insertBlock(item, 'markdown', null, text)
+            },
+            onkeydown: (event) => {
+                if (event.key === 'Escape') { event.stopPropagation(); el.blur() }
+            },
+        })
+        return el
+    }
+
     function renderTicketBody(item, { legacyField = 'description', variant = 'drawer' } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const blocks = normalizeBlocks(item.blocks)
@@ -4345,42 +4597,35 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             endMenu = h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), menu)
         }
         if (variant === 'inspector') {
-            // Inspector anatomy (Option B mockup): no section head — blocks
-            // start right under the title; one inline add hint instead of the
-            // empty-button + add-button pair; a fresh item invites plain text
-            // with ghost chips for the common block types.
-            const empty = blocks.length === 0 && !legacy
-            // Clicking empty body space starts writing: text is the default
-            // block. Reuse a trailing empty text block instead of stacking new
-            // ones; a click mid-edit just commits (the blur already did).
-            const appendTextBlock = () => {
-                if (ui.blockEditingId) return
-                const last = blocks[blocks.length - 1]
-                if (last && last.type === 'markdown' && !(last.text || '').trim()) { actions.startBlockEdit(item, last); return }
-                actions.insertBlock(item, 'markdown')
-            }
+            // The body is always open for writing. A composer sits at the end —
+            // focused when the drawer opens — and the first keystroke hands its
+            // text to a real block. There is no empty state to click through
+            // and no "+ Add block": the cursor IS the empty state, and the
+            // shorthands ("- ", "1. ", "> ") are the menu.
+            //
+            // A click on the body's dead space puts the caret in the composer
+            // rather than manufacturing a block, so looking at a ticket never
+            // writes to it.
             return h('section', {
                 class: 'ticket-body inspector-variant',
                 onclick: (event) => {
                     const el = event.target
-                    if (el === event.currentTarget || (el instanceof HTMLElement && el.classList.contains('ticket-blocks'))) appendTextBlock()
+                    if (ui.blockEditingId) return
+                    if (el === event.currentTarget || (el instanceof HTMLElement && el.classList.contains('ticket-blocks'))) {
+                        root.querySelector('#ticket-composer')?.focus()
+                    }
                 },
             },
                 legacyRow,
-                empty
-                    ? h('div', { class: 'inspector-empty' },
-                        h('button', { class: 'inspector-empty-hint', type: 'button', onclick: () => appendTextBlock() }, t('inspector.emptyHint')),
-                        h('div', { class: 'inspector-empty-chips' },
-                            ...['checklist', 'markdown', 'table', 'code'].map((type) => {
-                                const spec = BLOCK_TYPES.find((bt) => bt.type === type)
-                                if (!spec) return null
-                                return h('button', { class: 'ghost-chip label-sm', type: 'button', onclick: () => actions.insertBlock(item, type) }, tablerIcon(spec.icon, { size: 12 }), t(spec.labelKey))
-                            }),
-                        ),
-                    )
-                    : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
+                blocks.length ? h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))) : null,
                 h('div', { class: 'block-add-row' },
-                    empty ? null : h('button', { class: 'block-addhint label-md', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, `+ ${t('inspector.addHint')}`),
+                    // ALWAYS rendered, even while a block is being edited.
+                    // createSurfaceDomState restores focus positionally with a
+                    // signature check, so a field that comes and goes changes
+                    // the field list's shape between renders and the restore
+                    // lands on the wrong element — which, mid-typing, means the
+                    // next keystroke goes somewhere the writer did not look.
+                    renderComposer(item),
                     endMenu,
                 ),
             )
@@ -4447,7 +4692,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         })
         const sectionBlock = (labelKey, ...children) => h('div', { class: 'inspector-section' },
             h('h3', { class: 'category-heading label-sm' }, t(labelKey)), ...children)
-        const bs = state.peerCount > 0 ? 'live' : 'local'
+        const bs = beaconState(state)
         const aside = h('aside', { class: 'item-inspector' },
             h('div', { class: 'inspector-head' },
                 h('div', { class: 'inspector-kicker-row' },
@@ -4480,7 +4725,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('span', {}, item.updatedAt > 1e12 ? t('inspector.edited', { time: relativeTime(now() - item.updatedAt) }) : ''),
                 h('span', { class: 'inspector-foot-status' },
                     h('span', { class: `dot ${bs}` }),
-                    h('span', {}, state.peerCount > 0 ? t('header.status.synced', { count: state.peerCount }) : t('header.status.online')),
+                    h('span', {}, t(connectionStatusKey(state, 'header.status.online'), { count: state.peerCount })),
                 ),
             ),
         )
@@ -4590,7 +4835,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const regenerate = h('button', {
             class: 'btn btn-secondary',
             onclick: () => actions.regenerateInvite(),
-        }, t('invite.regenerate'))
+        }, t('invite.batch.generate'))
         // Rendering a QR for a dead code invites a second failed join. Say it is
         // expired and offer the one action that helps.
         if (invite.expired) {
@@ -4681,7 +4926,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('h3', { class: 'category-heading label-sm' }, t('members.title')),
                 h('div', { class: 'kv-rows' }, ...renderMemberRows(members)),
             ),
-            buildServersSection(t),
+            env.web ? null : buildServersSection(t),
             // Whole-project sharing, moved here out of Settings: this is the pane
             // where a user is already thinking about who else is on the project,
             // and the invite the button mints renders in the next section down.
@@ -5302,51 +5547,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     : null,
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
             ])
-        } else if (kind === 'share') {
-            content = dialogFrame(t('share.project.dialogTitle'), [
-                h('p', { class: 'dialog-body' }, t('share.project.dialogMessage')),
-                // The dialog keeps its own "not ready yet" copy: it is opened by a
-                // deliberate Share action, so an absent code means the mint is
-                // still in flight, not that none was ever asked for.
-                renderInviteBlock(state, {
-                    showCopy: false,
-                    emptyKey: 'invite.share.notReady',
-                    emptyClass: 'dialog-body',
+        } else if (kind === 'share' || kind === 'share-list') {
+            const scope = kind === 'share-list' ? 'list' : 'project'
+            const model = ui.dialog.invitePanel
+            content = dialogFrame(t(scope === 'list' ? 'shareList.title' : 'share.project.dialogTitle'), [
+                h('p', { class: 'body-md' }, t(scope === 'list' ? 'shareList.message' : 'share.project.dialogMessage')),
+                renderInvitePanel({ model, scope, t, now: now(), refresh: renderAll,
+                    generate: () => generateInvitationBatch(model, ui.dialog.baseKey),
+                    copy: async (key) => {
+                        try { await navigator.clipboard.writeText(key); store.pushNotice(t('desktop.peers.copied'), 'success') }
+                        catch { store.pushNotice(t('invite.share.failed'), 'error') }
+                    },
                 }),
-            ], [
-                // Same expiry test the block above uses: the body already refuses
-                // to draw a QR for a dead code, so the footer must not still offer
-                // to put one on the clipboard.
-                describeInvite({ key: state.inviteKey, ...(state.invite ?? {}) }, now()).expired === false && state.inviteKey
-                    ? h('button', { class: 'btn btn-secondary', onclick: copyInvite }, t('desktop.peers.copy'))
-                    : null,
-                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-        } else if (kind === 'share-list') {
-            const invite = ui.dialog.invite || ''
-            const copyShareInvite = async () => {
-                if (!invite) return
-                try { await navigator.clipboard.writeText(invite); store.pushNotice(t('desktop.peers.copied'), 'success') }
-                catch { store.pushNotice(t('invite.share.failed'), 'error') }
-            }
-            content = dialogFrame(t('shareList.title'), [
-                h('p', { class: 'dialog-body' }, t('shareList.message')),
-                h('div', { class: 'invite-share-layout' },
-                    createInviteQr(createInviteQrPayload(invite, 'list'), t('shareList.title')),
-                    h('div', { class: 'invite-code' }, invite),
-                ),
-            ], [
-                h('button', { class: 'btn btn-secondary', onclick: copyShareInvite }, t('desktop.peers.copy')),
-                h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
+            ], [h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.close'))], { className: 'invite-dialog' })
         } else if (kind === 'join-list') {
             const joinListInput = h('input', {
-                class: 'input',
+                class: 'input', value: ui.dialog.value || '', id: 'join-list-code',
                 placeholder: t('invite.dialog.placeholder'),
                 onkeydown: (event) => { if (event.key === 'Enter') actions.joinList(joinListInput.value) },
             })
             content = dialogFrame(t('joinList.title'), [
                 h('p', { class: 'dialog-body' }, t('joinList.subtitle')),
+                ui.dialog.errorKey ? h('p', { class: 'invite-panel-error', role: 'alert' }, t(ui.dialog.errorKey)) : null,
                 joinListInput,
             ], [
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
@@ -5693,7 +5915,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             const listId = ui.dialog.listId
             const isGroceryBuiltin = !isBoardType(type) && !isTodoType(type)
             const resolvedName = builtinDisplayName(type, reduceSurfaceLabels(state.items))
-            const nameInput = h('input', { class: 'input', value: resolvedName })
+            const nameInput = h('input', { id: 'list-settings-name', class: 'input', value: resolvedName, 'aria-label': t('desktop.list.rename') })
             // Empty clears the override (reverts to the localized default).
             const commitName = () => { const nv = nameInput.value.trim(); if (nv !== resolvedName) actions.renameBuiltin(listId, type, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
@@ -5703,18 +5925,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 nameInput,
                 h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('desktop.list.renameBuiltinHelp')),
                 listIdentityBlock(listId, type),
-                isGroceryBuiltin ? h('h3', { class: 'category-heading label-sm' }, t('shareList.title')) : null,
-                isGroceryBuiltin ? h('div', {},
-                    h('button', {
-                        class: 'btn btn-secondary',
-                        onclick: () => {
-                            const name = nameInput.value.trim() || resolvedName
-                            closeDialog()
-                            actions.shareList(listId, { type, name, builtin: true })
-                        },
-                    }, t('shareList.button')),
-                    h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
-                ) : null,
+                listMembersBlock(listId),
+                isGroceryBuiltin ? listSharingBlock(false, () => {
+                    const name = nameInput.value.trim() || resolvedName
+                    closeDialog()
+                    actions.shareList(listId, { type, name, builtin: true })
+                }) : null,
+                listRigorToggle(listId, type),
                 valueReturnToggleRow(listId, type),
             ], [
                 h('button', {
@@ -5726,14 +5943,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     },
                 }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-            queueMicrotask(() => nameInput.focus())
+            ], { className: 'list-settings-dialog' })
+            if (dialogDom.shouldEnter(kind)) queueMicrotask(() => nameInput.focus())
         } else if (kind === 'list-settings') {
             const registry = reduceRegistry(state.items)
             const entry = registry.lists.find((l) => l.id === ui.dialog.listId)
             if (!entry) { closeDialog(); return }
             const listId = ui.dialog.listId
-            const nameInput = h('input', { class: 'input', value: entry.name })
+            const nameInput = h('input', { id: 'list-settings-name', class: 'input', value: entry.name, 'aria-label': t('desktop.list.rename') })
             const commitName = () => { const nv = nameInput.value.trim(); if (nv && nv !== entry.name) actions.renameList(listId, nv) }
             nameInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') { commitName(); closeDialog() } })
             nameInput.addEventListener('blur', commitName)
@@ -5743,7 +5960,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (!groupChoices.some((g) => g.id === GENERAL_GROUP_ID)) groupChoices.unshift({ id: GENERAL_GROUP_ID, name: t('desktop.group.general') })
             const currentGroupId = groupChoices.some((g) => g.id === entry.groupId) ? entry.groupId : GENERAL_GROUP_ID
             const groupSelect = h('select', {
-                class: 'prop-select',
+                id: 'list-settings-group', class: 'prop-select',
+                'aria-label': t('desktop.list.group'),
                 onchange: (event) => actions.moveListToGroup(listId, event.target.value || GENERAL_GROUP_ID),
             }, ...groupChoices.map((g) => {
                 const opt = h('option', { value: g.id }, g.name)
@@ -5756,29 +5974,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('h3', { class: 'category-heading label-sm' }, t('desktop.list.group')),
                 groupSelect,
                 listIdentityBlock(listId, entry.type),
-                h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
-                // The built-in surfaces multiplex listId 'default' and cannot be
-                // shared on their own (the backend refuses it) — show why instead
-                // of a share button that would only error.
-                listId === DEFAULT_LIST_ID
-                    ? h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('shareList.builtinBlocked'))
-                    : entry.baseKey
-                        // Already shared: say so, and offer a fresh invite for
-                        // the next person (the backend re-mints on demand).
-                        ? h('div', {},
-                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, `${t('shareList.shared')} — ${t('share.list.hint')}`),
-                            h('button', {
-                                class: 'btn btn-secondary',
-                                onclick: () => { closeDialog(); actions.shareList(listId) },
-                            }, t('shareList.showInvite')),
-                        )
-                        : h('div', {},
-                            h('button', {
-                                class: 'btn btn-secondary',
-                                onclick: () => { closeDialog(); actions.shareList(listId) },
-                            }, t('shareList.button')),
-                            h('p', { class: 'label-md', style: 'color: var(--secondary);' }, t('share.list.hint')),
-                        ),
+                listMembersBlock(listId),
+                listSharingBlock(!!entry.baseKey, () => { closeDialog(); actions.shareList(listId) }, listId === DEFAULT_LIST_ID),
+                listRigorToggle(listId, entry.type),
                 valueReturnToggleRow(listId, entry.type),
             ], [
                 h('button', {
@@ -5790,8 +5988,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     },
                 }, ui.dialog.confirmDelete ? t('desktop.list.deleteConfirm') : t('desktop.list.delete')),
                 h('button', { class: 'btn btn-primary', onclick: closeDialog }, t('common.close')),
-            ])
-            queueMicrotask(() => nameInput.focus())
+            ], { className: 'list-settings-dialog' })
+            if (dialogDom.shouldEnter(kind)) queueMicrotask(() => nameInput.focus())
         } else if (kind === 'group-settings') {
             const group = reduceRegistry(state.items).groups.find((g) => g.id === ui.dialog.groupId)
             if (!group) { closeDialog(); return }
@@ -5895,6 +6093,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ['G', t('desktop.shortcuts.toggleView')],
                 ['[ ]', t('desktop.shortcuts.switchList')],
                 ['↑ ↓', t('desktop.shortcuts.navigate')],
+                ['← →', t('desktop.shortcuts.boardColumn')],
+                ['⇧ ← →', t('desktop.shortcuts.boardMove')],
+                ['↵', t('desktop.shortcuts.openTicket')],
                 ['Space', t('desktop.shortcuts.toggleDone')],
                 ['F', t('desktop.shortcuts.flag')],
                 ['⇧ F', t('desktop.shortcuts.flagFor')],
@@ -5939,7 +6140,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 h('button', { class: 'btn btn-secondary', onclick: closeDialog }, t('common.cancel')),
             ])
         } else if (kind === 'add-ticket') {
-            const config = selectBoardConfig(state)
+            const config = selectBoardConfig(listAccess(state, ui.dialog.targetListId || ui.activeListId))
             const rigorOn = config.rigorOn
             const draft = ui.dialog.draft
             // Two modes share this panel. `draftId` is the LIVE one: the row
@@ -6087,19 +6288,86 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             queueMicrotask(() => valF.inp.focus())
         }
 
+        // Info disclosures stay open across background syncs without rebuilding
+        // the dialog on click (which would throw keyboard focus away).
+        function listInfo(key, label, children) {
+            const expanded = !!ui.dialog[key]
+            const panel = h('div', { id: `list-info-${key}`, class: 'list-info-panel', hidden: expanded ? null : '' }, ...children)
+            const button = h('button', {
+                id: `list-info-button-${key}`, type: 'button', class: 'btn btn-secondary list-info-button',
+                'aria-expanded': String(expanded), 'aria-controls': `list-info-${key}`,
+                onclick: () => {
+                    const open = !ui.dialog[key]
+                    ui.dialog[key] = open
+                    panel.hidden = !open
+                    button.setAttribute('aria-expanded', String(open))
+                },
+            }, tablerIcon('info-circle', { size: 18 }), label)
+            return h('section', { class: 'list-info' }, button, panel)
+        }
+
         function listIdentityBlock(listId, listType) {
-            const surfaceId = `${listId}:${listType || DEFAULT_LIST_TYPE}`
-            const row = (label, value) => h('div', { class: 'list-identity-row' },
-                h('dt', {}, label),
-                h('dd', {}, value || '—'),
-            )
-            return h('section', { class: 'list-identity' },
-                h('h3', { class: 'category-heading label-sm' }, t('list.identity.title')),
-                h('dl', {},
+            const row = (label, value) => h('div', { class: 'list-identity-row' }, h('dt', {}, label), h('dd', {}, value || '—'))
+            const access = listAccess(state, listId)
+            return listInfo('identityOpen', t('list.identity.title'), [
+                h('dl', { class: 'list-identity' },
                     row(t('list.identity.project'), state.baseId),
                     row(t('list.identity.list'), listId),
-                    row(t('list.identity.surface'), surfaceId),
-                    row(t('list.identity.epoch'), state.epoch == null ? '—' : String(state.epoch)),
+                    row(t('list.identity.surface'), `${listId}:${listType || DEFAULT_LIST_TYPE}`),
+                    row(t('list.identity.epoch'), String(access.roster?.currentEpoch ?? (access.baseKey ? null : state.epoch) ?? '—')),
+                ),
+            ])
+        }
+
+        function listMembersBlock(listId) {
+            const access = listAccess(state, listId)
+            const members = access.roster?.writers || []
+            return h('section', { class: 'list-members' },
+                h('h3', { class: 'category-heading label-sm' }, t('list.members.title')),
+                h('p', { class: 'list-settings-hint' }, t(access.baseKey ? 'list.members.sharedHint' : 'list.members.projectHint')),
+                members.length ? h('ul', { class: 'list-members-rows' }, ...members.map((member) => {
+                    const name = peerLabelMap().get(member.writerKey)?.trim() || 'anonymous'
+                    return h('li', { class: 'list-member' },
+                        h('div', { class: 'list-member-identity' },
+                            h('span', { class: 'list-member-name' }, name),
+                            fingerprintChip(member.writerKey),
+                        ),
+                        h('span', { class: 'role-chip' }, t(member.isSelf ? 'members.role.self' : member.isOwner ? 'members.role.owner' : 'members.role.member')),
+                    )
+                })) : h('p', { class: 'list-settings-hint' }, t(access.roster ? 'members.subtitle.none' : 'list.members.unavailable')),
+            )
+        }
+
+        function listSharingBlock(shared, onShare, blocked = false) {
+            return h('section', { class: 'list-sharing' },
+                listInfo('sharingOpen', t('list.sharing.info'), [
+                    h('h3', { class: 'category-heading label-sm' }, t('shareList.title')),
+                    h('p', { class: 'list-settings-hint' }, blocked ? t('shareList.builtinBlocked') : `${shared ? t('shareList.shared') + ' — ' : ''}${t('share.list.hint')}`),
+                ]),
+                blocked ? null : h('button', { type: 'button', class: 'btn btn-secondary', onclick: onShare },
+                    tablerIcon('share', { size: 16 }), t(shared ? 'shareList.showInvite' : 'shareList.button')),
+            )
+        }
+
+        function listRigorToggle(listId, type) {
+            if (!isBoardType(type)) return null
+            const access = listAccess(state, listId)
+            const config = selectBoardConfig(access)
+            const canEdit = !!access.boardConfig && !!access.canAdminister
+            const hintId = 'list-rigor-hint'
+            return h('section', { class: 'list-rigor' },
+                h('div', { class: 'switch-row' },
+                    h('div', { class: 'switch-text' },
+                        h('span', { id: 'list-rigor-label', class: 'switch-title label-sm' }, t('settings.rigor.label')),
+                        h('p', { id: hintId, class: 'list-settings-hint' }, t(!access.boardConfig ? 'list.members.unavailable' : canEdit ? 'settings.rigor.ownerHelp' : 'settings.rigor.readonlyHelp')),
+                        !access.baseKey ? h('p', { class: 'list-settings-hint' }, t('list.rigor.projectHint')) : null,
+                    ),
+                    h('button', {
+                        id: 'list-rigor-switch', type: 'button', class: 'list-rigor-switch',
+                        role: 'switch', 'aria-checked': String(config.rigorOn), 'aria-labelledby': 'list-rigor-label', 'aria-describedby': hintId,
+                        disabled: canEdit ? null : '',
+                        onclick: () => actions.setRigor(!config.rigorOn, listId),
+                    }, h('span', { class: `switch${config.rigorOn ? ' on' : ''}`, 'aria-hidden': 'true' }, h('span', { class: 'switch-knob' }))),
                 ),
             )
         }
@@ -6134,7 +6402,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // your base), member-remove, storage-reset, server-shutdown — render on
         // the inverse surface with a danger square marker, so they feel like a
         // mode, not an ordinary dialog. One pattern, reused per kind.
-        return h('div', { class: `dialog${opts.trust ? ' trust-dialog' : ''}`, role: 'dialog', 'aria-modal': 'true' },
+        return h('div', { class: `dialog${opts.trust ? ' trust-dialog' : ''}${opts.className ? ` ${opts.className}` : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
             opts.trust
                 ? h('div', { class: 'trust-marker' }, h('span', { class: 'trust-square', 'aria-hidden': 'true' }), h('span', { class: 'label-sm' }, t('trust.irreversible')))
                 : null,
@@ -6164,7 +6432,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                             ? 'main.notification.writeBackendUnresponsive'
                             : state.writeBlock === 'storage-fenced'
                                 ? 'main.notification.writeStorageFenced'
-                                : 'main.notification.writeSyncStalled'))
+                                : state.writeBlock === 'write-refused'
+                                    ? 'main.notification.writeRefused'
+                                    : state.writeBlock === 'write-needs-decision'
+                                        ? 'main.notification.writeNeedsDecision'
+                                        : 'main.notification.writeSyncStalled'))
             : null
         const updateBanner = ui.updateReady
             ? h('div', { class: 'notice update-ready', dataset: { updateReady: 'true' } },
@@ -6284,6 +6556,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (next) selectSurface(store.getState(), next)
         } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault()
+            // On a board this walks DOM order, which is column by column: ↓ off
+            // the bottom of a column lands at the top of the next one. ←/→
+            // below is what moves across columns deliberately.
             const rows = [...root.querySelectorAll('[data-item-id]')]
             if (rows.length === 0) return
             const index = rows.findIndex((row) => row.dataset.itemId === ui.focusedItemId)
@@ -6291,6 +6566,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ? rows[Math.min(rows.length - 1, index + 1)]
                 : rows[Math.max(0, index <= 0 ? 0 : index - 1)]
             next?.focus()
+        } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && ui.view === 'board') {
+            // ←/→ walks the columns; ⇧←/→ takes the focused ticket with it.
+            // Status was mouse-only until now: there was no keyboard way to
+            // move a ticket across the board at all.
+            const state = store.getState()
+            const item = state.items.find((entry) => entry && entry.id === ui.focusedItemId)
+            if (!item) return
+            event.preventDefault()
+            const states = selectBoardConfig(listAccess(state, item.listId)).states
+            const step = event.key === 'ArrowRight' ? 1 : -1
+            const from = Math.max(0, states.findIndex((s) => s.id === (item.status || states[0]?.id)))
+            if (event.shiftKey) {
+                const target = states[from + step]
+                if (target) actions.moveTicket(item, target.id)
+                return
+            }
+            // Plain arrow moves FOCUS, so it skips columns with nothing to
+            // focus rather than stalling on the first empty one.
+            for (let i = from + step; i >= 0 && i < states.length; i += step) {
+                const card = root.querySelector(`.board-column[data-status="${states[i].id}"] .ticket-card`)
+                if (card) { card.focus(); return }
+            }
         } else if (event.key === 'f' || event.key === 'F') {
             // Flag the focused item into the day-plan. Arrows only move DOM focus,
             // so resolve the item object from the store. Plain F = today, Shift+F =
@@ -6413,8 +6710,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             renderAll()
         }, PRESENCE_TICK_MS)
         setInterval(() => {
-            if (ui.view !== 'peers' && ui.dialog?.kind !== 'share') return
-            if (!store.getState().inviteKey) return
+            if (ui.view !== 'peers' && !['share', 'share-list'].includes(ui.dialog?.kind)) return
             renderAll()
         }, INVITE_TICK_MS)
     }

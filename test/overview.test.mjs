@@ -34,7 +34,7 @@ class Element {
     }
 }
 
-function overview(t, view = 'focus') {
+function overview(t, view = 'focus', listType = 'todo') {
     t.mock.method(globalThis, 'queueMicrotask', () => {})
     const previous = globalThis.document
     globalThis.document = {
@@ -45,7 +45,7 @@ function overview(t, view = 'focus') {
     t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous })
     const main = new Element('main')
     const now = new Date(2026, 8, 8).getTime()
-    const items = ['today', 'next', 'carry', 'done'].map((id) => ({ id, listId: 'default', listType: 'todo', text: id, isDone: id === 'done', updatedAt: 1 }))
+    const items = ['today', 'next', 'carry', 'done'].map((id) => ({ id, listId: 'default', listType, text: id, status: id === 'done' ? 'done' : 'todo', isDone: id === 'done', updatedAt: 1 }))
     const state = { preferences: { overviewView: view }, items: [
         ...items,
         ...items.map((item, i) => buildItemPlanEntry({ listId: item.listId, itemId: item.id, plannedFor: item.id === 'carry' ? '2026-09-07' : '2026-09-08', planOrder: i, updatedAt: 2 })),
@@ -54,16 +54,47 @@ function overview(t, view = 'focus') {
     const opened = []
     const moved = []
     const reordered = []
+    const toggled = []
+    const ticketsMoved = []
     const ui = { weekOffset: 0 }
     createOverviewSection({
         main, store: { getState: () => state }, locale: { i18n: { t: (key) => key } }, ui,
-        actions: { movePlanToDay: (...args) => moved.push(args), reorderPlanRecords: (...args) => reordered.push(args) },
+        actions: {
+            movePlanToDay: (...args) => moved.push(args),
+            reorderPlanRecords: (...args) => reordered.push(args),
+            toggleItem: (item) => toggled.push(item),
+            moveTicket: (...args) => ticketsMoved.push(args),
+        },
         now: () => now, renderAll() {}, openDialog: (draft) => opened.push(draft), selectSurface() {},
         builtinDisplayName: () => 'Todo', typePredicate: () => () => true, iconForType: () => 'list',
         dropBefore: () => true, valueBadges: () => [], beacon: () => null,
     }).renderOverviewPane(state)
-    return { main, ui, opened, moved, reordered }
+    return { main, ui, opened, moved, reordered, toggled, ticketsMoved }
 }
+
+test('planner week controls complete and reopen source items without selecting the day', (t) => {
+    const { main, ui, toggled } = overview(t, 'planner')
+    const controls = main.findAll('plan-week-check')
+    assert.equal(controls.length, 3)
+    assert.deepEqual(controls.map((el) => el.attrs['aria-pressed']), ['false', 'false', 'true'])
+    for (const control of controls) {
+        assert.equal(control.tagName, 'BUTTON')
+        control.fire('click')
+    }
+    assert.deepEqual(toggled.map((item) => item.id), ['today', 'next', 'done'])
+    assert.equal(ui.planDate, undefined)
+    main.findAll('plan-week-row')[0].fire('click')
+    assert.equal(ui.planDate, '2026-09-08', 'clicking the rest of a row still selects its day')
+})
+
+test('planner week controls route board completion and reopening through status changes', (t) => {
+    const { main, toggled, ticketsMoved } = overview(t, 'planner', 'board')
+    const controls = main.findAll('plan-week-check')
+    controls[0].fire('click')
+    controls[2].fire('click')
+    assert.equal(toggled.length, 0)
+    assert.deepEqual(ticketsMoved.map(([item, status]) => [item.id, status]), [['today', 'done'], ['done', 'todo']])
+})
 
 for (const view of ['focus', 'planner']) {
     test(`every ${view} agenda handle opens a date calendar for its own ref`, (t) => {

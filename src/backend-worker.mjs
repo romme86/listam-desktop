@@ -24,7 +24,7 @@ import b4a from 'b4a'
 // exist under Bare.
 import { startBackend } from '@listam/backend/backend'
 import { createPearPlatform } from '@listam/backend/platform/pear'
-import { decodeBackendRequest, dataToString } from '@listam/client'
+import { decodeBackendRequest, dataToString, decodeProjectionSnapshot } from '@listam/client'
 import { RPC_PERSIST_SECRET } from '@listam/protocol'
 import { createLogger } from '@listam/logging'
 import { createFileSecretStore, prepareDesktopSecrets, persistDesktopSecret } from './secret-store.mjs'
@@ -136,7 +136,14 @@ globalThis.Bare?.on?.('unhandledRejection', (err) => reportWorkerError('unhandle
 const voiceItems = new Map()
 function projectVoiceEvent(event) {
     const type = event?.type
-    if (type === 'sync-list') {
+    if (type === 'message' && event.payload?.type === 'projection-snapshot') {
+        const snapshot = decodeProjectionSnapshot(event.payload)
+        if (!snapshot) return
+        for (const [key, item] of voiceItems) {
+            if (snapshot.role === 'personal' ? !item.baseKey : item.baseKey === snapshot.baseKey) voiceItems.delete(key)
+        }
+        for (const item of snapshot.items) voiceItems.set(item.id, item)
+    } else if (type === 'sync-list') {
         voiceItems.clear()
         for (const item of (Array.isArray(event.items) ? event.items : [])) if (item?.id) voiceItems.set(item.id, item)
     } else if (type === 'add-from-backend' || type === 'update-from-backend') {

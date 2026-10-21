@@ -936,6 +936,20 @@ button {
     margin-top: -0.5rem;
 }
 .invite-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.invite-dialog { width: min(42rem, calc(100vw - 2rem)); }
+.invite-panel { display: grid; gap: 1rem; min-width: 0; }
+.invite-panel p { margin: 0; }
+.invite-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; }
+.invite-field { display: grid; gap: 0.5rem; flex: 1 1 9rem; min-width: 0; }
+.invite-panel-hint { color: var(--ink-mute); }
+.invite-panel-error { color: var(--danger); }
+.invite-code-list { display: grid; gap: 1rem; }
+.invite-code-row { display: grid; gap: 0.75rem; padding: 1rem; background: var(--surface-1); border-radius: var(--r-row); min-width: 0; }
+.invite-code-heading { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: baseline; justify-content: space-between; }
+.invite-code-heading h3 { margin: 0; }
+.invite-code-heading span { color: var(--ink-mute); }
+.invite-code-row .invite-code { padding: 0; background: transparent; font-size: 0.75rem; min-width: 0; overflow-wrap: anywhere; }
+.invite-code-row .invite-qr-frame { justify-self: start; }
 .invite-share-layout.is-expired { grid-template-columns: minmax(0, 1fr); }
 /* Live-code count next to the section heading. Only rendered above 1, where it
    is the only sign that the code handed to the previous person still works.
@@ -1164,29 +1178,67 @@ kbd {
 }
 .board-add:hover { background: var(--surface-2); color: var(--ink-mute); }
 
+/* Finished work recedes — the design-guide board screen dims its Done column
+   too. Both flags come from the board CONFIG (state.isDone), not from a literal
+   id, so a board that renamed its done state still recedes. */
+.board-column.done .board-col-head { opacity: 0.6; }
+.board-column.done:hover .board-col-head { opacity: 1; }
+.ticket-card.done { opacity: 0.55; }
+.ticket-card.done:hover,
+.ticket-card.done:focus-visible,
+.ticket-card.done.selected { opacity: 1; }
+
+/* An empty column keeps its head, its count and its + Add at about half width.
+   Five default states at 240px need 1264px and a 1440px window offers 1024, so
+   what fell off the right edge was the Done column — while Blocked and Review
+   each held a full 240px of nothing. */
+.board-column.empty { flex: 0 1 124px; min-width: 124px; }
+.board-column.empty .board-col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+    .board-column.empty { flex: 0 1 108px; min-width: 104px; }
+}
+
 .ticket-card {
     background: var(--card);
+    /* The card edge is a drawn line, not a tonal step: --card sits only 1.08:1
+       above the board behind it in the dark theme, so without a border the card
+       edges all but vanish. The design-guide board screen draws one too. */
+    border: 1px solid var(--line);
     border-radius: var(--r-row);
-    padding: 0.75rem;
+    padding: 0.625rem 0.75rem;
     display: flex; flex-direction: column; gap: 0.5rem;
-    cursor: grab;
-    transition: background var(--t-fast) var(--ease);
+    /* A click OPENS the ticket; dragging is the secondary gesture. `grab` here
+       advertised the wrong one as primary. */
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
 }
 .ticket-card:hover { background: var(--surface-2); }
-.ticket-card.dragging { opacity: 0.4; }
+/* Every other focusable row (.item-row, .grid-card, .note-row) draws this ring;
+   the board card was the one that fell back to the browser default. */
+.ticket-card:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.ticket-card.dragging { opacity: 0.4; cursor: grabbing; }
+
+/* The card's single accent, so it can only ever mean one thing. The renderer
+   picks it in order — unfinished draft, then blocked, then urgency — and
+   medium/low get none at all, which is what keeps an ordinary board quiet. */
+.ticket-card.edge-urgent { box-shadow: inset 3px 0 0 0 var(--danger); }
+.ticket-card.edge-high { box-shadow: inset 3px 0 0 0 var(--ink-faint); }
+.ticket-card.edge-blocked { box-shadow: inset 3px 0 0 0 var(--draft); }
 
 /* An unfinished draft: created the moment the panel opened, never committed.
    A solid amber edge rather than a wash, so the card still reads as a card and
    the state is legible at board zoom without tinting the text underneath. */
 .ticket-card.draft {
     background: var(--draft-tint);
+    border-color: var(--draft);
     box-shadow: inset 3px 0 0 0 var(--draft);
 }
 .ticket-card.draft:hover { background: var(--draft-tint); box-shadow: inset 3px 0 0 0 var(--draft), inset 0 0 0 1px var(--draft); }
 .ticket-card.draft.selected { box-shadow: inset 3px 0 0 0 var(--draft), inset 0 0 0 2px var(--ink); }
 .draft-pill {
     font-size: 0.65rem; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
     background: var(--draft); color: var(--ink-block);
 }
 .ticket-title.untitled { color: var(--ink-faint); font-style: italic; }
@@ -1196,18 +1248,76 @@ kbd {
 .btn.btn-danger-text:hover { color: var(--danger); background: var(--danger-container); }
 .ticket-title { font-size: 0.9rem; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .ticket-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
-.ticket-card-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-faint); }
-.ticket-card-meta > .timeliness-badge, .ticket-card-meta > .ticket-timer { margin-left: auto; }
+/* One type style for the whole row. --ink-faint on --card is 4.47:1 in the
+   light theme — under the AA floor at 11px — and the row previously mixed two
+   greys (.value-badge used --ink-mute) and two sizes (11px vs 12.5px). The
+   chips now read left to right in a fixed order: the old margin-left:auto on
+   the timer dropped it alone at the right of a wrapped second line, so the
+   same field sat in a different place on every card. */
+.ticket-card-meta {
+    display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;
+    color: var(--ink-mute);
+}
+/* Two fixed groups — who on the left, when on the right — and NO wrapping, so
+   a field is in the same place on every card. The left group clips rather than
+   pushing the right one off; nothing ever lands alone on a second line. */
+.ticket-card-meta .meta-left { display: flex; align-items: center; gap: 0.5rem; min-width: 0; overflow: hidden; }
+.ticket-card-meta .meta-right { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; flex: none; }
+.ticket-card-meta .ticket-avatar { width: 18px; height: 18px; }
+/* In the row, priority is a word: the left edge carries the colour, and only
+   urgent/high ever reach the row at all. */
+.ticket-card-meta .priority-pill { padding: 0; background: none; box-shadow: none; text-transform: uppercase; letter-spacing: 0.04em; }
+.ticket-card-meta .priority-pill.urgent { color: var(--danger); }
+.ticket-card-meta .priority-pill.high { color: var(--ink); }
+
+/* Due is plain text until it is late. Red on a card means exactly one thing. */
+.ticket-due { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); white-space: nowrap; }
+.ticket-due.today { color: var(--ink); }
+.ticket-due.overdue { color: var(--danger); }
+
+/* Progress is a 2px rule under the title rather than a number to decode; the
+   n/n sits in the row below for anyone who wants the exact count. */
+.ticket-progress { height: 2px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.ticket-progress > span { display: block; height: 2px; background: var(--ink-faint); }
+
+/* Why a blocked ticket is blocked, on the card. One line, clipped. */
+.ticket-reason { display: flex; align-items: center; gap: 0.3rem; min-width: 0; color: var(--draft); font-family: var(--font-mono); }
+.ticket-reason > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ticket-reason > svg { flex: none; }
+
+/* The planning numbers are real but secondary, so they cost the resting card
+   no height at all and appear while it is hovered, focused or selected. */
+.ticket-extras { display: none; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-faint); }
+.ticket-extras .value-badge { font-size: inherit; color: inherit; }
+.ticket-extras .value-badge svg { color: inherit; }
+.ticket-card:focus-visible .ticket-extras,
+.ticket-card.selected .ticket-extras { display: flex; }
+/* Hover-gated, because the web build of this UI runs on phones: a touch
+   device has no hover to reveal anything, so the extras simply stay off the
+   card there — the same call the native mobile card makes, with the numbers
+   one tap away in the detail. The guard also stops iOS's sticky :hover from
+   revealing them after a tap and shifting the column underneath. */
+@media (hover: hover) {
+    .ticket-card:hover .ticket-extras { display: flex; }
+}
 .ticket-meta { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); }
 
+/* Priority is a ramp of WEIGHT, not of hue: filled for urgent, outlined for
+   high, plain text below that. The old fills were hardcoded light hex with no
+   dark counterpart, so in the dark theme a near-white chip out-shouted the
+   title above it — while `low`, on --surface-2, was the only one you couldn't
+   see. The line-height was inherited (24px on a 10.4px font), which made this
+   one-word row 27px tall: taller than the title line it sat under. */
 .priority-pill {
-    font-size: 0.65rem; font-family: var(--font-mono);
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    font-size: 0.65rem; font-family: var(--font-mono); line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
 }
-.priority-pill.urgent { background: #FCEBEB; color: #791F1F; }
-.priority-pill.high { background: #FAEEDA; color: #633806; }
-.priority-pill.medium { background: #E6F1FB; color: #0C447C; }
-.priority-pill.low { background: var(--surface-2); color: var(--ink-mute); }
+.priority-pill.urgent { background: var(--danger-container); color: var(--on-danger-container); }
+.priority-pill.high { color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+/* Below `high` the label is plain text — the word itself carries the value.
+   Both steps stay on --ink-mute: --ink-faint is 4.47:1 on --card in the light
+   theme, the very floor the meta row above just moved off. */
+.priority-pill.medium, .priority-pill.low { color: var(--ink-mute); padding-left: 0; padding-right: 0; }
 
 .ticket-avatar {
     width: 20px; height: 20px; border-radius: 50%;
@@ -1219,13 +1329,19 @@ kbd {
 .prop-person { display: inline-flex; align-items: center; gap: 0.4rem; }
 .ticket-timer { display: inline-flex; align-items: center; gap: 0.3rem; font-family: var(--font-mono); }
 .timer-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--signal); }
+/* Outline chips: a finished ticket should not be the loudest thing on the
+   board. on_time was filled with --signal, the brightest token in the system,
+   so completed work out-shouted work in flight. Only the bad outcome keeps a
+   colour — on-time and undertime differ by their label text, not by hue, and
+   the old undertime hex (#FAEEDA/#633806) had no dark counterpart. */
 .timeliness-badge {
-    font-size: 0.65rem; font-family: var(--font-mono);
-    padding: 0.1rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    font-size: 0.65rem; font-family: var(--font-mono); line-height: 1;
+    padding: 0.2rem 0.45rem; border-radius: var(--r-pill); white-space: nowrap;
+    box-shadow: inset 0 0 0 1px currentColor;
 }
-.timeliness-badge.on_time { background: var(--signal); color: var(--on-signal); }
-.timeliness-badge.overtime { background: var(--danger-container); color: var(--on-danger-container); }
-.timeliness-badge.undertime { background: #FAEEDA; color: #633806; }
+.timeliness-badge.on_time { color: var(--ink-mute); }
+.timeliness-badge.overtime { color: var(--danger); }
+.timeliness-badge.undertime { color: var(--ink-mute); }
 
 /* ----- rigor create dialog ----- */
 .field-label { display: block; margin: 0.75rem 0 0.35rem; color: var(--ink-mute); }
@@ -1625,6 +1741,20 @@ html.board-drawer-open { overflow: hidden; }
 }
 .block-rich.is-empty { position: relative; }
 
+/* The composer: the body's last line, always present and always empty. It is
+   not a block — the first keystroke hands its text to a real one — so it
+   carries no handle, no chrome and no commit of its own, and it replaces both
+   the empty-state buttons and the "+ Add block" row. */
+.block-composer {
+    position: relative; white-space: pre-wrap; cursor: text;
+    min-height: 1.6em; padding: 0.15rem 0;
+}
+.block-composer:focus { outline: none; box-shadow: none; }
+.block-composer:empty::before {
+    content: attr(data-placeholder); color: var(--ink-faint); font-style: italic;
+    pointer-events: none;
+}
+
 /* Insert affordances + "/" command menu */
 .block-add-row { position: relative; margin-top: 0.4rem; }
 .block-add, .block-empty {
@@ -1912,6 +2042,10 @@ html.board-drawer-open { overflow: hidden; }
 .plan-week-rows { display: flex; flex-direction: column; gap: 0.3rem; }
 .plan-week-row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.85rem; color: var(--ink-mute); }
 .plan-week-row .ti { color: var(--ink-faint); flex: none; }
+.plan-week-check { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 24px; min-height: 24px; padding: 0; border: none; border-radius: 0; background: transparent; color: var(--ink); cursor: pointer; }
+.plan-week-check:hover { background: var(--surface-2); }
+.plan-week-check:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.plan-week-check .ti { color: inherit; }
 .plan-week-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-week-row.done span { text-decoration: line-through; color: var(--ink-faint); }
 
@@ -1989,6 +2123,13 @@ html.board-drawer-open { overflow: hidden; }
     transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .ticket-card:hover .ticket-flag, .ticket-card:focus-within .ticket-flag { opacity: 0.7; }
+/* On touch the flag can never be revealed, so it was an invisible 18px
+   control you could still hit by accident. Show it at rest and give it a
+   44px hit area, drawn by a pseudo-element so the card's layout is unchanged. */
+@media (hover: none) {
+    .ticket-card .ticket-flag { opacity: 0.55; }
+    .ticket-card .ticket-flag::after { content: ''; position: absolute; inset: -13px; }
+}
 .ticket-flag:hover { opacity: 1; transform: scale(1.12); }
 .ticket-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
 .ticket-title { padding-right: 1.25rem; }
@@ -2148,4 +2289,41 @@ html.board-drawer-open { overflow: hidden; }
 @media (max-width: 920px) {
     /* The index stops being a column of its own and stacks over the document. */
     .notes-split { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+}
+
+/* List options: quiet metadata disclosures and readable, borderless sections. */
+.list-settings-dialog { width: min(600px, calc(100vw - 2rem)); }
+.list-settings-dialog > .dialog-body { display: flex; flex-direction: column; gap: 1rem; padding-top: 1rem; }
+.list-settings-dialog .category-heading { padding: 0; margin: 0; color: var(--ink); }
+.list-settings-dialog > .dialog-body > .category-heading { margin-bottom: -0.5rem; }
+.list-settings-dialog .input, .list-settings-dialog .prop-select { width: 100%; margin: 0; min-height: 44px; box-sizing: border-box; }
+.list-settings-dialog .list-settings-hint { font-family: var(--font-sans); font-size: 14px; line-height: 1.5; color: var(--ink-mute); margin: 0.5rem 0 0; overflow-wrap: anywhere; }
+.list-info-button { min-height: 44px; justify-content: flex-start; text-align: left; white-space: normal; }
+.list-info-panel { margin-top: 0.75rem; padding: 1rem; background: var(--surface-2); border-radius: var(--r-field); }
+.list-info-panel[hidden] { display: none; }
+.list-settings-dialog .list-identity { margin: 0; display: grid; gap: 0.75rem; }
+.list-settings-dialog .list-identity-row { grid-template-columns: minmax(6rem, 1fr) minmax(0, 2fr); font-size: 12px; line-height: 1.5; }
+.list-settings-dialog .list-identity-row dt { color: var(--ink-mute); }
+.list-settings-dialog .list-identity-row dd { color: var(--ink); }
+.list-members, .list-rigor { padding-top: 0.5rem; }
+.list-members-rows { display: grid; gap: 0.75rem; list-style: none; padding: 0; margin: 1rem 0 0; }
+.list-member { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; }
+.list-member-identity { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem; min-width: 0; }
+.list-member-name { color: var(--ink); font-size: 16px; overflow-wrap: anywhere; }
+.list-member .fingerprint-chip { min-height: 36px; max-width: 100%; font-size: 12px; }
+.list-member .role-chip { flex-shrink: 0; }
+.list-sharing { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; }
+.list-sharing .list-info { flex: 1 1 14rem; }
+.list-sharing > .btn { min-height: 44px; }
+.list-settings-dialog .switch-row { align-items: flex-start; margin: 0; }
+.list-rigor-switch { display: flex; align-items: center; justify-content: center; width: 44px; min-height: 44px; flex-shrink: 0; border: 0; padding: 0; background: transparent; cursor: pointer; border-radius: var(--r-field); }
+.list-rigor-switch:disabled { cursor: not-allowed; opacity: 0.6; }
+.list-settings-dialog .value-toggle { margin: 0; }
+.list-settings-dialog .switch-hint { font-family: var(--font-sans); font-size: 14px; line-height: 1.5; }
+.list-settings-dialog button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.list-settings-dialog .dialog-actions { justify-content: space-between; flex-wrap: wrap; }
+@media (max-width: 480px) {
+    .list-settings-dialog { padding: 1.25rem; max-height: calc(100dvh - 2rem); }
+    .list-settings-dialog .list-identity-row { grid-template-columns: 1fr; gap: 0.15rem; }
+    .list-settings-dialog .dialog-actions .btn { min-height: 44px; }
 }

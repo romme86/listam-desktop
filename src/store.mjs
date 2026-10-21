@@ -20,6 +20,7 @@ import devicesReducer, { devicesActions, selectMembershipRoster } from './store/
 import boardConfigReducer, { boardConfigActions } from './store/board-config-slice.mjs'
 import labelsReducer, { labelsActions } from './store/labels-slice.mjs'
 import presenceReducer, { presenceActions } from './store/presence-slice.mjs'
+import { decodeProjectionSnapshot } from '@listam/client/sync-list-snapshot'
 
 // Rebuild a reduction from a flat, possibly multi-list snapshot. Items are
 // grouped by their normalized listId and replayed as per-list 'list' operations
@@ -149,6 +150,7 @@ const DEFAULT_RUNTIME_STATE = Object.freeze({
     diagnostics: [],
     leafBridge: null,
     voice: null,
+    sharedListState: {},
 })
 
 const RUNTIME_KEYS = [...Object.keys(DEFAULT_RUNTIME_STATE), 'bootError']
@@ -202,6 +204,7 @@ export function selectDesktopState(rootState) {
             ...selectAllItems(rootState),
             ...Object.values(rootState.labels.itemsById),
             ...Object.values(rootState.presence.itemsById),
+            ...Object.values(rootState.presence.liveItemsById ?? {}),
         ],
         inviteKey: rootState.sync.autobaseInviteKey,
         invite: rootState.sync.invite,
@@ -215,6 +218,8 @@ export function selectDesktopState(rootState) {
         isJoining: rootState.sync.isJoining,
         backendReady: rootState.sync.isWorkletReady,
         synced: rootState.sync.hasReceivedSnapshot,
+        isCatchingUp: rootState.sync.pendingWriteIds.length > 0
+            || Object.values(rootState.sync.projectionSourcesByBase ?? {}).some((source) => source !== 'verified-view'),
         roster: selectMembershipRoster(rootState),
         boardConfig: rootState.boardConfig.config,
         boardConfigCanAdminister: rootState.boardConfig.canAdminister,
@@ -458,7 +463,7 @@ export function createDesktopStore(initial = {}) {
                     reduxStore.dispatch(boardConfigActions.boardConfigReset())
                     reduxStore.dispatch(labelsActions.labelsCleared())
                     reduxStore.dispatch(presenceActions.presenceCleared())
-                    reduxStore.dispatch(runtimeSlice.actions.patched({ diagnostics: recordDiagnostic('reset', undefined, now) }))
+                    reduxStore.dispatch(runtimeSlice.actions.patched({ sharedListState: {}, diagnostics: recordDiagnostic('reset', undefined, now) }))
                 })
                 return 'reset'
             case 'message':
@@ -474,6 +479,21 @@ export function createDesktopStore(initial = {}) {
     function applyMessagePayload(payload, now) {
         const type = payload?.type
         switch (type) {
+            case 'ephemeral-presence':
+                reduxStore.dispatch(presenceActions.livePresenceApplied(payload.item))
+                return type
+            case 'projection-snapshot': {
+                const snapshot = decodeProjectionSnapshot(payload)
+                if (!snapshot) return null
+                transaction(() => {
+                    reduxStore.dispatch({ type: 'sync/projectionSnapshotReceived', payload: snapshot })
+                    reduxStore.dispatch(syncActions.snapshotReceived())
+                    reduxStore.dispatch(runtimeSlice.actions.patched({
+                        diagnostics: recordDiagnostic('projection-snapshot', { source: snapshot.source, items: snapshot.items.length }, now),
+                    }))
+                })
+                return type
+            }
             case 'peer-count':
                 setState({
                     peerCount: typeof payload.count === 'number' ? payload.count : 0,
@@ -515,6 +535,9 @@ export function createDesktopStore(initial = {}) {
                     diagnostics: recordDiagnostic(`base-state ${payload.baseId ?? 'unknown'} epoch ${payload.epoch ?? '?'}`, undefined, now),
                 })
                 return type
+            case 'projection-closed':
+                if (typeof payload.baseKey === 'string') reduxStore.dispatch(syncActions.projectionClosed(payload.baseKey))
+                return type
             case 'join-error':
                 // The reason is the useful half. `message` is the backend's
                 // untranslated Error text: it goes into the diagnostic log and
@@ -551,6 +574,7 @@ export function createDesktopStore(initial = {}) {
             case 'write-replayed':
                 setState({ diagnostics: recordDiagnostic(type, undefined, now) })
                 reduxStore.dispatch(syncActions.writesReplayed())
+                if (payload.queued === 0 && getState().writeBlock === 'write-needs-decision') clearWriteBlock()
                 return type
             case 'write-needs-decision':
                 // Queued edits whose world moved on (epoch rotated, list moved
@@ -567,7 +591,10 @@ export function createDesktopStore(initial = {}) {
                 // The backend refused a mutation (see @listam/backend lib/item.mjs
                 // write gates) — remember why so the UI can say so instead of
                 // dropping the change silently.
-                setState({ writeBlock: type, diagnostics: recordDiagnostic(type, undefined, now) })
+                setState({
+                    writeBlock: type === 'sync-stalled' && payload.reason ? 'write-refused' : type,
+                    diagnostics: recordDiagnostic(type, payload.reason, now),
+                })
                 return type
             case 'storage-fenced':
                 // Terminal, unlike the write blocks above: another process owns
@@ -582,12 +609,22 @@ export function createDesktopStore(initial = {}) {
                 })
                 return type
             case 'membership-roster':
+                if (payload.baseKey) {
+                    const shared = getState().sharedListState
+                    setState({ sharedListState: { ...shared, [payload.baseKey]: { ...shared[payload.baseKey], roster: payload.roster ?? null } } })
+                    return type
+                }
                 setState({
                     roster: payload.roster ?? null,
                     diagnostics: recordDiagnostic('membership-roster', undefined, now),
                 })
                 return type
             case 'board-config':
+                if (payload.baseKey) {
+                    const shared = getState().sharedListState
+                    setState({ sharedListState: { ...shared, [payload.baseKey]: { ...shared[payload.baseKey], boardConfig: payload.config ?? null, canAdminister: !!payload.canAdminister } } })
+                    return type
+                }
                 setState({
                     boardConfig: payload.config ?? null,
                     boardConfigCanAdminister: !!payload.canAdminister,

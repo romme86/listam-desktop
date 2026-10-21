@@ -57,7 +57,7 @@ export function newGroupMeta({ id, name, order = 0 }, updatedAt) {
 export function patchListMeta(registry, id, patch = {}, updatedAt) {
     const cur = findList(registry, id)
     if (!cur) return null
-    const next = { name: cur.name, type: cur.type, groupId: cur.groupId, order: cur.order, view: cur.view, ...patch }
+    const next = { name: cur.name, type: cur.type, groupId: cur.groupId, order: cur.order, view: cur.view, baseKey: cur.baseKey, ...patch }
     return buildListMetaItem({
         id,
         name: next.name,
@@ -65,6 +65,7 @@ export function patchListMeta(registry, id, patch = {}, updatedAt) {
         groupId: next.groupId,
         order: next.order,
         view: next.view,
+        baseKey: next.baseKey,
         updatedAt,
     })
 }

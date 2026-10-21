@@ -65,6 +65,16 @@ const labelsSlice = createSlice({
         },
         labelsCleared(state) { state.itemsById = {} },
     },
+    extraReducers: (builder) => {
+        builder.addCase('sync/projectionSnapshotReceived', (state, { payload }) => {
+            for (const [key, item] of Object.entries(state.itemsById)) {
+                if (payload.role === 'personal' ? !item.baseKey : item.baseKey === payload.baseKey) delete state.itemsById[key]
+            }
+            for (const item of payload.items) {
+                if (isLabelOnly(item) && item.id) state.itemsById[baseScopedKey(item)] = item
+            }
+        })
+    },
 })
 
 export const labelsActions = labelsSlice.actions

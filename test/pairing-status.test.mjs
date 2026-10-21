@@ -26,6 +26,11 @@ const BACKEND_JOIN_REASONS = [
     'cancelled',
     'incomplete-credentials',
     'unknown',
+    'not-ready',
+    'join-timeout',
+    'cannot-join-builtin',
+    'list-id-conflict',
+    'registry-write-failed',
 ]
 
 test('every join-error reason resolves to a distinct catalog key', () => {
@@ -52,6 +57,7 @@ test('every key these surfaces render exists in all six catalogs', () => {
         'invite.expiresIn',
         'invite.expired',
         'invite.regenerate',
+        ...Object.keys(catalogByLocale.en).filter((key) => key.startsWith('invite.batch.')),
         'network.diagnostics.title',
         'network.diagnostics.relayed',
         'network.diagnostics.copy',
@@ -59,7 +65,7 @@ test('every key these surfaces render exists in all six catalogs', () => {
     ]
     for (const locale of SUPPORTED_UI_LOCALES) {
         const catalog = catalogByLocale[locale]
-        const missing = used.filter((key) => typeof catalog[key] !== 'string')
+        const missing = used.filter((key) => typeof catalog[key] !== 'string' && typeof catalog[key] !== 'object')
         assert.deepEqual(missing, [], `${locale} is missing: ${missing.join(', ')}`)
     }
 })
@@ -199,4 +205,8 @@ test('only the pairing wait is cancellable — a base swap in progress is not', 
     assert.equal(canCancelJoin(undefined), true)
     assert.equal(canCancelJoin('permission'), false)
     assert.equal(canCancelJoin('syncing'), false)
+})
+
+test('single-list invalid codes reuse the explicit invalid-invitation explanation', () => {
+    assert.equal(joinErrorKey('bad-invite'), 'joining.failed.inviteInvalid')
 })

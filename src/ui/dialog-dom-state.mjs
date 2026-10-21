@@ -47,7 +47,7 @@ function isSelectable (el) {
 // inputs exactly as it does on its text inputs — and being thrown off a slider
 // you are dragging is the same bug as losing a caret.
 function isFocusCarryable (el) {
-    return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')
+    return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'BUTTON')
 }
 
 function carriesValue (el) {
@@ -63,7 +63,7 @@ export function createDialogDomState () {
     let renderedKind = null
 
     function fields (host) {
-        return [...(host.querySelectorAll('input, textarea') || [])]
+        return [...(host.querySelectorAll('input, textarea, select, button[id]') || [])]
     }
 
     return {
@@ -74,8 +74,8 @@ export function createDialogDomState () {
 
         /**
          * Snapshot the on-screen dialog, or null when there is nothing to carry.
-         * Field identity is POSITIONAL: a dialog of a given kind builds the same
-         * field list every render, so the nth field is the same field.
+         * Named controls retain identity by id; other fields use their position.
+         * Values are carried only for editable text/number inputs, not switches.
          */
         capture (host, kind) {
             if (renderedKind !== kind) return null
@@ -87,6 +87,7 @@ export function createDialogDomState () {
             return {
                 scrollTop: body.scrollTop || 0,
                 fieldIndex: focused ? fields(host).indexOf(focused) : -1,
+                fieldId: focused?.id || null,
                 value: focused && carriesValue(focused) ? focused.value : null,
                 selectionStart: selectable ? focused.selectionStart : null,
                 selectionEnd: selectable ? focused.selectionEnd : null,
@@ -110,7 +111,9 @@ export function createDialogDomState () {
             // dialog that shrank lands at its own bottom rather than at the top.
             if (body && snapshot.scrollTop > 0) body.scrollTop = snapshot.scrollTop
             if (snapshot.fieldIndex < 0) return
-            const field = fields(host)[snapshot.fieldIndex]
+            const field = snapshot.fieldId
+                ? fields(host).find((candidate) => candidate.id === snapshot.fieldId)
+                : fields(host)[snapshot.fieldIndex]
             if (!field) return
             if (snapshot.value != null) field.value = snapshot.value
             // Synchronous: a dialog that autofocuses in a microtask still wins,

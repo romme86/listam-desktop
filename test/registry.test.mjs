@@ -17,6 +17,14 @@ import {
 // Reduce a set of meta-items the way the store will (state.items -> registry).
 const reg = (...metaItems) => reduceRegistry(metaItems)
 
+test('registry edits and deletion retain the shared base identity', () => {
+    const key = '11'.repeat(32)
+    const shared = { ...newListMeta({ id: 'shared', name: 'Shared', type: 'shopping' }, 1), regBaseKey: key }
+    assert.equal(patchListMeta(reg(shared), 'shared', { name: 'Renamed' }, 2).regBaseKey, key)
+    assert.equal(patchListMeta(reg(shared), 'shared', { groupId: 'work' }, 2).regBaseKey, key)
+    assert.equal(deleteListMeta(reg(shared), 'shared', 2).regBaseKey, key)
+})
+
 test('newListMeta builds a well-formed registry meta-item; board writes the legacy wire type', () => {
     const meta = newListMeta({ id: 'work', name: 'Tokyo trip', type: 'board', groupId: 'home', order: 2 }, 5)
     assert.equal(meta.id, 'work', 'id IS the listId it describes')

@@ -1,6 +1,6 @@
 import { createSlice } from '@reduxjs/toolkit'
 import { isLabelItem, isPlanItem, surfaceLabelKey } from '@listam/domain'
-import { REGISTRY_LIST_TYPE } from '@listam/domain/list-registry'
+import { REGISTRY_LIST_TYPE, reduceRegistry } from '@listam/domain/list-registry'
 import { isFromAuthoritativeBase, listBaseFromRegistryItem } from '@listam/domain/authoritative-base'
 import {
     DEFAULT_LIST_ID,
@@ -223,6 +223,9 @@ function applyItemProjection(state, entry, operation) {
     if (!routing && !isFromAuthoritativeBase(normalized, state.baseByListId)) return
     const itemId = baseScopedKey(normalized)
     if (isPlanItem(normalized)) {
+        // Plan adds can be delayed replays of the same deterministic ref.
+        // They must not undo a more recent clear or date change.
+        if (state.itemsById[itemId] && isStaleUpdate(state.itemsById[itemId], normalized)) return
         if (operation === 'delete') delete state.itemsById[itemId]
         else state.itemsById[itemId] = normalized
         return
@@ -332,7 +335,60 @@ const listsSlice = createSlice({
             state.listIds = [DEFAULT_LIST_ID]
             state.listsById = { [DEFAULT_LIST_ID]: { ...initialListsState.listsById[DEFAULT_LIST_ID], itemIds: [] } }
             state.itemsById = {}
+            state.baseByListId = {}
         },
+    },
+    extraReducers: (builder) => {
+        builder.addCase('sync/projectionSnapshotReceived', (state, { payload }) => {
+            const owns = (item) => payload.role === 'personal'
+                ? !item.baseKey : item.baseKey === payload.baseKey
+            const affectedLists = new Set()
+            if (payload.role === 'personal') {
+                for (const list of reduceRegistry(Object.values(state.itemsById)).lists) affectedLists.add(list.id)
+                state.baseByListId = {}
+            }
+            for (const [key, item] of Object.entries(state.itemsById)) {
+                if (!owns(item)) continue
+                if (item.listId) affectedLists.add(item.listId)
+                delete state.itemsById[key]
+            }
+            for (const list of Object.values(state.listsById)) {
+                list.itemIds = list.itemIds.filter((key) => !!state.itemsById[key])
+            }
+            const items = normalizeListEntries(payload.items)
+                .filter((item) => !isLabelItem(item) && !(item.listType === REGISTRY_LIST_TYPE && item.baseKey))
+            // Install registry routing before ordinary rows, regardless of their
+            // wire order. A newly shared list must not accept its old personal copy.
+            for (const item of items) {
+                const routing = listBaseFromRegistryItem(item)
+                if (routing) state.baseByListId[routing.listId] = routing.baseKey
+            }
+            const buckets = new Map()
+            for (const item of items) {
+                if (!isFromAuthoritativeBase(item, state.baseByListId)) continue
+                const key = baseScopedKey(item)
+                state.itemsById[key] = item
+                if (isPlanItem(item)) continue
+                const listId = item.listId || DEFAULT_LIST_ID
+                const bucket = buckets.get(listId) ?? []
+                bucket.push(item)
+                buckets.set(listId, bucket)
+            }
+            for (const [listId, entries] of buckets) {
+                const list = ensureList(state, listId, entries[0].listType || DEFAULT_LIST_TYPE)
+                // Set construction is linear even for thousands of rows. No
+                // per-row Redux dispatch or repeated includes() over the bucket.
+                list.itemIds = [...new Set([...list.itemIds, ...entries.map(baseScopedKey)])]
+            }
+            const declared = new Set(reduceRegistry(Object.values(state.itemsById)).lists.map((list) => list.id))
+            for (const listId of affectedLists) {
+                if (listId === DEFAULT_LIST_ID || declared.has(listId) || state.listsById[listId]?.itemIds.length) continue
+                delete state.listsById[listId]
+                state.listIds = state.listIds.filter((id) => id !== listId)
+                for (const project of Object.values(state.projectsById)) project.listIds = project.listIds.filter((id) => id !== listId)
+                for (const folder of Object.values(state.foldersById)) folder.listIds = folder.listIds.filter((id) => id !== listId)
+            }
+        })
     },
 })
 

@@ -489,7 +489,18 @@ export function createOverviewSection ({
                     rows.length === 0
                         ? h('div', { class: 'plan-week-empty label-sm' }, t('plan.empty.none'))
                         : h('div', { class: 'plan-week-rows' }, ...rows.map((r) => h('div', { class: `plan-week-row${r.done ? ' done' : ''}` },
-                            tablerIcon(r.kind === 'list' ? iconForType(r.listType) : (r.done ? 'square-check' : 'square'), { size: 13 }),
+                            r.kind === 'list'
+                                ? tablerIcon(iconForType(r.listType), { size: 13 })
+                                : h('button', {
+                                    type: 'button',
+                                    class: 'plan-week-check',
+                                    'aria-pressed': r.done ? 'true' : 'false',
+                                    'aria-label': `${t('main.item.toggle')}: ${r.label}`,
+                                    onclick: (event) => {
+                                        event.stopPropagation()
+                                        toggleItemDone(r.item)
+                                    },
+                                }, tablerIcon(r.done ? 'square-check' : 'square', { size: 13 })),
                             h('span', {}, r.label),
                         ))),
                 )

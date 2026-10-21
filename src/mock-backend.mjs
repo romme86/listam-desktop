@@ -12,6 +12,7 @@ import {
     RPC_CREATE_INVITE,
     RPC_GET_KEY,
     RPC_REQUEST_SYNC,
+    RPC_GET_MEMBERS,
     RPC_GET_BOARD_CONFIG,
     RPC_SET_BOARD_CONFIG,
     RPC_EXPORT_DATA,
@@ -117,9 +118,11 @@ export function createMockBackend() {
             { id: 'blk-7', type: 'image', url: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="160" height="70"><rect width="160" height="70" fill="%23378ADD"/><text x="12" y="42" fill="white" font-family="sans-serif" font-size="16">Tokyo</text></svg>', alt: 'Tokyo' },
             { id: 'blk-8', type: 'code', text: 'itinerary --export pdf --days 12', lang: 'sh' },
         ] },
-        { text: 'Book flights', status: 'todo', priority: 'medium', assignee: A, createdBy: A, estimatedHours: 3, estimatedComplexity: 30, valueRate: 4, delayRate: 2 },
-        { text: 'Reserve ryokan', status: 'todo', priority: 'low', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 20 },
-        { text: 'Travel insurance', status: 'in_progress', priority: 'medium', assignee: B, createdBy: B, estimatedHours: 2, estimatedComplexity: 35, inProgressMs: 1 * HOUR, inProgressSince: null },
+        { text: 'Book flights', status: 'todo', priority: 'medium', assignee: A, createdBy: A, dueAt: NOWMS + 3 * DAY, estimatedHours: 3, estimatedComplexity: 30, valueRate: 4, delayRate: 2 },
+        // Low priority and already late: the case the board has to make visible,
+        // since priority alone would bury it.
+        { text: 'Reserve ryokan', status: 'todo', priority: 'low', assignee: B, createdBy: B, dueAt: NOWMS - 2 * DAY, estimatedHours: 2, estimatedComplexity: 20 },
+        { text: 'Travel insurance', status: 'blocked', priority: 'urgent', assignee: B, createdBy: B, dueAt: NOWMS, blockedReason: 'waiting on the consulate appointment', estimatedHours: 2, estimatedComplexity: 35, inProgressMs: 1 * HOUR, inProgressSince: null },
         { text: 'Renew passport', status: 'done', isDone: true, priority: 'high', assignee: A, createdBy: A, completedBy: A, estimatedHours: 4, estimatedComplexity: 50, inProgressMs: 3.9 * HOUR, actualInProgressHours: 3.9, timeliness: 'on_time', valueRate: 8, delayRate: 3, timeOfCompletion: NOWMS - 1 * DAY },
         { text: 'Visa check', status: 'done', isDone: true, priority: 'medium', assignee: B, createdBy: B, completedBy: B, estimatedHours: 2, estimatedComplexity: 25, inProgressMs: 2.8 * HOUR, actualInProgressHours: 2.8, timeliness: 'overtime', valueRate: 5, delayRate: 6, timeOfCompletion: NOWMS - 3 * DAY },
         { text: 'Get JR pass', status: 'done', isDone: true, priority: 'low', assignee: A, createdBy: A, completedBy: A, estimatedHours: 6, estimatedComplexity: 70, inProgressMs: 3.5 * HOUR, actualInProgressHours: 3.5, timeliness: 'undertime', valueRate: 9, delayRate: 2, timeOfCompletion: NOWMS - 3 * DAY },
@@ -240,10 +243,23 @@ export function createMockBackend() {
         emit({ type: 'sync-list', items, raw: JSON.stringify(items) })
     }
 
-    function emitBoardConfig() {
-        emit({ type: 'message', raw: '', payload: { type: 'board-config', config: boardConfig, canAdminister: true } })
+    const sharedBoardConfigs = new Map()
+    const mockBaseKey = (payload) => payload?.listId === DEFAULT_LIST ? null : payload?.baseKey || null
+    function emitBoardConfig(baseKey = null) {
+        const config = baseKey ? sharedBoardConfigs.get(baseKey) || normalizeBoardConfig(null) : boardConfig
+        emit({ type: 'message', raw: '', payload: { type: 'board-config', config, canAdminister: true, ...(baseKey ? { baseKey } : {}) } })
+    }
+    function emitMembers(baseKey = null) {
+        emit({ type: 'message', raw: '', payload: { type: 'membership-roster', ...(baseKey ? { baseKey } : {}), roster: {
+            canAdminister: true, currentEpoch: 1, localWriterKey: 'a1'.repeat(32),
+            writers: [
+                { writerKey: 'a1'.repeat(32), isOwner: true, isSelf: true },
+                { writerKey: 'b2'.repeat(32), isOwner: false, isSelf: false },
+            ],
+        } } })
     }
 
+    const invitationSets = new Map()
     const client = {
         async send(command, payload) {
             if (command === RPC_ADD) {
@@ -312,7 +328,14 @@ export function createMockBackend() {
                 }
                 return JSON.stringify({ ok: true })
             } else if (command === RPC_CREATE_INVITE) {
-                emit(mockInviteEvent({ mint: true }))
+                const scope = payload?.baseKey || 'project'
+                const current = (invitationSets.get(scope) || []).filter((entry) => entry.expiresAt > Date.now())
+                const created = payload?.listOnly ? [] : Array.from({ length: payload?.count || 1 }, () => ({
+                    key: `mockinvite${++nextId}`.padEnd(64, 'x'), expiresAt: Date.now() + (payload?.ttlMs || MOCK_INVITE_TTL_MS), singleUse: true,
+                }))
+                invitationSets.set(scope, [...current, ...created])
+                if (!payload?.baseKey && created.length) emit({ type: 'invite-key', ...created.at(-1), liveInvites: current.length + created.length, maxInvites: 32 })
+                return JSON.stringify({ ok: true, invites: payload?.listOnly ? current : created, liveInvites: current.length + created.length, maxInvites: 32 })
             } else if (command === RPC_GET_KEY) {
                 emit(mockInviteEvent())
             } else if (command === RPC_CANCEL_JOIN) {
@@ -403,11 +426,16 @@ export function createMockBackend() {
                 return JSON.stringify({ ok: true, sequence: 1, buckets: 3, items: items.length, readiness })
             } else if (command === RPC_REQUEST_SYNC) {
                 syncList()
+            } else if (command === RPC_GET_MEMBERS) {
+                emitMembers(mockBaseKey(payload))
             } else if (command === RPC_GET_BOARD_CONFIG) {
-                emitBoardConfig()
+                emitBoardConfig(mockBaseKey(payload))
             } else if (command === RPC_SET_BOARD_CONFIG) {
-                boardConfig = normalizeBoardConfig({ ...boardConfig, ...(payload?.config || {}) })
-                emitBoardConfig()
+                const baseKey = mockBaseKey(payload)
+                if (baseKey) sharedBoardConfigs.set(baseKey, normalizeBoardConfig({ ...sharedBoardConfigs.get(baseKey), ...(payload?.config || {}) }))
+                else boardConfig = normalizeBoardConfig({ ...boardConfig, ...(payload?.config || {}) })
+                emitBoardConfig(baseKey)
+                return JSON.stringify({ ok: true })
             } else if (command === RPC_JOIN_KEY) {
                 emit({ type: 'message', payload: { type: 'join-phase', phase: 'pairing' }, raw: '' })
                 setTimeout(() => emit({ type: 'message', payload: { type: 'join-error', message: 'Mock backend cannot join peers' }, raw: '' }), 800)

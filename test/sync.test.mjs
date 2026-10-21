@@ -7,13 +7,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import readline from 'node:readline'
 import createTestnet from 'hyperdht/testnet.js'
 import { isLabelItem } from '@listam/domain/labels'
+import { reduceRegistry } from '@listam/domain/list-registry'
+import { buildItemPlanEntry } from '@listam/domain/plan'
+import { deleteListMeta } from '../src/registry.mjs'
+import { prepareMutationIntent } from '../../listam-packages/packages/backend/lib/mutation-intent.mjs'
+import { createOutboxEntry, serialize } from '../../listam-packages/packages/backend/lib/outbox.mjs'
 
 // The backend now self-publishes synced presence/heartbeat meta-items (text: '')
 // alongside real list content; the UI hides them via isLabelItem, so the visible
@@ -54,6 +59,37 @@ const JOIN_TIMEOUT_MS = 120_000
 const MULTI_BACKEND_SKIP = process.env.CI && process.env.LISTAM_SYNC_LOCAL !== '1'
     ? 'two backends on one box do not test the network; run listam-tools/cross-device/matrix.mjs'
     : false
+
+test('overview plans sync additions, date moves and clears in both directions', { timeout: 180_000, skip: MULTI_BACKEND_SKIP }, async (t) => {
+    const testnet = await createTestnet(3)
+    const dirs = [mkdtempSync(join(tmpdir(), 'listam-plan-host-')), mkdtempSync(join(tmpdir(), 'listam-plan-guest-'))]
+    const host = new Driver(dirs[0], testnet.bootstrap)
+    const guest = new Driver(dirs[1], testnet.bootstrap)
+    t.after(async () => {
+        await host.stop()
+        await guest.stop()
+        await testnet.destroy()
+        for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    })
+    await host.ready()
+    await guest.ready()
+    await host.request('add', { text: 'Overview round trip', listType: 'todo' })
+    const seeded = await host.waitFor((d) => d.items.some((i) => i.text === 'Overview round trip'))
+    const source = seeded.items.find((i) => i.text === 'Overview round trip')
+    await guest.request('join', { invite: (await host.request('invite')).inviteKey })
+    await guest.waitFor((d) => d.joined, { peer: host })
+    const plan = buildItemPlanEntry({ listId: source.listId, itemId: source.id, plannedFor: '2026-10-21', updatedAt: Date.now() })
+    await host.request('update', { item: plan })
+    await guest.waitFor((d) => d.items.some((i) => i.id === plan.id && i.plannedFor === plan.plannedFor), { peer: host })
+    const moved = { ...plan, plannedFor: '2026-10-22', updatedAt: Date.now() + 1 }
+    await guest.request('update', { item: moved })
+    await host.waitFor((d) => d.items.some((i) => i.id === plan.id && i.plannedFor === moved.plannedFor), { peer: guest })
+    const cleared = { ...moved, plannedFor: '', updatedAt: Date.now() + 2 }
+    await guest.request('update', { item: cleared })
+    await host.waitFor((d) => d.items.some((i) => i.id === plan.id && i.plannedFor === ''), { peer: guest })
+    await host.request('update', { item: { ...plan, updatedAt: Date.now() + 3 } })
+    await guest.waitFor((d) => d.items.some((i) => i.id === plan.id && i.plannedFor === plan.plannedFor), { peer: host })
+})
 
 class Driver {
     constructor(storageDir, bootstrap) {
@@ -296,7 +332,7 @@ test('desktop contract: share one list to its own base, peer joins and co-edits'
     // personal copies were tombstoned. (The shared base also carries its own
     // self-describing registry meta-item — listType 'registry' — which syncs too;
     // filter it out to assert on the actual list items.)
-    const sharedContent = (items) => items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry')
+    const sharedContent = (items) => contentItems(items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry')
     const afterShare = await host.waitFor(
         (d) => sharedContent(d.items).length >= 2 &&
                d.items.filter((i) => i.listId === 'groceries' && !i.baseKey).length === 0,
@@ -383,7 +419,11 @@ test('desktop contract: explicit catch-up restores a shared list after backend r
     // that attaches late would. RPC_REQUEST_SYNC alone must fully hydrate it.
     await restarted.request('clear-view')
     await restarted.request('sync')
-    const caughtUp = await restarted.request('dump')
+    // Startup opens independent shared bases in the background. One sync
+    // request must hydrate the renderer as those local bases become ready.
+    const caughtUp = await restarted.waitFor((dump) => (
+        dump.items.filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2').length === 2
+    ), { timeoutMs: 30_000, intervalMs: 50 })
     const restored = caughtUp.items
         .filter((item) => item.baseKey === shared.baseKey && item.listId === 'spesa-2')
         .map((item) => item.text)
@@ -393,9 +433,9 @@ test('desktop contract: explicit catch-up restores a shared list after backend r
     const sharedSnapshot = caughtUp.syncSnapshots.find((snapshot) => (
         snapshot && !Array.isArray(snapshot) && snapshot.baseKey === shared.baseKey
     ))
-    assert.equal(sharedSnapshot?.listId, 'spesa-2')
-    assert.equal(sharedSnapshot?.listType, 'shopping')
-    assert.deepEqual(sharedSnapshot.list.map((item) => item.text).sort(), ['Bread', 'Milk'])
+    assert.equal(sharedSnapshot?.type, 'projection-snapshot')
+    assert.equal(sharedSnapshot?.role, 'shared')
+    assert.deepEqual(sharedSnapshot.items.filter((item) => item.listId === 'spesa-2').map((item) => item.text).sort(), ['Bread', 'Milk'])
 })
 
 // Cross-device auto-join: your TWO devices share one personal base (B joins A's
@@ -439,11 +479,11 @@ test('desktop contract: a paired device auto-joins your shared list (no invite)'
     // With no invite for the SHARED list, B auto-opens it from the propagated
     // creds and replicates its items (tagged with the shared base key).
     const bAuto = await b.waitFor(
-        (d) => d.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').length >= 2,
+        (d) => contentItems(d.items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry').length >= 2,
         { timeoutMs: 90_000 },
     )
     assert.deepEqual(
-        bAuto.items.filter((i) => i.baseKey === baseKey && i.listType !== 'registry').map((i) => i.text).sort(),
+        contentItems(bAuto.items).filter((i) => i.baseKey === baseKey && i.listType !== 'registry').map((i) => i.text).sort(),
         ['Bread', 'Milk'],
         'paired device auto-opened the shared list without an invite',
     )
@@ -457,3 +497,67 @@ test('desktop contract: a paired device auto-joins your shared list (no invite)'
         assert.ok(aConverged.items.some((i) => i.baseKey === baseKey && i.text === 'Eggs'), 'A converged on the auto-joined device co-edit')
     }
 })
+
+
+for (const restored of [false, true]) {
+    test(`shared-list deletion ${restored ? 'recovers a legacy journal after restart' : 'finishes before closing its base'}`, { timeout: 90000, skip: MULTI_BACKEND_SKIP }, async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'listam-shared-delete-'))
+        const net = await createTestnet(3)
+        mkdirSync(join(directory, 'owner'))
+        mkdirSync(join(directory, 'guest'))
+        const owner = new Driver(join(directory, 'owner'), net.bootstrap)
+        let guest = new Driver(join(directory, 'guest'), net.bootstrap)
+        try {
+            await Promise.all([owner.ready(), guest.ready()])
+            await guest.request('add', { text: 'Keep my private item', listId: 'default', listType: 'todo' })
+            for (let i = 0; i < 3; i++) await owner.request('add', { text: `Deletion fixture ${i}`, listId: 'default', listType: 'shopping' })
+            const share = await owner.request('share-list', { listId: 'default' })
+            assert.equal(share.ok, true)
+            assert.equal((await guest.request('join-list', { invite: share.invite })).ok, true)
+            const before = await guest.waitFor((state) => state.items.filter((item) => item.baseKey === share.baseKey && item.listType === 'shopping').length === 3
+                && reduceRegistry(state.items.filter((item) => !item.baseKey)).lists.some((list) => list.baseKey === share.baseKey))
+            const registry = reduceRegistry(before.items.filter((item) => !item.baseKey))
+            const list = registry.lists.find((list) => list.baseKey === share.baseKey)
+            assert.ok(list)
+            const rows = before.items.filter((item) => item.listId === list.id)
+            const meta = deleteListMeta(registry, list.id, Date.now())
+            const journal = join(directory, 'guest', 'lista', 'outbox.json')
+            if (restored) {
+                // Old desktop versions dropped this field and closed the base
+                // before their separately accepted item deletions could land.
+                delete meta.regBaseKey
+                await guest.request('update', { item: meta })
+                await guest.waitFor((state) => state.closedBases.includes(share.baseKey))
+                await guest.stop()
+                assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8')).entries, [])
+                writeFileSync(journal, serialize(rows.map((item, i) => createOutboxEntry({
+                    id: `legacy-delete-${i}`, command: 'DELETE', listId: list.id, baseKey: share.baseKey, epoch: 1,
+                    payload: prepareMutationIntent('DELETE', { item }, { id: `legacy-item-${i}` }), now: Date.now(),
+                }))), { mode: 0o600 })
+                guest = new Driver(join(directory, 'guest'), net.bootstrap)
+                await guest.ready()
+            } else {
+                // Match the renderer's concurrent descriptor + row deletions.
+                await Promise.all([guest.request('update', { item: meta }), ...rows.map((item) => guest.request('delete', { item }))])
+            }
+            const after = await guest.waitFor((state) => state.closedBases.includes(share.baseKey)
+                && JSON.parse(readFileSync(journal, 'utf8')).entries.length === 0, { timeoutMs: 30000, intervalMs: 100 })
+            assert.deepEqual(after.writeFailures, [])
+            assert.ok(after.items.some((item) => item.text === 'Keep my private item'))
+            assert.equal(after.items.some((item) => item.listId === list.id), false)
+            const added = await guest.request('add', { text: 'Saving still works', listId: 'default', listType: 'todo' })
+            assert.equal(added.ok, true)
+            await guest.waitFor((state) => state.items.some((item) => item.text === 'Saving still works'))
+            await guest.stop()
+            guest = new Driver(join(directory, 'guest'), net.bootstrap)
+            await guest.ready()
+            const restarted = await guest.waitFor((state) => state.items.some((item) => item.text === 'Saving still works'))
+            assert.deepEqual(restarted.writeFailures, [])
+            assert.equal(restarted.items.some((item) => item.listId === list.id), false)
+        } finally {
+            await Promise.all([owner.stop(), guest.stop()])
+            await net.destroy()
+            rmSync(directory, { recursive: true, force: true })
+        }
+    })
+}

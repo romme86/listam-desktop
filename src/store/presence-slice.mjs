@@ -3,8 +3,15 @@ import { isPresenceItem } from '@listam/domain'
 
 const presenceSlice = createSlice({
     name: 'presence',
-    initialState: { itemsById: {} },
+    initialState: { itemsById: {}, liveItemsById: {} },
     reducers: {
+        livePresenceApplied(state, action) {
+            const item = action.payload
+            if (!isPresenceItem(item) || !item.id) return
+            state.liveItemsById ??= {}
+            const previous = state.liveItemsById[item.id]
+            if (!previous || Number(item.updatedAt) > Number(previous.updatedAt)) state.liveItemsById[item.id] = item
+        },
         presenceApplied(state, action) {
             for (const item of action.payload ?? []) {
                 if (isPresenceItem(item) && item.id) state.itemsById[item.id] = item
@@ -34,8 +41,19 @@ const presenceSlice = createSlice({
         presenceItemRemoved(state, action) {
             const item = action.payload
             if (item?.id) delete state.itemsById[item.id]
+            if (item?.id && state.liveItemsById) delete state.liveItemsById[item.id]
         },
-        presenceCleared(state) { state.itemsById = {} },
+        presenceCleared(state) { state.itemsById = {}; state.liveItemsById = {} },
+    },
+    extraReducers: (builder) => {
+        builder.addCase('sync/projectionSnapshotReceived', (state, { payload }) => {
+            for (const [key, item] of Object.entries(state.itemsById)) {
+                if (payload.role === 'personal' ? !item.baseKey : item.baseKey === payload.baseKey) delete state.itemsById[key]
+            }
+            for (const item of payload.items) {
+                if (isPresenceItem(item) && item.id) state.itemsById[item.id] = item
+            }
+        })
     },
 })
 

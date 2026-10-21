@@ -215,3 +215,13 @@ test('restoring a caret on a type that stopped supporting selection does not thr
     assert.doesNotThrow(() => dom.restore(fakeHost({ fields: [hostile] }), snapshot))
     assert.equal(hostile.focusCount, 1, 'focus must survive a failed caret restore')
 })
+
+test('a named switch keeps keyboard focus after new controls are inserted by sync', () => {
+    const dom = createDialogDomState()
+    dom.commit('list-settings')
+    const button = Object.assign(fakeField({ tagName: 'BUTTON' }), { id: 'list-rigor-switch' })
+    const snapshot = dom.capture(fakeHost({ fields: [button], focused: button }), 'list-settings')
+    const rebuilt = Object.assign(fakeField({ tagName: 'BUTTON' }), { id: 'list-rigor-switch' })
+    dom.restore(fakeHost({ fields: [fakeField(), rebuilt] }), snapshot)
+    assert.equal(rebuilt.focusCount, 1)
+})
