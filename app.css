@@ -1276,9 +1276,16 @@ kbd {
 .ticket-extras { display: none; flex-wrap: wrap; gap: 0.5rem; align-items: center; color: var(--ink-faint); }
 .ticket-extras .value-badge { font-size: inherit; color: inherit; }
 .ticket-extras .value-badge svg { color: inherit; }
-.ticket-card:hover .ticket-extras,
 .ticket-card:focus-visible .ticket-extras,
 .ticket-card.selected .ticket-extras { display: flex; }
+/* Hover-gated, because the web build of this UI runs on phones: a touch
+   device has no hover to reveal anything, so the extras simply stay off the
+   card there — the same call the native mobile card makes, with the numbers
+   one tap away in the detail. The guard also stops iOS's sticky :hover from
+   revealing them after a tap and shifting the column underneath. */
+@media (hover: hover) {
+    .ticket-card:hover .ticket-extras { display: flex; }
+}
 .ticket-meta { display: inline-flex; align-items: center; gap: 0.25rem; font-family: var(--font-mono); }
 
 /* Priority is a ramp of WEIGHT, not of hue: filled for urgent, outlined for
@@ -2084,6 +2091,13 @@ html.board-drawer-open { overflow: hidden; }
     transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .ticket-card:hover .ticket-flag, .ticket-card:focus-within .ticket-flag { opacity: 0.7; }
+/* On touch the flag can never be revealed, so it was an invisible 18px
+   control you could still hit by accident. Show it at rest and give it a
+   44px hit area, drawn by a pseudo-element so the card's layout is unchanged. */
+@media (hover: none) {
+    .ticket-card .ticket-flag { opacity: 0.55; }
+    .ticket-card .ticket-flag::after { content: ''; position: absolute; inset: -13px; }
+}
 .ticket-flag:hover { opacity: 1; transform: scale(1.12); }
 .ticket-flag.flagged { opacity: 1; color: var(--on-signal); background: var(--signal); }
 .ticket-title { padding-right: 1.25rem; }
