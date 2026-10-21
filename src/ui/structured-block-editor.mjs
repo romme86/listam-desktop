@@ -102,7 +102,7 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
                 }
                 if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
-                    if (!hasText(row.text)) {
+                    if (!checklist && !hasText(row.text)) {
                         draft.items.splice(index, 1)
                         exitList(index)
                         return
@@ -116,7 +116,7 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
                     const serialize = (part) => { const box = document.createElement('div'); box.append(part.cloneContents()); return htmlToMarkdown(box.innerHTML) }
                     row.text = serialize(left)
                     draft.items.splice(index + 1, 0, { text: serialize(right), ...(checklist ? { done: false } : {}) })
-                    setFocus({ key: `item-${index + 1}`, offset: 0 })
+                    setFocus({ key: `item-${index + 1}`, offset: 0, move: true })
                     redraw()
                 } else if (event.key === 'Backspace' && !hasText(row.text)) {
                     event.preventDefault()
@@ -169,11 +169,13 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
     queueMicrotask(() => {
         if (!wrap.isConnected) return
         const target = fields.get(focus?.key) || fields.values().next().value
-        if (!target || wrap.contains(document.activeElement)) return
+        // Enter's explicit next-row target wins over surface focus restoration.
+        if (!target || (wrap.contains(document.activeElement) && !focus?.move)) return
         target.focus()
         const offset = focus?.offset ?? (target.isContentEditable ? target.textContent.length : target.value.length)
         if (target.isContentEditable) rich.setOffset(target, offset)
         else target.setSelectionRange(offset, offset)
+        if (focus?.move) setFocus({ ...focus, move: false })
     })
     return wrap
 }

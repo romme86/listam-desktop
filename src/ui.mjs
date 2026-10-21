@@ -4254,13 +4254,16 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             document.execCommand('insertText', false, text)
         })
         ed.addEventListener('blur', () => queueMicrotask(() => {
+            // A shorthand replaces this editor with another block type. The
+            // detached prose editor must not commit/delete the new empty list.
+            if (!ed.isConnected) return
             const live = root.querySelector('.block-editor')
             if (live && live !== ed && main.ownerDocument.activeElement === live) return
             if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
         }))
 
         queueMicrotask(() => {
-            if (!ed.isConnected || main.ownerDocument.activeElement === ed) return
+            if (!ed.isConnected || (main.ownerDocument.activeElement === ed && ui.blockCaret != null)) return
             try { document.execCommand('styleWithCSS', false, false) } catch { /* not supported */ }
             try { document.execCommand('defaultParagraphSeparator', false, 'p') } catch { /* not supported */ }
             ed.focus()
@@ -4273,6 +4276,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 const sel = window.getSelection()
                 sel.removeAllRanges()
                 sel.addRange(r)
+                // The write acknowledgement may rebuild this field before the
+                // next key. Preserve the initial end position, too.
+                remember()
             } catch { /* ignore */ }
         })
         return h('div', { class: 'block-editor-wrap' }, ed, menu)
