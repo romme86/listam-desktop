@@ -16,6 +16,7 @@
 import { validateRigorDraft } from '../ticket.mjs'
 import { normalizeBoardConfig } from '@listam/domain/board'
 import { validateValueDraft } from '@listam/domain/value'
+import { seedTicketTasks } from './ticket-body.mjs'
 
 // The one field an empty panel does not start blank. Also the marker for
 // "nothing was touched": a complexity still sitting on the default means the
@@ -57,14 +58,16 @@ export function ticketDraftChecklist (draft) {
 }
 
 /** The panel's fields as ticket fields. `text` is the board card's title. */
-export function ticketDraftFields (draft, valueOn) {
+export function ticketDraftFields (draft, valueOn, blocks = []) {
     const description = String(draft?.description ?? '').trim()
     const hours = Number(draft?.hours)
     const complexity = Number(draft?.complexity)
+    const checklist = ticketDraftChecklist(draft)
     const fields = {
         text: description,
         description,
-        checklist: ticketDraftChecklist(draft),
+        checklist,
+        blocks: seedTicketTasks(checklist, blocks),
         estimatedHours: Number.isFinite(hours) && hours > 0 ? hours : 0,
         estimatedComplexity: Number.isFinite(complexity) ? complexity : TICKET_DRAFT_COMPLEXITY,
     }

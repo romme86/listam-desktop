@@ -112,6 +112,8 @@ import { renderPlanCalendar } from './ui/plan-calendar.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
 import { isEmptyBlock, cleanBlockDraft, renderStructuredBlockEditor } from './ui/structured-block-editor.mjs'
+import { foldTicketTasks, seedTicketTasks, ticketBodyFields } from './ui/ticket-body.mjs'
+import { TICKET_TASKS_BLOCK_ID } from '@listam/domain/board'
 import {
     surfaceForType,
     iconForType,
@@ -457,10 +459,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
     const draftFor = (block) => blockToText(block)
-    // Rigor-task ids follow the same session-unique scheme as block ids so a
-    // task added post-creation never collides with a creation-time `task-N-…` id.
-    let taskIdSeq = 0
-    const nextTaskId = () => `task-${now()}-${taskIdSeq++}`
     // Device-local drawer widths (persisted like theme; never replicated).
     const drawerWidths = {
         insp: Number(localStorage.getItem('listam.inspectorW')) || 0,
@@ -1305,29 +1303,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             markLocalId(item.id)
             send(RPC_UPDATE, { item: payload })
         },
-        toggleTicketTask(item, taskId) {
-            const checklist = (Array.isArray(item.checklist) ? item.checklist : [])
-                .map((task) => (task.id === taskId ? { ...task, done: !task.done } : task))
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
-        },
-        // Append a task to the rigor checklist after the ticket already exists
-        // (creation seeds it; this lets the checklist grow as work is scoped).
-        addTicketTask(item, text) {
-            const nv = (text || '').trim()
-            if (!nv) return false
-            const existing = Array.isArray(item.checklist) ? item.checklist : []
-            const checklist = [...existing, { id: nextTaskId(), text: nv, done: false }]
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
-            return true
-        },
-        removeTicketTask(item, taskId) {
-            const checklist = (Array.isArray(item.checklist) ? item.checklist : [])
-                .filter((task) => task.id !== taskId)
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, checklist, updatedAt: now() } })
-        },
         // Card click -> right drawer that slides in over the right half of the
         // screen (the board stays full-width and visible underneath).
         openTicket(id) {
@@ -1484,7 +1459,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // field is cleared in the same LWW write so it never folds twice.
         foldLegacyText(item, field) {
             const text = typeof item[field] === 'string' ? item[field].trim() : ''
-            if (!text) return
             // Keep the raw blocks array (not normalizeBlocks): merely opening
             // an item must never strip block types a newer peer wrote that
             // this build doesn't know yet.
@@ -1492,8 +1466,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // Idempotence: when the text already sits in a block verbatim
             // (e.g. moveItem re-seeded the description from the body for the
             // rigor gate), just clear the field instead of doubling content.
-            const dup = blocks.some((b) => typeof b.text === 'string' && b.text.trim() === text)
-            const next = dup ? blocks : [{ ...createBlock('markdown', nextBlockId()), ...blockFromText('markdown', text) }, ...blocks]
+            const next = field === 'description' ? foldTicketTasks(item, blocks) : [...blocks]
+            const dup = (field === 'description' && text === item.text?.trim())
+                || next.some((b) => typeof b.text === 'string' && b.text.trim() === text)
+            if (text && !dup) {
+                // Creation tasks stay at the start of the body.
+                const at = next[0]?.id === TICKET_TASKS_BLOCK_ID ? 1 : 0
+                next.splice(at, 0, { ...createBlock('markdown', nextBlockId()), ...blockFromText('markdown', text) })
+            }
+            if (!text && JSON.stringify(next) === JSON.stringify(blocks)) return
             markLocalId(item.id)
             send(RPC_UPDATE, { item: { ...item, [field]: '', blocks: next, updatedAt: now() } })
         },
@@ -1513,7 +1494,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 const latest = store.getState().items.find((entry) => entry.id === item.id) || item
                 pending.updatedAt = Math.max(now(), (previous?.updatedAt || 0) + 1)
                 markLocalId(item.id)
-                return send(RPC_UPDATE, { item: { ...latest, blocks: pending.blocks, updatedAt: pending.updatedAt } })
+                return send(RPC_UPDATE, { item: { ...latest, ...(isBoardType(latest.listType) ? ticketBodyFields(latest, pending.blocks) : { blocks: pending.blocks }), updatedAt: pending.updatedAt } })
             }).then((raw) => {
                 if (pendingBlockWrites.get(item.id) !== pending) return
                 if (parseReply(raw)?.ok === true) pending.acknowledged = true
@@ -2095,7 +2076,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const existing = store.getState().items.find((it) => it && it.id === draftId)
         if (!existing) return false
         const at = now()
-        let next = { ...existing, ...ticketDraftFields(draft, valueOn), updatedAt: at }
+        let next = { ...existing, ...ticketDraftFields(draft, valueOn, existing.blocks), updatedAt: at }
         if (commit) next = commitDraftTicket(next, at)
         markLocalId(draftId)
         send(RPC_UPDATE, { item: next })
@@ -3392,7 +3373,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (pending?.acknowledged && (latest.updatedAt >= pending.updatedAt || JSON.stringify(latest.blocks) === JSON.stringify(pending.blocks))) {
             pendingBlockWrites.delete(item.id)
         }
-        return normalizeBlocks(pendingBlockWrites.get(item.id)?.blocks || latest.blocks)
+        const pendingBlocks = pendingBlockWrites.get(item.id)?.blocks
+        return normalizeBlocks(pendingBlocks || (isBoardType(latest.listType) ? foldTicketTasks(latest) : latest.blocks))
     }
 
     // Keep structured payloads intact while their fields are being edited.
@@ -3770,66 +3752,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         } else if (b.running) {
             chips.push(h('span', { class: 'ticket-timer' }, h('span', { class: 'timer-dot' }), `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
         }
-        // No summary meta strip: estimate, complexity and time in progress are
-        // all rows in the property rail two inches to the right. Saying them
-        // twice on one screen is most of what made this drawer feel busy.
-        //
-        // The rigor task checklist is a top-level field (distinct from body
-        // blocks); surface it so the done-gate stays toggleable from the detail
-        // — but only once it HAS tasks. An empty "Tasks" heading over an empty
-        // add bar was a second, competing place to write on every new ticket.
-        const checklist = Array.isArray(item.checklist) ? item.checklist : []
         return h('div', { class: `ticket-summary${full ? ' full' : ''}` },
             chips.length ? h('div', { class: 'ticket-summary-chips' }, ...chips) : null,
-            // The free-text description now lives in the block body: it is
-            // folded into the first markdown block on open (foldLegacyText),
-            // so the summary keeps only the structured bits.
-            checklist.length ? h('div', { class: 'ticket-summary-tasks' },
-                h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
-                h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
-                    h('label', { class: 'detail-task-main' },
-                        h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
-                        h('span', {}, task.text),
-                    ),
-                    h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
-                ))),
-                renderTaskAddBar(item, t),
-            ) : null,
-        )
-    }
-
-    // Inline "add task" field for the rigor checklist. Mirrors the grocery
-    // add-bar's survive-the-rerender contract: the typed draft and focus are
-    // restored from the prior same-id input so a background re-render (peer
-    // update, the task we just added echoing back) never eats what's half-typed.
-    function renderTaskAddBar(item, t) {
-        const prev = root.querySelector('#ticket-task-add')
-        const input = h('input', {
-            class: 'input detail-task-add',
-            id: 'ticket-task-add',
-            placeholder: t('ticket.detail.addTask'),
-            onkeydown: (event) => {
-                if (event.key === 'Escape') {
-                    // Keep Escape local — the global handler would otherwise close
-                    // the whole drawer mid-entry.
-                    event.stopPropagation()
-                    input.blur()
-                    return
-                }
-                if (event.key !== 'Enter') return
-                event.preventDefault()
-                const text = input.value
-                input.value = ''
-                actions.addTicketTask(item, text)
-            },
-        })
-        if (prev) {
-            input.value = prev.value
-            if (root.ownerDocument.activeElement === prev) queueMicrotask(() => input.focus())
-        }
-        return h('div', { class: 'detail-task-addrow' },
-            tablerIcon('plus', { size: 14 }),
-            input,
         )
     }
 
@@ -4682,7 +4606,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
                 ),
             ),
-            // Tasks and body occupy the writing column on the left, with the
+            // The body occupies the writing column on the left, with the
             // property rail on the right, as in the full view.
             // DOM order summary→body→rail so the narrow-window fallback stacks
             // with the prominent content first; the grid places by area.
@@ -6235,7 +6159,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     item: ui.dialog.moveFrom,
                     targetListId: ui.dialog.targetListId,
                     targetListType: BOARD_WRITE_TYPE,
-                    fields: { status: 'todo', description: desc, checklist, estimatedHours: hours, estimatedComplexity: complexity, ...valueFields },
+                    fields: { status: 'todo', description: desc, checklist, blocks: seedTicketTasks(checklist, ui.dialog.moveFrom.blocks), estimatedHours: hours, estimatedComplexity: complexity, ...valueFields },
                 })
                 closeDialog()
             }
