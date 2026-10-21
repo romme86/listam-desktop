@@ -25,6 +25,11 @@ log is kept at `installer/dist/stage-<channel>.jsonl`.
 
 Steps performed:
 
+Before staging, boots the real backend worker under Pear/Bare with temporary
+storage and verifies an acknowledged write reaches the client projection. A
+failure blocks publishing. Run this check separately with `npm run test:pear`;
+`node test/pear-boot/run.mjs /path/to/dumped-app` also checks a release payload.
+
 1. `pear stage <channel>` of the app dir (capturing the `pear://` link).
    The ignore list excludes `.git`, `test/`, `design-guide/`, `installer/`
    and the secrets file — note that a custom ignore list **replaces** Pear's

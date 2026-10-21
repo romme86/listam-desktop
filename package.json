@@ -1,6 +1,6 @@
 {
   "name": "listam-desktop",
-  "version": "0.23.3",
+  "version": "0.23.6",
   "private": true,
   "type": "module",
   "main": "index.html",
@@ -30,6 +30,7 @@
   "scripts": {
     "dev": "pear run --dev .",
     "test": "node --test --test-force-exit --test-concurrency=1 test/*.test.mjs",
+    "test:pear": "node test/pear-boot/run.mjs",
     "lint": "eslint .",
     "ci": "npm run lint && npm run test"
   },

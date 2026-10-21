@@ -58,6 +58,13 @@ VERSION="$(node -p "require('$APP_DIR/package.json').version")"
 mkdir -p "$BUILD"
 
 # -- stage the app drive ------------------------------------------------------
+# Node tests do not catch syntax/import incompatibilities in the Bare worker.
+# Fail before publishing if the actual desktop backend cannot boot and write.
+if [ "$SKIP_STAGE" -eq 0 ]; then
+  echo "== checking backend startup in the Pear runtime"
+  PEAR_BIN="$PEAR" node "$APP_DIR/test/pear-boot/run.mjs"
+fi
+
 STAGE_LOG="$DIST/stage-$CHANNEL.jsonl"
 if [ "$SKIP_STAGE" -eq 1 ]; then
   echo "== skipping stage, reading link from a dry-run"

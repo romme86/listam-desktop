@@ -111,6 +111,7 @@ import { createOverviewSection } from './ui/overview.mjs'
 import { renderPlanCalendar } from './ui/plan-calendar.mjs'
 import { createDialogDomState } from './ui/dialog-dom-state.mjs'
 import { createSurfaceDomState } from './ui/surface-dom-state.mjs'
+import { isEmptyBlock, cleanBlockDraft, renderStructuredBlockEditor } from './ui/structured-block-editor.mjs'
 import {
     surfaceForType,
     iconForType,
@@ -157,7 +158,6 @@ import {
     blockShorthand,
     slashQuery,
     splitAtCaret,
-    lineAtCaret,
     selectWriterStats,
     validateRigorDraft,
     buildStatusChange,
@@ -426,6 +426,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // blockTableFocus remembers which cell to (re)focus across re-renders.
         blockTableDraft: null,
         blockTableFocus: null,
+        blockStructuredDraft: null,
+        blockFieldFocus: null,
         blockMenu: null,
         blockDrag: null,
         boardDrag: null,
@@ -454,13 +456,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
-    // The draft text a block opens its editor with. A fresh checklist
-    // serializes to "[ ]" — blockToText trims each line's trailing space — so
-    // without this the first thing typed lands flush against the bracket.
-    const draftFor = (block) => {
-        const text = blockToText(block)
-        return block && block.type === 'checklist' && /\[[ xX]\]$/.test(text) ? `${text} ` : text
-    }
+    const draftFor = (block) => blockToText(block)
     // Rigor-task ids follow the same session-unique scheme as block ids so a
     // task added post-creation never collides with a creation-time `task-N-…` id.
     let taskIdSeq = 0
@@ -774,7 +770,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function assertDeviceName(name) {
         const key = selfWriterKey()
         if (!key) return
-        const signature = `${key} ${name}`
+        const signature = `${key}\0${name}`
         if (assertedPeerLabel === signature) return
         assertedPeerLabel = signature
         const synced = reducePeerLabels(store.getState().items).get(key) ?? ''
@@ -1368,7 +1364,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.ticketDocId = null
             ui.blockEditingId = null
             ui.blockDraft = ''
-            seedTableDraft(null)
+            seedBlockDraft(null)
             ui.blockMenu = null
             renderAll()
         },
@@ -1392,7 +1388,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 // committed; just drop the stale edit/menu state.
                 ui.blockEditingId = null
                 ui.blockDraft = ''
-                seedTableDraft(null)
+                seedBlockDraft(null)
                 ui.blockMenu = null
             }
             ui.inspectorItemId = id
@@ -1406,7 +1402,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.inspectorItemId = null
             ui.blockEditingId = null
             ui.blockDraft = ''
-            seedTableDraft(null)
+            seedBlockDraft(null)
             ui.blockMenu = null
             renderAll()
         },
@@ -1442,7 +1438,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.activeNoteId = id
             ui.blockEditingId = null
             ui.blockDraft = ''
-            seedTableDraft(null)
+            seedBlockDraft(null)
             ui.blockMenu = null
             renderAll()
             // editableText restores focus across a re-render, not on first entry
@@ -1456,7 +1452,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 // committed; just drop the stale edit/menu state.
                 ui.blockEditingId = null
                 ui.blockDraft = ''
-                seedTableDraft(null)
+                seedBlockDraft(null)
                 ui.blockMenu = null
             }
             ui.activeNoteId = id
@@ -1502,13 +1498,28 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             send(RPC_UPDATE, { item: { ...item, [field]: '', blocks: next, updatedAt: now() } })
         },
         commitBlocks(item, blocks) {
-            const current = normalizeBlocks(item.blocks)
-            if (JSON.stringify(current) === JSON.stringify(blocks)) {
+            if (JSON.stringify(blocksFor(item)) === JSON.stringify(blocks)) {
                 renderAll()
                 return
             }
-            markLocalId(item.id)
-            send(RPC_UPDATE, { item: { ...item, blocks, updatedAt: now() } })
+            // Keep the most recent body visible until its write is projected.
+            // Serialize writes per item so clearing the next block immediately
+            // cannot rebuild the body from an older backend snapshot.
+            const previous = pendingBlockWrites.get(item.id)
+            const pending = { blocks: JSON.parse(JSON.stringify(blocks)), acknowledged: false, generation: blockWriteGeneration }
+            pendingBlockWrites.set(item.id, pending)
+            pending.promise = Promise.resolve(previous?.promise).then(() => {
+                if (pending.generation !== blockWriteGeneration) return
+                const latest = store.getState().items.find((entry) => entry.id === item.id) || item
+                pending.updatedAt = Math.max(now(), (previous?.updatedAt || 0) + 1)
+                markLocalId(item.id)
+                return send(RPC_UPDATE, { item: { ...latest, blocks: pending.blocks, updatedAt: pending.updatedAt } })
+            }).then((raw) => {
+                if (pendingBlockWrites.get(item.id) !== pending) return
+                if (parseReply(raw)?.ok === true) pending.acknowledged = true
+                else pendingBlockWrites.delete(item.id)
+                renderAll()
+            })
         },
         startBlockEdit(item, block) {
             // Switching blocks: flush the block being edited first so its draft
@@ -1519,16 +1530,18 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockEditingId = block.id
             ui.blockDraft = draftFor(block)
             ui.blockCaret = null
-            seedTableDraft(block)
+            seedBlockDraft(block)
             ui.blockMenu = null
             renderAll()
         },
         commitBlockEdit(item) {
             if (!ui.blockEditingId) return
             const blocks = blocksWithPendingEdit(item)
+            const edited = blocks.find((b) => b.id === ui.blockEditingId)
+            if (edited && isEmptyBlock(edited)) { actions.deleteBlock(item, edited.id); return }
             ui.blockEditingId = null
             ui.blockDraft = ''
-            seedTableDraft(null)
+            seedBlockDraft(null)
             ui.blockMenu = null
             actions.commitBlocks(item, blocks)
             renderAll()
@@ -1536,7 +1549,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         cancelBlockEdit() {
             ui.blockEditingId = null
             ui.blockDraft = ''
-            seedTableDraft(null)
+            seedBlockDraft(null)
             ui.blockMenu = null
             renderAll()
         },
@@ -1545,7 +1558,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         insertBlock(item, type, afterId = null, seed = '') {
             const fresh = createBlock(type, nextBlockId())
             const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
-            const blocks = normalizeBlocks(item.blocks)
+            const blocks = blocksFor(item)
             let next
             if (afterId == null) {
                 next = [...blocks, block]
@@ -1560,21 +1573,21 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
-            seedTableDraft(type === 'divider' ? null : block)
+            seedBlockDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, next)
             renderAll()
         },
         replaceBlock(item, blockId, type, seed = '') {
             const fresh = createBlock(type, blockId)
             const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
-            const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId ? block : b))
+            const blocks = blocksFor(item).map((b) => (b.id === blockId ? block : b))
             ui.blockMenu = null
             if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
                 ui.blockEditingId = blockId
                 ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
-            seedTableDraft(type === 'divider' ? null : block)
+            seedBlockDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -1594,7 +1607,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (!before.trim()) { actions.replaceBlock(item, block.id, type, after); return }
             const fresh = createBlock(type, nextBlockId())
             const seeded = after ? { ...fresh, ...blockFromText(type, after) } : fresh
-            const blocks = normalizeBlocks(item.blocks).flatMap((b) => (
+            const blocks = blocksFor(item).flatMap((b) => (
                 b.id === block.id ? [{ ...b, ...blockFromText(b.type, before) }, seeded] : [b]
             ))
             ui.blockMenu = null
@@ -1603,30 +1616,43 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 ui.blockDraft = draftFor(seeded)
                 ui.blockCaret = null
             }
-            seedTableDraft(type === 'divider' ? null : seeded)
+            seedBlockDraft(type === 'divider' ? null : seeded)
             actions.commitBlocks(item, blocks)
             renderAll()
         },
         // Switch a heading block between H2 and H3 without leaving the editor.
         setBlockLevel(item, blockId, level) {
-            const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId && b.type === 'heading' ? { ...b, level } : b))
+            const blocks = blocksFor(item).map((b) => (b.id === blockId && b.type === 'heading' ? { ...b, level } : b))
             actions.commitBlocks(item, blocks)
             renderAll()
         },
         deleteBlock(item, blockId) {
-            const blocks = normalizeBlocks(item.blocks).filter((b) => b.id !== blockId)
-            if (ui.blockEditingId === blockId) {
-                ui.blockEditingId = null
-                ui.blockDraft = ''
-                seedTableDraft(null)
-            }
+            actions.finishBlockAndContinue(item, blockId, true)
+        },
+        finishBlockAndContinue(item, blockId, remove = false) {
+            const current = blocksWithPendingEdit(item)
+            const index = current.findIndex((b) => b.id === blockId)
+            const blocks = current.filter((b) => b.id !== blockId || (!remove && !isEmptyBlock(b)))
+            const next = current.slice(index + 1).find((b) => b.type !== 'divider')
+            ui.blockEditingId = null
+            root.ownerDocument.activeElement?.blur?.()
+            ui.blockDraft = ''
             ui.blockMenu = null
+            seedBlockDraft(next || null)
+            if (next) {
+                ui.blockEditingId = next.id
+                ui.blockDraft = draftFor(next)
+                ui.blockCaret = 0
+                ui.blockFieldFocus = { offset: 0 }
+                if (ui.blockTableFocus) ui.blockTableFocus.offset = 0
+            }
             actions.commitBlocks(item, blocks)
             renderAll()
+            if (!next) queueMicrotask(() => root.querySelector('#ticket-composer')?.focus())
         },
         moveBlock(item, dragId, targetId) {
             if (dragId === targetId) return
-            const blocks = normalizeBlocks(item.blocks)
+            const blocks = blocksFor(item)
             const moved = blocks.find((b) => b.id === dragId)
             if (!moved) return
             const rest = blocks.filter((b) => b.id !== dragId)
@@ -1636,7 +1662,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             actions.commitBlocks(item, rest)
         },
         toggleChecklistBlockItem(item, blockId, index) {
-            const blocks = normalizeBlocks(item.blocks).map((b) => {
+            const blocks = blocksFor(item).map((b) => {
                 if (b.id !== blockId) return b
                 const items = (Array.isArray(b.items) ? b.items : []).map((it, i) => (i === index ? { ...it, done: !it.done } : it))
                 return { ...b, items }
@@ -3357,10 +3383,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return item && isBoardType(item.listType) ? item : null
     }
 
-    // Seed (or clear) the table grid draft. Table blocks edit AS a grid held in
-    // ui.blockTableDraft, so a cell can safely contain a comma; every other block
-    // type edits through the ui.blockDraft text channel and leaves this null.
-    function seedTableDraft(block) {
+    const pendingBlockWrites = new Map()
+    let blockWriteGeneration = 0
+    function blocksFor(item) {
+        const latest = store.getState().items.find((entry) => entry.id === item.id) || item
+        const pending = pendingBlockWrites.get(item.id)
+        if (pending?.acknowledged && (latest.updatedAt >= pending.updatedAt || JSON.stringify(latest.blocks) === JSON.stringify(pending.blocks))) {
+            pendingBlockWrites.delete(item.id)
+        }
+        return normalizeBlocks(pendingBlockWrites.get(item.id)?.blocks || latest.blocks)
+    }
+
+    // Keep structured payloads intact while their fields are being edited.
+    // Only prose, headings, callouts and code use the text draft channel.
+    function seedBlockDraft(block) {
+        ui.blockStructuredDraft = block && ['checklist', 'numberedList', 'links', 'image'].includes(block.type) ? JSON.parse(JSON.stringify(block)) : null
+        ui.blockFieldFocus = null
         ui.blockTableDraft = block && block.type === 'table' ? normalizeTableRows(block.rows) : null
         ui.blockTableFocus = ui.blockTableDraft ? { r: 0, c: 0 } : null
     }
@@ -3369,10 +3407,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // being edited — the value commitBlocks should persist. A table folds its
     // grid draft (ui.blockTableDraft); everything else folds the text draft.
     function blocksWithPendingEdit(item) {
-        const blocks = normalizeBlocks(item.blocks)
+        const blocks = blocksFor(item)
         if (!ui.blockEditingId) return blocks
         return blocks.map((b) => {
             if (b.id !== ui.blockEditingId) return b
+            if (ui.blockStructuredDraft?.id === b.id) return cleanBlockDraft(ui.blockStructuredDraft)
             if (b.type === 'table' && Array.isArray(ui.blockTableDraft)) {
                 const nextRows = normalizeTableRows(ui.blockTableDraft)
                 // Only reshape (and thus emit a write) when the grid actually
@@ -3453,7 +3492,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // in the composer: there is nothing to read, so the only thing
             // anyone can want is to type. A ticket that HAS a body is opened to
             // be read — taking focus there would scroll it to its own bottom.
-            if (opening && normalizeBlocks(item.blocks).length === 0) {
+            if (opening && blocksFor(item).length === 0) {
                 queueMicrotask(() => drawerHost.querySelector('#ticket-composer')?.focus())
             }
             return
@@ -3653,8 +3692,6 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // and until now the field had no reader anywhere in the app.
             m.reason ? h('div', { class: 'ticket-reason label-sm', title: m.reason },
                 tablerIcon('alert-triangle', { size: 13 }), h('span', {}, m.reason)) : null,
-            m.progress ? h('div', { class: 'ticket-progress', role: 'img', 'aria-label': `${m.progress.done}/${m.progress.total}` },
-                h('span', { style: `width:${m.progress.pct}%` })) : null,
             draftCard ? h('div', { class: 'ticket-chips' }, h('span', { class: 'draft-pill' }, t('ticket.draft.badge'))) : null,
             (left.length || right.length) ? h('div', { class: 'ticket-card-meta label-sm' },
                 h('div', { class: 'meta-left' }, ...left),
@@ -3709,12 +3746,22 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return el
     }
 
+    function renderTicketTitle(item) {
+        return editableText({
+            id: 'tf-title', value: item.text || '',
+            placeholder: locale.i18n.t('ticket.detail.titlePlaceholder'),
+            className: 'ticket-title-field',
+            onCommit: (value) => {
+                const text = value.trim()
+                if (text && text !== item.text) actions.updateTicket(item, { text })
+            },
+        })
+    }
+
     function renderTicketSummary(item, state, { full = false } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const b = ticketBadges(item, now())
-        const config = selectBoardConfig(listAccess(state, item.listId))
-        const stateName = config.states.find((s) => s.id === item.status)?.name || item.status || t('ticket.detail.none')
-        const chips = [h('span', { class: 'role-chip' }, stateName)]
+        const chips = []
         if (b.priority) chips.push(h('span', { class: `priority-pill ${b.priority}` }, t(`ticket.priority.${b.priority}`)))
         if (b.isDone && b.timeliness) {
             const d = deltaPercent(b.inProgressHours, b.estimatedHours)
@@ -3732,14 +3779,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // add bar was a second, competing place to write on every new ticket.
         const checklist = Array.isArray(item.checklist) ? item.checklist : []
         return h('div', { class: `ticket-summary${full ? ' full' : ''}` },
-            h('div', { class: 'ticket-summary-chips' }, ...chips),
-            editableText({
-                id: 'tf-title',
-                value: item.text || '',
-                placeholder: t('ticket.detail.titlePlaceholder'),
-                className: 'ticket-title-field',
-                onCommit: (v) => { const nv = v.trim(); if (nv && nv !== item.text) actions.updateTicket(item, { text: nv }) },
-            }),
+            chips.length ? h('div', { class: 'ticket-summary-chips' }, ...chips) : null,
             // The free-text description now lives in the block body: it is
             // folded into the first markdown block on open (foldLegacyText),
             // so the summary keeps only the structured bits.
@@ -3936,6 +3976,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return h('div', { class: 'block-md muted', onclick }, text)
     }
 
+    function removeEmptyEditedBlock(item, block) {
+        if (ui.blockEditingId !== block.id) return false
+        const edited = blocksWithPendingEdit(item).find((b) => b.id === block.id)
+        if (!edited || !isEmptyBlock(edited)) return false
+        actions.deleteBlock(item, block.id)
+        return true
+    }
+
     function renderBlockView(item, block) {
         const t = locale.i18n.t.bind(locale.i18n)
         const edit = () => actions.startBlockEdit(item, block)
@@ -3963,13 +4011,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 if (!items.length) return blockMutedView(t('ticket.block.placeholder.checklist'), edit)
                 return h('ul', { class: 'block-checklist' }, ...items.map((it, i) => h('li', { class: it.done ? 'done' : '', onclick: edit },
                     h('input', { type: 'checkbox', checked: it.done ? '' : null, onclick: (e) => e.stopPropagation(), onchange: () => actions.toggleChecklistBlockItem(item, block.id, i) }),
-                    h('span', {}, it.text || ''),
+                    Object.assign(h('span'), { innerHTML: renderInlineMarkdown(it.text || '') }),
                 )))
             }
             case 'numberedList': {
                 const items = Array.isArray(block.items) ? block.items : []
                 if (!items.length) return blockMutedView(t('ticket.block.placeholder.numberedList'), edit)
-                return h('ol', { class: 'block-numbered', onclick: edit }, ...items.map((it) => h('li', {}, it.text || '')))
+                return h('ol', { class: 'block-numbered', onclick: edit }, ...items.map((it) => Object.assign(h('li'), { innerHTML: renderInlineMarkdown(it.text || '') })))
             }
             case 'links': {
                 const links = Array.isArray(block.links) ? block.links : []
@@ -4016,7 +4064,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // line somewhere in the prose, so the pick splits there instead of
             // replacing the whole block and losing what is above it.
             if (spec.promote) {
-                const target = normalizeBlocks(item.blocks).find((b) => b.id === spec.blockId)
+                const target = blocksFor(item).find((b) => b.id === spec.blockId)
                 if (target) { actions.promoteAtCaret(item, target, type, spec.split ? spec.split() : null); return }
             }
             if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, type)
@@ -4138,7 +4186,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (menu) menu.classList.add('block-slash-inline')
 
         const ed = h('div', {
-            class: `block-md block-rich block-editor block-rich-${block.type}`,
+            id: `block-${block.id}-text`,
+            class: `block-md block-rich block-editor block-rich-${block.type}${block.type === 'heading' ? ` block-heading-l${block.level === 3 ? 3 : 2}` : ''}`,
             contenteditable: 'true',
             role: 'textbox',
             'aria-multiline': 'true',
@@ -4162,11 +4211,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             remember()
             syncSlashMenu()
         }
-        ed.addEventListener('input', () => {
+        ed.addEventListener('input', (event) => {
+            if (event.isComposing) return
             // Live-interpret recognized markdown so the raw syntax never lingers.
             if (isMarkdown && applyHeadingInputRule(ed)) { sync(); return }
             applyInlineInputRules()
             sync()
+            if (removeEmptyEditedBlock(item, block)) return
             // "- ", "1. ", "> ", "```", "---" on their own line become the block
             // they describe. Typing the structure IS choosing it, so the menu
             // is left to the shapes no shorthand can spell.
@@ -4185,7 +4236,9 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.shiftKey) { event.preventDefault(); menu._slash.choose(); return }
                 if (event.key === 'Escape') { event.stopPropagation(); slashDismissed = true; syncSlashMenu(); return }
             }
+            if (event.isComposing) return
             if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
+            if (block.type === 'heading' && event.key === 'Enter') { event.preventDefault(); actions.commitBlockEdit(item); return }
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
             if ((event.metaKey || event.ctrlKey) && !event.altKey) {
                 const k = event.key.toLowerCase()
@@ -4207,7 +4260,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         }))
 
         queueMicrotask(() => {
-            if (main.ownerDocument.activeElement === ed) return
+            if (!ed.isConnected || main.ownerDocument.activeElement === ed) return
             try { document.execCommand('styleWithCSS', false, false) } catch { /* not supported */ }
             try { document.execCommand('defaultParagraphSeparator', false, 'p') } catch { /* not supported */ }
             ed.focus()
@@ -4225,33 +4278,10 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return h('div', { class: 'block-editor-wrap' }, ed, menu)
     }
 
-    // Heading editor: a single-line field + an H2/H3 level toggle. The text
-    // round-trips through blockFromText('heading') (= {text}); the level is a
-    // dedicated field set via setBlockLevel so it survives the text channel.
+    // Headings remain formatted while editing, with a separate level control.
     function renderHeadingEditor(item, block) {
-        const t = locale.i18n.t.bind(locale.i18n)
         const level = block.level === 3 ? 3 : 2
-        const input = h('input', {
-            class: `block-heading-input block-heading-l${level}`,
-            value: ui.blockDraft,
-            placeholder: t('ticket.block.placeholder.heading'),
-            oninput: (event) => { ui.blockDraft = event.target.value },
-            onkeydown: (event) => {
-                if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
-                if (event.key === 'Enter') { event.preventDefault(); actions.commitBlockEdit(item) }
-            },
-            onblur: () => queueMicrotask(() => {
-                const live = root.querySelector('.block-editor, .block-heading-input')
-                if (live && live !== input && main.ownerDocument.activeElement === live) return
-                if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
-            }),
-        })
-        queueMicrotask(() => {
-            if (main.ownerDocument.activeElement === input) return
-            input.focus()
-            const p = input.value.length
-            try { input.setSelectionRange(p, p) } catch { /* ignore */ }
-        })
+        const editor = renderRichBlockEditor(item, block)
         const levelToggle = h('div', { class: 'segmented heading-level' },
             ...[2, 3].map((lv) => h('button', {
                 class: `seg ${level === lv ? 'active' : ''}`,
@@ -4261,7 +4291,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 onclick: () => actions.setBlockLevel(item, block.id, lv),
             }, `H${lv}`)),
         )
-        return h('div', { class: 'block-editor-wrap block-heading-wrap' }, input, levelToggle)
+        return h('div', { class: 'block-heading-wrap' }, editor, levelToggle)
     }
 
     // Grid editor for table blocks: a table edits AS a table — one <input> per
@@ -4273,7 +4303,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // to the cell below; ⌘/Ctrl+Enter saves; Escape cancels.
     function renderTableBlockEditor(item, block) {
         const t = locale.i18n.t.bind(locale.i18n)
-        if (!Array.isArray(ui.blockTableDraft)) seedTableDraft(block)
+        if (!Array.isArray(ui.blockTableDraft)) seedBlockDraft(block)
         const grid = ui.blockTableDraft
         const cols = grid[0].length
 
@@ -4282,11 +4312,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         // Commit only when focus truly leaves the whole grid. Moving between
         // cells / clicking a toolbar button keeps focus inside .block-table-editor
         // (the live one after a structural re-render), so it must not commit.
-        const guardedBlur = () => queueMicrotask(() => {
-            const live = root.querySelector('.block-table-editor')
-            if (live && live.contains(main.ownerDocument.activeElement)) return
-            if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
-        })
+        const guardedBlur = (event) => {
+            if (wrap.contains(event.relatedTarget)) return
+            queueMicrotask(() => {
+                const live = root.querySelector('.block-table-editor')
+                if (live && live.contains(main.ownerDocument.activeElement)) return
+                if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
+            })
+        }
 
         // Structural change (add/remove row or column): rebuild and land focus on
         // the intended cell. onmousedown:preventDefault on the buttons keeps the
@@ -4321,6 +4354,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 oninput: (event) => {
                     grid[r][c] = event.target.value
                     ui.blockTableFocus = { r, c, offset: event.target.selectionStart }
+                    if (!event.isComposing) removeEmptyEditedBlock(item, block)
                 },
                 onfocus: (event) => { ui.blockTableFocus = { r, c, offset: event.target.selectionStart } },
                 onkeyup: (event) => { ui.blockTableFocus = { r, c, offset: event.target.selectionStart } },
@@ -4407,62 +4441,45 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         if (block.type === 'heading') return renderHeadingEditor(item, block)
         if (block.type === 'divider') return h('hr', { class: 'block-divider', 'aria-hidden': 'true' })
         if (block.type === 'table') return renderTableBlockEditor(item, block)
-        const t = locale.i18n.t.bind(locale.i18n)
-        const placeholder = t(`ticket.block.placeholder.${block.type}`)
-        // Markdown blocks get an inline "/" command menu, toggled purely via
-        // classList so a keystroke never forces a re-render that would steal the
-        // textarea focus.
-        const menu = block.type === 'markdown' ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
-        if (menu) menu.classList.add('block-slash-inline', ui.blockDraft === '/' ? 'open' : 'hidden')
+        if (['checklist', 'numberedList', 'links', 'image'].includes(block.type)) {
+            if (ui.blockStructuredDraft?.id !== block.id) seedBlockDraft(block)
+            return renderStructuredBlockEditor({
+                block, draft: ui.blockStructuredDraft, focus: ui.blockFieldFocus,
+                setFocus: (focus) => { ui.blockFieldFocus = focus; ui.blockCaret = focus.offset },
+                changed: () => removeEmptyEditedBlock(item, block), redraw: renderAll,
+                commit: () => { if (ui.blockEditingId === block.id) actions.commitBlockEdit(item) },
+                cancel: () => actions.cancelBlockEdit(),
+                exitList: () => actions.finishBlockAndContinue(item, block.id),
+                t: locale.i18n.t.bind(locale.i18n),
+                rich: { offset: richCaretOffset, setOffset: setRichCaretOffset, seed: seedRichCaretAnchors, inlineRules: applyInlineInputRules },
+            })
+        }
+        // A code block edits as code; no fences or serialization syntax.
         const ta = h('textarea', {
-            class: 'block-editor',
-            rows: (block.type === 'markdown' || block.type === 'code' || block.type === 'callout') ? '4' : '3',
-            placeholder,
+            id: `block-${block.id}-code`, class: 'block-editor block-code', rows: '4',
+            'aria-label': locale.i18n.t('ticket.block.placeholder.code'),
             oninput: (event) => {
                 ui.blockDraft = event.target.value
-                if (menu) menu.classList.toggle('hidden', event.target.value !== '/')
-                if (menu) menu.classList.toggle('open', event.target.value === '/')
+                ui.blockCaret = event.target.selectionStart
+                if (!event.isComposing) removeEmptyEditedBlock(item, block)
             },
             onkeydown: (event) => {
                 if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
-                if (event.key !== 'Enter' || event.shiftKey) return
-                if (block.type !== 'checklist' && block.type !== 'numberedList') return
-                const caret = ta.selectionStart
-                const line = lineAtCaret(ta.value, caret)
-                // Enter on an empty item ends the list and opens prose under
-                // it. Leaving a list used to need a commit, a click and a menu.
-                if (!line.trim() || /^\[[ xX]?\]\s*$/.test(line)) {
-                    event.preventDefault()
-                    ui.blockDraft = ta.value
-                    ui.blockCaret = caret
-                    actions.promoteAtCaret(item, block, 'markdown')
-                    return
-                }
-                // Otherwise Enter opens the next item, already marked up, so
-                // the list keeps its shape without anyone typing the syntax.
-                if (block.type !== 'checklist') return
-                event.preventDefault()
-                const next = `${ta.value.slice(0, caret)}\n[ ] ${ta.value.slice(caret)}`
-                ta.value = next
-                ui.blockDraft = next
-                const at = caret + 5
-                try { ta.setSelectionRange(at, at) } catch { /* ignore */ }
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item) }
             },
             onblur: () => queueMicrotask(() => {
-                const live = root.querySelector('.block-editor')
-                if (live && live !== ta && main.ownerDocument.activeElement === live) return
+                if (document.activeElement?.id === ta.id) return
                 if (ui.blockEditingId === block.id) actions.commitBlockEdit(item)
             }),
         })
         ta.value = ui.blockDraft
         queueMicrotask(() => {
-            if (main.ownerDocument.activeElement === ta) return
+            if (!ta.isConnected || document.activeElement === ta) return
             ta.focus()
-            const p = ta.value.length
-            try { ta.setSelectionRange(p, p) } catch { /* ignore */ }
+            const at = ui.blockCaret ?? ta.value.length
+            ta.setSelectionRange(at, at)
         })
-        return h('div', { class: 'block-editor-wrap' }, ta, menu)
+        return h('div', { class: 'block-editor-wrap' }, ta)
     }
 
     // Options menu behind the six-dot handle: turn into, insert below, delete.
@@ -4477,6 +4494,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             onclick,
         }, tablerIcon(icon, { size: 15 }), h('span', { class: 'label-md' }, label))
         const menu = h('div', { class: 'block-slash-menu', role: 'menu', tabindex: '-1' },
+            block.type === 'divider' ? null : op('pencil', t('ticket.block.edit'), () => actions.startBlockEdit(item, block)),
             op('switch-horizontal', t('ticket.block.turnInto'), () => actions.openBlockMenu({ mode: 'turn', blockId: block.id })),
             op('plus', t('ticket.block.insert'), () => actions.openBlockMenu({ mode: 'after', blockId: block.id })),
             op('trash', t('ticket.block.delete'), () => actions.deleteBlock(item, block.id)),
@@ -4578,7 +4596,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     function renderTicketBody(item, { legacyField = 'description', variant = 'drawer' } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
-        const blocks = normalizeBlocks(item.blocks)
+        const blocks = blocksFor(item)
         const addMenuOpen = !!(ui.blockMenu && ui.blockMenu.mode === 'end')
         // Legacy free-text not yet folded into blocks (fold echo pending, or
         // this peer isn't writable yet): keep it visible read-only so removing
@@ -4650,15 +4668,15 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const t = locale.i18n.t.bind(locale.i18n)
         const drawer = h('aside', { class: 'detail-drawer' },
             h('div', { class: 'detail-toolbar' },
-                h('span', { class: 'detail-toolbar-title', title: item.text }, item.text),
+                renderTicketTitle(item),
                 h('div', { class: 'detail-toolbar-actions' },
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.openFull'), title: t('ticket.detail.openFull'), onclick: () => actions.promoteTicket(item.id) }, tablerIcon('arrows-maximize', { size: 15 })),
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('main.item.move'), title: t('main.item.move'), onclick: () => openDialog({ kind: 'item-move', item }) }, tablerIcon('switch-horizontal', { size: 15 })),
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
                 ),
             ),
-            // Two columns like the full view: tasks + notes prominent on the
-            // left, the property rail on the right (sticky while scrolling).
+            // The property rail stays on the left; tasks and body occupy the
+            // wider writing column on the right, as in the full view.
             // DOM order summary→body→rail so the narrow-window fallback stacks
             // with the prominent content first; the grid places by area.
             h('div', { class: 'detail-split-scroll two-col' },
@@ -4744,6 +4762,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         }
         replaceChildren(main,
             h('header', { class: 'page-header ticket-doc-header' },
+                renderTicketTitle(item),
                 h('button', { class: 'btn btn-secondary', type: 'button', onclick: () => actions.collapseTicket() }, tablerIcon('arrows-minimize', { size: 15 }), t('ticket.detail.exitFull')),
                 h('div', { class: 'header-actions' },
                     h('button', { class: 'btn btn-secondary btn-icon', type: 'button', 'aria-label': t('ticket.detail.close'), title: t('ticket.detail.close'), onclick: () => actions.closeTicket() }, tablerIcon('x', { size: 16 })),
@@ -6639,7 +6658,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
 
     function renderAll() {
         const state = store.getState()
-        if (state.synced === false && lastSynced !== false) ui.undoStack.length = 0
+        if (state.synced === false && lastSynced !== false) {
+            ui.undoStack.length = 0
+            pendingBlockWrites.clear()
+            blockWriteGeneration++
+        }
         lastSynced = state.synced
         plannedRefs = new Set(reducePlan(state.items).keys())
         valueSurfaces = reduceValueReturn(state.items)
