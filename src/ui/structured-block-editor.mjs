@@ -134,7 +134,7 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
                     event.preventDefault()
                     draft.items.splice(index, 1)
                     if (changed()) return
-                    setFocus({ key: `item-${Math.min(index, draft.items.length - 1)}`, offset: 0 })
+                    setFocus({ key: `item-${Math.max(0, index - 1)}`, ...(index === 0 ? { offset: 0 } : {}), move: true })
                     redraw()
                 }
             })
@@ -182,7 +182,7 @@ export function renderStructuredBlockEditor({ block, draft, focus, setFocus, cha
         if (!wrap.isConnected) return
         const key = fields.has(focus?.key) ? focus.key : fields.keys().next().value
         const target = fields.get(key)
-        // Enter's explicit next-row target wins over surface focus restoration.
+        // Explicit row changes win over surface focus restoration.
         if (!target || (wrap.contains(document.activeElement) && !focus?.move)) return
         target.focus()
         const offset = focus?.offset ?? (target.isContentEditable ? target.textContent.length : target.value.length)
