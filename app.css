@@ -1727,6 +1727,20 @@ html.board-drawer-open { overflow: hidden; }
 }
 .block-rich.is-empty { position: relative; }
 
+/* The composer: the body's last line, always present and always empty. It is
+   not a block — the first keystroke hands its text to a real one — so it
+   carries no handle, no chrome and no commit of its own, and it replaces both
+   the empty-state buttons and the "+ Add block" row. */
+.block-composer {
+    position: relative; white-space: pre-wrap; cursor: text;
+    min-height: 1.6em; padding: 0.15rem 0;
+}
+.block-composer:focus { outline: none; box-shadow: none; }
+.block-composer:empty::before {
+    content: attr(data-placeholder); color: var(--ink-faint); font-style: italic;
+    pointer-events: none;
+}
+
 /* Insert affordances + "/" command menu */
 .block-add-row { position: relative; margin-top: 0.4rem; }
 .block-add, .block-empty {

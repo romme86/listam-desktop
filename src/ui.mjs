@@ -153,6 +153,10 @@ import {
     ticketBadges,
     buildTicketCardModel,
     dueLabel,
+    blockShorthand,
+    slashQuery,
+    splitAtCaret,
+    lineAtCaret,
     selectWriterStats,
     validateRigorDraft,
     buildStatusChange,
@@ -449,6 +453,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     // the DOM wholesale, so a monotonic counter mixed with the clock suffices.
     let blockIdSeq = 0
     const nextBlockId = () => `b-${now()}-${blockIdSeq++}`
+    // The draft text a block opens its editor with. A fresh checklist
+    // serializes to "[ ]" — blockToText trims each line's trailing space — so
+    // without this the first thing typed lands flush against the bracket.
+    const draftFor = (block) => {
+        const text = blockToText(block)
+        return block && block.type === 'checklist' && /\[[ xX]\]$/.test(text) ? `${text} ` : text
+    }
     // Rigor-task ids follow the same session-unique scheme as block ids so a
     // task added post-creation never collides with a creation-time `task-N-…` id.
     let taskIdSeq = 0
@@ -1505,7 +1516,7 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                 actions.commitBlocks(item, blocksWithPendingEdit(item))
             }
             ui.blockEditingId = block.id
-            ui.blockDraft = blockToText(block)
+            ui.blockDraft = draftFor(block)
             ui.blockCaret = null
             seedTableDraft(block)
             ui.blockMenu = null
@@ -1528,8 +1539,11 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             ui.blockMenu = null
             renderAll()
         },
-        insertBlock(item, type, afterId = null) {
-            const block = createBlock(type, nextBlockId())
+        // `seed` is text the new block starts with — what the writer had
+        // already typed past a shorthand, or into the trailing composer.
+        insertBlock(item, type, afterId = null, seed = '') {
+            const fresh = createBlock(type, nextBlockId())
+            const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
             const blocks = normalizeBlocks(item.blocks)
             let next
             if (afterId == null) {
@@ -1542,23 +1556,53 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // A divider has nothing to edit, so it lands placed (not in edit mode).
             if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
                 ui.blockEditingId = block.id
-                ui.blockDraft = blockToText(block)
+                ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
             seedTableDraft(type === 'divider' ? null : block)
             actions.commitBlocks(item, next)
             renderAll()
         },
-        replaceBlock(item, blockId, type) {
-            const block = createBlock(type, blockId)
+        replaceBlock(item, blockId, type, seed = '') {
+            const fresh = createBlock(type, blockId)
+            const block = seed ? { ...fresh, ...blockFromText(type, seed) } : fresh
             const blocks = normalizeBlocks(item.blocks).map((b) => (b.id === blockId ? block : b))
             ui.blockMenu = null
             if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
                 ui.blockEditingId = blockId
-                ui.blockDraft = blockToText(block)
+                ui.blockDraft = draftFor(block)
                 ui.blockCaret = null
             }
             seedTableDraft(type === 'divider' ? null : block)
+            actions.commitBlocks(item, blocks)
+            renderAll()
+        },
+        // A shorthand ("- ") or a /command typed at the caret becomes a real
+        // block. Whatever prose sat above that line stays where it was; the
+        // line itself is consumed, and anything right of the caret rides into
+        // the new block. One write, so the prose and the new block can never
+        // land as two separate commits with a render between them.
+        // `split` is supplied by the rich editor, which knows where its own
+        // paragraphs are: its caret offset counts RENDERED text, while the
+        // draft carries "\n\n" between paragraphs, so the two cannot be
+        // measured with the same ruler. The plain textarea path has no such
+        // gap — its value IS the draft — and lets this compute the split.
+        promoteAtCaret(item, block, type, split = null) {
+            const { before, after } = split || splitAtCaret(ui.blockDraft, ui.blockCaret)
+            // Nothing above it: the block simply becomes the new type.
+            if (!before.trim()) { actions.replaceBlock(item, block.id, type, after); return }
+            const fresh = createBlock(type, nextBlockId())
+            const seeded = after ? { ...fresh, ...blockFromText(type, after) } : fresh
+            const blocks = normalizeBlocks(item.blocks).flatMap((b) => (
+                b.id === block.id ? [{ ...b, ...blockFromText(b.type, before) }, seeded] : [b]
+            ))
+            ui.blockMenu = null
+            if (type === 'divider') { ui.blockEditingId = null; ui.blockDraft = '' } else {
+                ui.blockEditingId = seeded.id
+                ui.blockDraft = draftFor(seeded)
+                ui.blockCaret = null
+            }
+            seedTableDraft(type === 'divider' ? null : seeded)
             actions.commitBlocks(item, blocks)
             renderAll()
         },
@@ -3368,7 +3412,8 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // can never leave a gap where the next keystroke lands on <body>.
             const snapshot = drawerDom.capture(drawerHost, drawerKey)
             const drawer = renderTicketDrawer(item, state)
-            if (mountedDrawerKind !== 'ticket') drawer.classList.add('enter')
+            const opening = mountedDrawerKind !== 'ticket'
+            if (opening) drawer.classList.add('enter')
             mountedDrawerKind = 'ticket'
             replaceChildren(drawerHost,
                 h('div', { class: 'detail-scrim', onclick: () => actions.closeTicket() }),
@@ -3380,6 +3425,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
                     if (ui.blockCaret != null) setRichCaretOffset(field, ui.blockCaret)
                 },
             })
+            // A ticket with nothing written in it opens with the caret already
+            // in the composer: there is nothing to read, so the only thing
+            // anyone can want is to type. A ticket that HAS a body is opened to
+            // be read — taking focus there would scroll it to its own bottom.
+            if (opening && normalizeBlocks(item.blocks).length === 0) {
+                queueMicrotask(() => drawerHost.querySelector('#ticket-composer')?.focus())
+            }
             return
         }
         // Non-modal list-item Inspector (grocery/todo). No scrim — the list stays
@@ -3637,12 +3689,14 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         } else if (b.running) {
             chips.push(h('span', { class: 'ticket-timer' }, h('span', { class: 'timer-dot' }), `${formatDuration(b.inProgressMs)}${b.estimatedHours ? ` / ${b.estimatedHours}h` : ''}`))
         }
-        const meta = []
-        if (b.estimatedHours) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.estimate')} ${b.estimatedHours}h`))
-        if (item.estimatedComplexity) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.complexity')} ${item.estimatedComplexity}%`))
-        if (b.inProgressMs > 0) meta.push(h('span', { class: 'sm-meta' }, `${t('ticket.detail.timeSpent')} ${formatDuration(b.inProgressMs)}`))
+        // No summary meta strip: estimate, complexity and time in progress are
+        // all rows in the property rail two inches to the right. Saying them
+        // twice on one screen is most of what made this drawer feel busy.
+        //
         // The rigor task checklist is a top-level field (distinct from body
-        // blocks); surface it so the done-gate stays toggleable from the detail.
+        // blocks); surface it so the done-gate stays toggleable from the detail
+        // — but only once it HAS tasks. An empty "Tasks" heading over an empty
+        // add bar was a second, competing place to write on every new ticket.
         const checklist = Array.isArray(item.checklist) ? item.checklist : []
         return h('div', { class: `ticket-summary${full ? ' full' : ''}` },
             h('div', { class: 'ticket-summary-chips' }, ...chips),
@@ -3656,20 +3710,17 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             // The free-text description now lives in the block body: it is
             // folded into the first markdown block on open (foldLegacyText),
             // so the summary keeps only the structured bits.
-            meta.length ? h('div', { class: 'ticket-summary-meta label-sm' }, ...meta) : null,
-            h('div', { class: 'ticket-summary-tasks' },
+            checklist.length ? h('div', { class: 'ticket-summary-tasks' },
                 h('h3', { class: 'category-heading label-sm' }, t('ticket.detail.tasks')),
-                checklist.length
-                    ? h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
-                        h('label', { class: 'detail-task-main' },
-                            h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
-                            h('span', {}, task.text),
-                        ),
-                        h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
-                    )))
-                    : null,
+                h('div', { class: 'detail-checklist' }, ...checklist.map((task) => h('div', { class: `detail-task${task.done ? ' done' : ''}` },
+                    h('label', { class: 'detail-task-main' },
+                        h('input', { type: 'checkbox', checked: task.done ? '' : null, onchange: () => actions.toggleTicketTask(item, task.id) }),
+                        h('span', {}, task.text),
+                    ),
+                    h('button', { class: 'detail-task-remove', type: 'button', 'aria-label': t('common.remove'), title: t('common.remove'), onclick: () => actions.removeTicketTask(item, task.id) }, tablerIcon('x', { size: 13 })),
+                ))),
                 renderTaskAddBar(item, t),
-            ),
+            ) : null,
         )
     }
 
@@ -3928,6 +3979,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
     function renderSlashMenu(item, spec) {
         const t = locale.i18n.t.bind(locale.i18n)
         const pick = (type) => {
+            // Opened by typing "/" inside a block: the slash sits on its own
+            // line somewhere in the prose, so the pick splits there instead of
+            // replacing the whole block and losing what is above it.
+            if (spec.promote) {
+                const target = normalizeBlocks(item.blocks).find((b) => b.id === spec.blockId)
+                if (target) { actions.promoteAtCaret(item, target, type, spec.split ? spec.split() : null); return }
+            }
             if (spec.mode === 'replace') actions.replaceBlock(item, spec.blockId, type)
             else actions.insertBlock(item, type, spec.mode === 'after' ? spec.blockId : null)
         }
@@ -3999,20 +4057,52 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         const t = locale.i18n.t.bind(locale.i18n)
         const isMarkdown = block.type === 'markdown'
         const placeholder = t(`ticket.block.placeholder.${block.type}`)
-        const menu = isMarkdown ? renderSlashMenu(item, { mode: 'replace', blockId: block.id }) : null
-        // The inline menu opens while the draft is "/" plus an optional filter
-        // word ("/tab" → Table) and Esc only dismisses the menu, not the edit.
+        const slashSpec = { mode: 'replace', blockId: block.id, promote: true }
+        const menu = isMarkdown ? renderSlashMenu(item, slashSpec) : null
+        // The inline menu opens while the CARET'S LINE is "/" plus an optional
+        // filter word ("/tab" → Table), and Esc only dismisses the menu, not
+        // the edit. It used to test the whole draft, so "/" was dead in any
+        // block that already had a word in it — while two hints advertised it.
         let slashDismissed = false
-        const slashActive = () => !slashDismissed && /^\/[\p{L}\p{N}]*$/u.test(ui.blockDraft)
+
+        // The caret's own paragraph element, which is what "the line" means in
+        // a rich editor. Everything that has to know where the line starts asks
+        // the DOM, never the draft string.
+        const caretParagraph = () => {
+            const sel = window.getSelection()
+            if (!sel || sel.rangeCount === 0) return null
+            let node = sel.getRangeAt(0).startContainer
+            if (!ed.contains(node)) return null
+            if (node.nodeType === 3) node = node.parentNode
+            while (node && node.parentNode && node.parentNode !== ed) node = node.parentNode
+            return node && node.parentNode === ed ? node : null
+        }
+        const caretLine = () => (caretParagraph()?.textContent || '').split(ZWSP).join('')
+        // What stays behind and what rides along when the caret's line is
+        // promoted to a block of its own. The line itself is consumed.
+        const splitAroundCaretLine = () => {
+            const para = caretParagraph()
+            const kids = [...ed.children]
+            const at = para ? kids.indexOf(para) : -1
+            if (at < 0) return { before: htmlToMarkdown(ed.innerHTML).trim(), after: '' }
+            return {
+                before: htmlToMarkdown(kids.slice(0, at).map((k) => k.outerHTML).join('')).trim(),
+                after: htmlToMarkdown(kids.slice(at + 1).map((k) => k.outerHTML).join('')).trim(),
+            }
+        }
+        slashSpec.split = splitAroundCaretLine
+
+        const slashActive = () => !slashDismissed && slashQuery(caretLine()) !== null
         const syncSlashMenu = () => {
             if (!menu) return
-            if (!ui.blockDraft.startsWith('/')) slashDismissed = false
-            const on = slashActive()
+            const query = slashQuery(caretLine())
+            if (query === null) slashDismissed = false
+            const on = !slashDismissed && query !== null
             menu.classList.toggle('hidden', !on)
             menu.classList.toggle('open', on)
-            if (on) menu._slash.filterTo(ui.blockDraft.slice(1))
+            if (on) menu._slash.filterTo(query)
         }
-        if (menu) { menu.classList.add('block-slash-inline'); syncSlashMenu() }
+        if (menu) menu.classList.add('block-slash-inline')
 
         const ed = h('div', {
             class: `block-md block-rich block-editor block-rich-${block.type}`,
@@ -4041,6 +4131,13 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             if (isMarkdown && applyHeadingInputRule(ed)) { sync(); return }
             applyInlineInputRules()
             sync()
+            // "- ", "1. ", "> ", "```", "---" on their own line become the block
+            // they describe. Typing the structure IS choosing it, so the menu
+            // is left to the shapes no shorthand can spell.
+            if (!isMarkdown) return
+            const line = caretLine()
+            const shorthand = blockShorthand(line)
+            if (shorthand) actions.promoteAtCaret(item, block, shorthand, splitAroundCaretLine())
         })
         ed.addEventListener('keyup', remember)
         ed.addEventListener('mouseup', remember)
@@ -4292,7 +4389,29 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             },
             onkeydown: (event) => {
                 if (event.key === 'Escape') { event.stopPropagation(); actions.cancelBlockEdit(); return }
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item) }
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); actions.commitBlockEdit(item); return }
+                if (event.key !== 'Enter' || event.shiftKey) return
+                if (block.type !== 'checklist' && block.type !== 'numberedList') return
+                const caret = ta.selectionStart
+                const line = lineAtCaret(ta.value, caret)
+                // Enter on an empty item ends the list and opens prose under
+                // it. Leaving a list used to need a commit, a click and a menu.
+                if (!line.trim() || /^\[[ xX]?\]\s*$/.test(line)) {
+                    event.preventDefault()
+                    ui.blockDraft = ta.value
+                    ui.blockCaret = caret
+                    actions.promoteAtCaret(item, block, 'markdown')
+                    return
+                }
+                // Otherwise Enter opens the next item, already marked up, so
+                // the list keeps its shape without anyone typing the syntax.
+                if (block.type !== 'checklist') return
+                event.preventDefault()
+                const next = `${ta.value.slice(0, caret)}\n[ ] ${ta.value.slice(caret)}`
+                ta.value = next
+                ui.blockDraft = next
+                const at = caret + 5
+                try { ta.setSelectionRange(at, at) } catch { /* ignore */ }
             },
             onblur: () => queueMicrotask(() => {
                 const live = root.querySelector('.block-editor')
@@ -4384,6 +4503,43 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
         return row
     }
 
+    // The trailing composer: an always-present empty line at the end of the
+    // body. It owns no state — the first keystroke hands its text to a real
+    // block and the block editor takes over — so nothing uncommitted ever
+    // lives in it, and merely opening a ticket writes nothing.
+    function renderComposer(item) {
+        const t = locale.i18n.t.bind(locale.i18n)
+        const placeholder = t('ticket.block.composer')
+        const el = h('div', {
+            id: 'ticket-composer',
+            class: 'block-composer block-md block-rich',
+            contenteditable: 'true',
+            role: 'textbox',
+            'aria-label': placeholder,
+            'data-placeholder': placeholder,
+            spellcheck: 'true',
+            oninput: () => {
+                const text = (el.textContent || '').replace(/​/g, '')
+                if (!text) return
+                el.textContent = ''
+                // Hand the keyboard over before the block exists. The rebuild
+                // that follows restores focus to whatever was focused when it
+                // started — which, without this, is the composer, so the new
+                // block's editor would lose the race for every keystroke.
+                el.blur()
+                // "/" still opens the menu, for the shapes no shorthand spells.
+                if (text === '/') { actions.openBlockMenu({ mode: 'end' }); return }
+                const shorthand = blockShorthand(text, text.length)
+                if (shorthand) { actions.insertBlock(item, shorthand); return }
+                actions.insertBlock(item, 'markdown', null, text)
+            },
+            onkeydown: (event) => {
+                if (event.key === 'Escape') { event.stopPropagation(); el.blur() }
+            },
+        })
+        return el
+    }
+
     function renderTicketBody(item, { legacyField = 'description', variant = 'drawer' } = {}) {
         const t = locale.i18n.t.bind(locale.i18n)
         const blocks = normalizeBlocks(item.blocks)
@@ -4405,42 +4561,35 @@ export function mountApp({ root, store, client, locale, ownerControl = null, app
             endMenu = h('div', { class: 'block-menu-anchor end' }, h('div', { class: 'block-menu-scrim', onclick: () => actions.closeBlockMenu() }), menu)
         }
         if (variant === 'inspector') {
-            // Inspector anatomy (Option B mockup): no section head — blocks
-            // start right under the title; one inline add hint instead of the
-            // empty-button + add-button pair; a fresh item invites plain text
-            // with ghost chips for the common block types.
-            const empty = blocks.length === 0 && !legacy
-            // Clicking empty body space starts writing: text is the default
-            // block. Reuse a trailing empty text block instead of stacking new
-            // ones; a click mid-edit just commits (the blur already did).
-            const appendTextBlock = () => {
-                if (ui.blockEditingId) return
-                const last = blocks[blocks.length - 1]
-                if (last && last.type === 'markdown' && !(last.text || '').trim()) { actions.startBlockEdit(item, last); return }
-                actions.insertBlock(item, 'markdown')
-            }
+            // The body is always open for writing. A composer sits at the end —
+            // focused when the drawer opens — and the first keystroke hands its
+            // text to a real block. There is no empty state to click through
+            // and no "+ Add block": the cursor IS the empty state, and the
+            // shorthands ("- ", "1. ", "> ") are the menu.
+            //
+            // A click on the body's dead space puts the caret in the composer
+            // rather than manufacturing a block, so looking at a ticket never
+            // writes to it.
             return h('section', {
                 class: 'ticket-body inspector-variant',
                 onclick: (event) => {
                     const el = event.target
-                    if (el === event.currentTarget || (el instanceof HTMLElement && el.classList.contains('ticket-blocks'))) appendTextBlock()
+                    if (ui.blockEditingId) return
+                    if (el === event.currentTarget || (el instanceof HTMLElement && el.classList.contains('ticket-blocks'))) {
+                        root.querySelector('#ticket-composer')?.focus()
+                    }
                 },
             },
                 legacyRow,
-                empty
-                    ? h('div', { class: 'inspector-empty' },
-                        h('button', { class: 'inspector-empty-hint', type: 'button', onclick: () => appendTextBlock() }, t('inspector.emptyHint')),
-                        h('div', { class: 'inspector-empty-chips' },
-                            ...['checklist', 'markdown', 'table', 'code'].map((type) => {
-                                const spec = BLOCK_TYPES.find((bt) => bt.type === type)
-                                if (!spec) return null
-                                return h('button', { class: 'ghost-chip label-sm', type: 'button', onclick: () => actions.insertBlock(item, type) }, tablerIcon(spec.icon, { size: 12 }), t(spec.labelKey))
-                            }),
-                        ),
-                    )
-                    : h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))),
+                blocks.length ? h('div', { class: 'ticket-blocks' }, ...blocks.map((b) => renderBlock(item, b))) : null,
                 h('div', { class: 'block-add-row' },
-                    empty ? null : h('button', { class: 'block-addhint label-md', type: 'button', onclick: () => actions.openBlockMenu({ mode: 'end' }) }, `+ ${t('inspector.addHint')}`),
+                    // ALWAYS rendered, even while a block is being edited.
+                    // createSurfaceDomState restores focus positionally with a
+                    // signature check, so a field that comes and goes changes
+                    // the field list's shape between renders and the restore
+                    // lands on the wrong element — which, mid-typing, means the
+                    // next keystroke goes somewhere the writer did not look.
+                    renderComposer(item),
                     endMenu,
                 ),
             )
